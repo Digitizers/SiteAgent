@@ -1,6 +1,6 @@
 <?php
 /**
- * Security handler for Aura Worker.
+ * Security handler for SiteAgent.
  *
  * Implements three layers of authentication:
  * 1. WordPress Application Password (Basic Auth)
@@ -132,7 +132,7 @@ class Aura_Worker_Security {
 		if ( empty( $stored_token ) ) {
 			return new WP_Error(
 				'aura_not_configured',
-				__( 'Aura Worker is not configured. Please set a site token.', 'digitizer-site-worker' ),
+				__( 'SiteAgent is not configured. Please set a site token.', 'digitizer-site-worker' ),
 				array( 'status' => 500 )
 			);
 		}

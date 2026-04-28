@@ -1,4 +1,4 @@
-=== Digitizer Site Worker for Aura ===
+=== SiteAgent for Aura ===
 Contributors: benkalsky
 Tags: wordpress management, remote updates, site monitoring, maintenance, dashboard
 Requires at least: 6.2
@@ -12,7 +12,7 @@ Connect your WordPress site to the Aura dashboard for remote monitoring, plugin 
 
 == Description ==
 
-**Digitizer Site Worker** is the bridge between your WordPress sites and the [Aura infrastructure dashboard](https://my-aura.app) — a unified control center for teams managing multiple WordPress sites alongside servers, CDN, and DNS.
+**SiteAgent** is the bridge between your WordPress sites and the [Aura infrastructure dashboard](https://my-aura.app) — a unified control center for teams managing multiple WordPress sites alongside servers, CDN, and DNS.
 
 Install this plugin on any WordPress site to unlock remote management capabilities directly from Aura — no SSH, no wp-admin juggling, no manual logins.
 
@@ -28,7 +28,7 @@ Install this plugin on any WordPress site to unlock remote management capabiliti
 
 = How It Works =
 
-After activation, the plugin registers a set of secure REST API endpoints under `/wp-json/aura/v1/`. You copy the auto-generated Site Token from **Tools → Digitizer Site Worker** and paste it into your Aura dashboard. From that point, Aura can communicate with your site to pull health data and push updates.
+After activation, the plugin registers a set of secure REST API endpoints under `/wp-json/aura/v1/`. You copy the auto-generated Site Token from **Tools → SiteAgent** and paste it into your Aura dashboard. From that point, Aura can communicate with your site to pull health data and push updates.
 
 = Security =
 
@@ -54,7 +54,7 @@ All endpoints live under `/wp-json/aura/v1/`:
 
 Aura is a full-stack operations dashboard by [Digitizer](https://digitizer.studio) that brings servers, applications, DNS zones, and CDN pull zones from Cloudways, Hostinger VPS, Cloudflare, and Bunny.net into a single unified interface.
 
-Digitizer Site Worker extends that reach into every WordPress installation — so you can manage your entire infrastructure, including WordPress sites, from one place.
+SiteAgent extends that reach into every WordPress installation — so you can manage your entire infrastructure, including WordPress sites, from one place.
 
 = Free to Use =
 
@@ -63,8 +63,8 @@ The plugin is completely free and open source (GPLv2+). You need a free or paid 
 = Links =
 
 * [Aura Dashboard](https://my-aura.app)
-* [Documentation](https://my-aura.app/auraworker)
-* [GitHub Repository](https://github.com/Digitizers/AuraWorker)
+* [Documentation](https://my-aura.app/siteagent)
+* [GitHub Repository](https://github.com/Digitizers/SiteAgent)
 * [Digitizer](https://digitizer.studio)
 
 == Installation ==
@@ -72,9 +72,9 @@ The plugin is completely free and open source (GPLv2+). You need a free or paid 
 = Via WordPress Admin (Recommended) =
 
 1. Go to **Plugins → Add New** in your WordPress admin.
-2. Search for **Digitizer Site Worker**.
+2. Search for **SiteAgent**.
 3. Click **Install Now**, then **Activate**.
-4. Navigate to **Tools → Digitizer Site Worker**.
+4. Navigate to **Tools → SiteAgent**.
 5. Copy the generated **Site Token**.
 6. In your Aura dashboard, add a new WordPress site and paste the token.
 
@@ -87,7 +87,7 @@ The plugin is completely free and open source (GPLv2+). You need a free or paid 
 1. Download the plugin ZIP from WordPress.org.
 2. Go to **Plugins → Add New → Upload Plugin**.
 3. Upload the ZIP and click **Install Now**, then **Activate**.
-4. Navigate to **Tools → Digitizer Site Worker** to get your Site Token.
+4. Navigate to **Tools → SiteAgent** to get your Site Token.
 
 == Frequently Asked Questions ==
 
@@ -125,7 +125,7 @@ The Site Token is stored as a WordPress option (`aura_site_token`) in your datab
 
 = Can I regenerate the Site Token? =
 
-Yes. You can regenerate a new token from **Tools → Digitizer Site Worker**. After regenerating, update the token in your Aura dashboard to maintain the connection.
+Yes. You can regenerate a new token from **Tools → SiteAgent**. After regenerating, update the token in your Aura dashboard to maintain the connection.
 
 = How do I disconnect a site from Aura? =
 
@@ -137,11 +137,11 @@ No. Aura uses WordPress Application Passwords, not your main admin password. App
 
 = Is the plugin open source? =
 
-Yes. Digitizer Site Worker is open source under the GPLv2 or later license. The source code is available on [GitHub](https://github.com/Digitizers/AuraWorker).
+Yes. SiteAgent is open source under the GPLv2 or later license. The source code is available on [GitHub](https://github.com/Digitizers/SiteAgent).
 
 == Screenshots ==
 
-1. The Digitizer Site Worker settings page in WordPress admin (Tools → Digitizer Site Worker) showing the Site Token and connection status.
+1. The SiteAgent settings page in WordPress admin (Tools → SiteAgent) showing the Site Token and connection status.
 2. The Aura dashboard showing connected WordPress sites with health status, WordPress version, PHP version, and available updates.
 3. Remote plugin update in progress from the Aura dashboard — select a plugin and update it with a single click.
 
@@ -166,7 +166,7 @@ Yes. Digitizer Site Worker is open source under the GPLv2 or later license. The 
 * Initial release.
 * REST API endpoints for site health, available updates, core/plugin/theme/translation/database updates.
 * Auto-generated Site Token.
-* Admin page under Tools → Digitizer Site Worker.
+* Admin page under Tools → SiteAgent.
 * Zero frontend performance impact.
 
 == Upgrade Notice ==

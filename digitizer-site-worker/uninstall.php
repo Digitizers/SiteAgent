@@ -1,6 +1,6 @@
 <?php
 /**
- * Uninstall handler for Aura Worker.
+ * Uninstall handler for SiteAgent.
  *
  * Cleans up plugin options when uninstalled.
  *

@@ -1,6 +1,6 @@
 <?php
 /**
- * Backup handler for Aura Worker.
+ * Backup handler for SiteAgent.
  *
  * Triggers a pre-update backup via the Aura Dashboard relay first,
  * with UpdraftPlus as a fallback when available.

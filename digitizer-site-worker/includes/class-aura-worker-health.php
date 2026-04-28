@@ -1,6 +1,6 @@
 <?php
 /**
- * Health check class for Aura Worker.
+ * Health check class for SiteAgent.
  *
  * Runs HTTP, PHP error log, white-screen, and database checks.
  *

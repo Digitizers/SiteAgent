@@ -1,7 +1,7 @@
 <?php
 /**
- * Plugin Name:       Digitizer Site Worker for Aura
- * Plugin URI:        https://my-aura.app/auraworker
+ * Plugin Name:       SiteAgent for Aura
+ * Plugin URI:        https://my-aura.app/siteagent
  * Description:       Remote site management agent for Aura dashboard. Enables secure updates, health monitoring, and maintenance operations via REST API.
  * Version:           2.0.0
  * Requires at least: 6.2

@@ -1,4 +1,4 @@
-# CLAUDE.md — Digitizer Site Worker for Aura
+# CLAUDE.md — SiteAgent for Aura
 
 This file provides context and conventions for AI assistants working in this repository.
 
@@ -6,7 +6,7 @@ This file provides context and conventions for AI assistants working in this rep
 
 ## Project Overview
 
-**Digitizer Site Worker for Aura** is a WordPress plugin that acts as a remote site management agent for the [Aura Infrastructure Hub](https://my-aura.app). It exposes secure REST API endpoints that allow Aura to monitor site health, apply updates (core, plugins, themes, translations), and perform database maintenance.
+**SiteAgent for Aura** is a WordPress plugin that acts as a remote site management agent for the [Aura Infrastructure Hub](https://my-aura.app). It exposes secure REST API endpoints that allow Aura to monitor site health, apply updates (core, plugins, themes, translations), and perform database maintenance.
 
 - **Language:** PHP 7.4+
 - **Platform:** WordPress 6.2+
@@ -185,11 +185,11 @@ There are currently no automated tests. When adding tests:
 
 ## Relationship to Aura
 
-Digitizer Site Worker for Aura is the WordPress-side companion to the [Aura Infrastructure Hub](https://my-aura.app) (Next.js dashboard). Aura manages cloud resources across Cloudways, Hostinger VPS, Cloudflare, and Bunny.net. Digitizer Site Worker for Aura extends that reach into individual WordPress installations, allowing Aura to monitor and update sites remotely.
+SiteAgent for Aura is the WordPress-side companion to the [Aura Infrastructure Hub](https://my-aura.app) (Next.js dashboard). Aura manages cloud resources across Cloudways, Hostinger VPS, Cloudflare, and Bunny.net. SiteAgent for Aura extends that reach into individual WordPress installations, allowing Aura to monitor and update sites remotely.
 
 The communication flow is:
 ```
-Aura Dashboard → HTTP REST → WordPress (Digitizer Site Worker for Aura plugin)
+Aura Dashboard → HTTP REST → WordPress (SiteAgent for Aura plugin)
                   ↑
           Application Password + X-Aura-Token header
 ```

@@ -1,6 +1,6 @@
 <?php
 /**
- * MCP (AI Agent Tools) REST router for Aura Worker.
+ * MCP (AI Agent Tools) REST router for SiteAgent.
  *
  * Exposes three endpoints under the aura/mcp namespace:
  *   POST /aura/mcp/tools/list    — list available tools

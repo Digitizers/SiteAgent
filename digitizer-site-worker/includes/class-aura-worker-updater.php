@@ -1,6 +1,6 @@
 <?php
 /**
- * Update handler for Aura Worker.
+ * Update handler for SiteAgent.
  *
  * Handles WordPress core, plugin, theme, translation, and database updates
  * using WordPress internal Upgrader classes.
@@ -152,7 +152,7 @@ class Aura_Worker_Updater {
 	}
 
 	/**
-	 * Self-update AuraWorker from a zip URL (e.g. GitHub release asset).
+	 * Self-update SiteAgent from a zip URL (e.g. GitHub release asset).
 	 *
 	 * Downloads the zip, overwrites the current plugin files, and reactivates.
 	 *
@@ -207,7 +207,7 @@ class Aura_Worker_Updater {
 			'success'      => true,
 			'message'      => sprintf(
 				/* translators: %1$s: old version, %2$s: new version */
-				__( 'AuraWorker updated from %1$s to %2$s.', 'digitizer-site-worker' ),
+				__( 'SiteAgent updated from %1$s to %2$s.', 'digitizer-site-worker' ),
 				$old_version,
 				$new_version
 			),
@@ -634,7 +634,7 @@ class Aura_Worker_Updater {
 		 * Filter the plugin migration registry.
 		 *
 		 * Allows third-party plugins to register their own database
-		 * migration handlers without modifying AuraWorker core.
+		 * migration handlers without modifying SiteAgent core.
 		 *
 		 * @param array $registry Keyed array of migration entries.
 		 */

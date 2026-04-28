@@ -5,7 +5,7 @@
   <img src="assets/aura_logotype.png" alt="Aura" width="140" />
 </p>
 
-<h3 align="center">Digitizer Site Worker for Aura</h3>
+<h3 align="center">SiteAgent for Aura</h3>
 
 <p align="center">
   Official WordPress agent for <a href="https://my-aura.app"><strong>Aura</strong></a>
@@ -23,9 +23,9 @@
 
 ---
 
-## What is Digitizer Site Worker?
+## What is SiteAgent?
 
-Digitizer Site Worker is the official remote management agent for the [Aura Infrastructure Hub](https://my-aura.app). It connects your WordPress sites to your Aura dashboard for seamless remote management, monitoring, and updates from a single centralized interface.
+SiteAgent is the official remote management agent for the [Aura Infrastructure Hub](https://my-aura.app). It connects your WordPress sites to your Aura dashboard for seamless remote management, monitoring, and updates from a single centralized interface.
 
 ---
 
@@ -45,7 +45,7 @@ Digitizer Site Worker is the official remote management agent for the [Aura Infr
 
 ### Zero Frontend Impact
 
-Digitizer Site Worker is built for performance. It only registers REST API routes and has **zero impact** on your site's frontend performance — no extra scripts, styles, or queries on page load.
+SiteAgent is built for performance. It only registers REST API routes and has **zero impact** on your site's frontend performance — no extra scripts, styles, or queries on page load.
 
 ---
 
@@ -53,7 +53,7 @@ Digitizer Site Worker is built for performance. It only registers REST API route
 
 ### Via WordPress.org (Recommended)
 1. Go to **Plugins > Add New** in your WordPress admin.
-2. Search for **Digitizer Site Worker**.
+2. Search for **SiteAgent**.
 3. Click **Install Now** and then **Activate**.
 
 ### Via WP-CLI
@@ -66,10 +66,10 @@ wp plugin install digitizer-site-worker --activate
 The v2 update engine and MCP tools are currently in beta. To install:
 
 ```bash
-wp plugin install https://github.com/Digitizers/AuraWorker/releases/download/v2.0.0-beta.2/digitizer-site-worker-2.0.0-beta.2.zip --activate
+wp plugin install https://github.com/Digitizers/SiteAgent/releases/download/v2.0.0-beta.2/digitizer-site-worker-2.0.0-beta.2.zip --activate
 ```
 
-Or download the zip from the [latest pre-release](https://github.com/Digitizers/AuraWorker/releases) and upload via **Plugins → Add New → Upload Plugin**.
+Or download the zip from the [latest pre-release](https://github.com/Digitizers/SiteAgent/releases) and upload via **Plugins → Add New → Upload Plugin**.
 
 ---
 
@@ -138,7 +138,7 @@ Built-in MCP tools: `get_site_context`, `update_plugin_safely`, `cleanup_orphane
 
 ### 1.3.3
 - **Official WordPress.org Launch:** Now available in the official plugin repository.
-- GitHub Release: [v1.3.3](https://github.com/Digitizers/AuraWorker/releases/tag/v1.3.3)
+- GitHub Release: [v1.3.3](https://github.com/Digitizers/SiteAgent/releases/tag/v1.3.3)
 
 ### 1.3.0
 - Rebranded from "AuraWorker" to "Digitizer Site Worker for Aura"

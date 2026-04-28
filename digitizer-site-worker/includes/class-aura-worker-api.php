@@ -1,6 +1,6 @@
 <?php
 /**
- * REST API handler for Aura Worker.
+ * REST API handler for SiteAgent.
  *
  * Registers and handles all /wp-json/aura/v1/ endpoints.
  *
@@ -153,7 +153,7 @@ class Aura_Worker_API {
 			'permission_callback' => array( $this->security, 'check_read_permission' ),
 		) );
 
-		// Self-update AuraWorker from a zip URL.
+		// Self-update SiteAgent from a zip URL.
 		register_rest_route( self::NAMESPACE, '/self-update', array(
 			'methods'             => 'POST',
 			'callback'            => array( $this, 'self_update' ),
@@ -165,9 +165,9 @@ class Aura_Worker_API {
 					'sanitize_callback' => 'esc_url_raw',
 					'validate_callback' => function( $value ) {
 						return filter_var( $value, FILTER_VALIDATE_URL )
-							&& preg_match( '#^https://github\.com/Digitizers/AuraWorker/releases/download/.+\.zip$#', $value );
+							&& preg_match( '#^https://github\.com/Digitizers/SiteAgent/releases/download/.+\.zip$#', $value );
 					},
-					'description'       => __( 'GitHub release zip URL for AuraWorker.', 'digitizer-site-worker' ),
+					'description'       => __( 'GitHub release zip URL for SiteAgent.', 'digitizer-site-worker' ),
 				),
 			),
 		) );
@@ -419,7 +419,7 @@ class Aura_Worker_API {
 	/**
 	 * POST /aura/v1/self-update
 	 *
-	 * Updates the AuraWorker plugin from a GitHub release zip URL.
+	 * Updates the SiteAgent plugin from a GitHub release zip URL.
 	 *
 	 * @param WP_REST_Request $request The request object.
 	 * @return WP_REST_Response Update result with version info.

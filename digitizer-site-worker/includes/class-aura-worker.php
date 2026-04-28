@@ -68,8 +68,8 @@ class Aura_Worker {
 			return;
 		}
 		wp_add_privacy_policy_content(
-			'Digitizer Site Worker',
-			wp_kses_post( wpautop( __( 'This site uses the AuraWorker plugin to enable remote management from the Aura dashboard (my-aura.app). When connected, the Aura dashboard may access site health information including WordPress version, PHP version, installed plugins and themes, and database metadata. No personal user data is collected or transmitted by this plugin.', 'digitizer-site-worker' ) ) )
+			'SiteAgent',
+			wp_kses_post( wpautop( __( 'This site uses the SiteAgent plugin to enable remote management from the Aura dashboard (my-aura.app). When connected, the Aura dashboard may access site health information including WordPress version, PHP version, installed plugins and themes, and database metadata. No personal user data is collected or transmitted by this plugin.', 'digitizer-site-worker' ) ) )
 		);
 	}
 
@@ -78,8 +78,8 @@ class Aura_Worker {
 	 */
 	public function add_settings_page() {
 		add_options_page(
-			__( 'Digitizer Site Worker', 'digitizer-site-worker' ),
-			__( 'Digitizer Site Worker', 'digitizer-site-worker' ),
+			__( 'SiteAgent', 'digitizer-site-worker' ),
+			__( 'SiteAgent', 'digitizer-site-worker' ),
 			'manage_options',
 			'digitizer-site-worker',
 			array( $this, 'render_settings_page' )

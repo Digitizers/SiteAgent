@@ -1,6 +1,6 @@
 <?php
 /**
- * MCP Tool Registry for Aura Worker.
+ * MCP Tool Registry for SiteAgent.
  *
  * Loads all tool classes from includes/tools/ and provides list, get, and execute methods.
  *

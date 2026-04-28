@@ -1,6 +1,6 @@
 <?php
 /**
- * Magic Link onboarding handler for Aura Worker.
+ * Magic Link onboarding handler for SiteAgent.
  *
  * Provides a "Connect to Aura" button in the admin settings page and handles
  * the magic link flow: generating a temporary token, posting it to the Aura

@@ -1,6 +1,6 @@
 <?php
 /**
- * Plugin rollback class for Aura Worker.
+ * Plugin rollback class for SiteAgent.
  *
  * Creates zip backups of plugin directories and restores them on demand.
  *
