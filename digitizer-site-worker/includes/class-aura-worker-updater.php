@@ -746,15 +746,43 @@ class Aura_Worker_Updater {
 		require_once ABSPATH . 'wp-admin/includes/upgrade.php';
 
 		$db_version_before = get_option( 'db_version' );
-		wp_upgrade();
+
+		// wp_upgrade() has no return value, so wrap it and verify the result by
+		// comparing the stored db_version against the target $wp_db_version.
+		try {
+			wp_upgrade();
+		} catch ( \Throwable $e ) {
+			return array(
+				'success'   => false,
+				'error'     => sprintf(
+					/* translators: %s: Error message */
+					__( 'Database upgrade failed: %s', 'digitizer-site-worker' ),
+					$e->getMessage()
+				),
+				'db_before' => $db_version_before,
+			);
+		}
+
 		$db_version_after = get_option( 'db_version' );
 
+		// $wp_db_version is the target schema version WordPress expects.
+		$target = isset( $GLOBALS['wp_db_version'] ) ? (int) $GLOBALS['wp_db_version'] : null;
+		if ( null !== $target && (int) $db_version_after !== $target ) {
+			return array(
+				'success'   => false,
+				'error'     => __( 'Database upgrade did not reach the expected version.', 'digitizer-site-worker' ),
+				'db_before' => $db_version_before,
+				'db_after'  => $db_version_after,
+				'db_target' => $target,
+			);
+		}
+
 		return array(
-			'success'    => true,
-			'message'    => __( 'Database tables updated.', 'digitizer-site-worker' ),
-			'db_before'  => $db_version_before,
-			'db_after'   => $db_version_after,
-			'changed'    => $db_version_before !== $db_version_after,
+			'success'   => true,
+			'message'   => __( 'Database tables updated.', 'digitizer-site-worker' ),
+			'db_before' => $db_version_before,
+			'db_after'  => $db_version_after,
+			'changed'   => $db_version_before !== $db_version_after,
 		);
 	}
 }

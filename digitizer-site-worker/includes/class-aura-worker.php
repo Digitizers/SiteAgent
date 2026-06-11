@@ -57,7 +57,31 @@ class Aura_Worker {
 			add_action( 'admin_menu', array( $this, 'add_settings_page' ) );
 			add_action( 'admin_init', array( $this, 'register_settings' ) );
 			add_action( 'admin_init', array( $this, 'add_privacy_policy_content' ) );
+			add_action( 'wp_ajax_aura_worker_regenerate_token', array( $this, 'ajax_regenerate_token' ) );
 		}
+	}
+
+	/**
+	 * AJAX handler: rotate the site token.
+	 *
+	 * Generates a new raw token, stores only its hash, stashes the raw value in
+	 * a short-lived one-time reveal transient for the admin to copy, and clears
+	 * the dashboard connection (the old token is now invalid and the site must
+	 * be reconnected with the new one).
+	 */
+	public function ajax_regenerate_token() {
+		check_ajax_referer( 'aura_worker_regenerate', 'nonce' );
+
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_send_json_error( array( 'message' => __( 'Insufficient permissions.', 'digitizer-site-worker' ) ), 403 );
+		}
+
+		$raw = wp_generate_password( 48, false );
+		update_option( 'aura_worker_site_token', Aura_Worker_Security::hash_token( $raw ) );
+		delete_option( 'aura_worker_dashboard_url' );
+		set_transient( 'aura_worker_token_reveal', $raw, 2 * MINUTE_IN_SECONDS );
+
+		wp_send_json_success( array( 'token' => $raw ) );
 	}
 
 	/**
@@ -180,14 +204,71 @@ class Aura_Worker {
 	 * Render the token field.
 	 */
 	public function render_token_field() {
-		$token = get_option( 'aura_worker_site_token', '' );
+		$configured = '' !== (string) get_option( 'aura_worker_site_token', '' );
+		$reveal     = get_transient( 'aura_worker_token_reveal' );
+		if ( false !== $reveal ) {
+			// Show the raw token exactly once, then burn it.
+			delete_transient( 'aura_worker_token_reveal' );
+		}
+		$nonce = wp_create_nonce( 'aura_worker_regenerate' );
 		?>
-		<input type="text" name="aura_worker_site_token"
-			   value="<?php echo esc_attr( $token ); ?>"
-			   class="regular-text" readonly>
+		<?php if ( false !== $reveal ) : ?>
+			<input type="text" value="<?php echo esc_attr( $reveal ); ?>" class="regular-text code" readonly onclick="this.select();">
+			<p class="description" style="color:#b26a00;">
+				<strong><?php esc_html_e( 'Copy this token now — it will not be shown again.', 'digitizer-site-worker' ); ?></strong>
+				<?php esc_html_e( 'Paste it into your Aura dashboard to connect this site.', 'digitizer-site-worker' ); ?>
+			</p>
+		<?php else : ?>
+			<p>
+				<?php if ( $configured ) : ?>
+					<span class="dashicons dashicons-yes-alt" style="color:#2e7d32;"></span>
+					<?php esc_html_e( 'A site token is configured (stored hashed and hidden for security).', 'digitizer-site-worker' ); ?>
+				<?php else : ?>
+					<span class="dashicons dashicons-warning" style="color:#b26a00;"></span>
+					<?php esc_html_e( 'No site token set yet. Connect to Aura or regenerate a token below.', 'digitizer-site-worker' ); ?>
+				<?php endif; ?>
+			</p>
+		<?php endif; ?>
+
+		<button type="button" id="aura-regen-btn" class="button"
+				data-nonce="<?php echo esc_attr( $nonce ); ?>">
+			<?php esc_html_e( 'Regenerate Token', 'digitizer-site-worker' ); ?>
+		</button>
+		<span id="aura-regen-status" style="margin-left:10px;"></span>
 		<p class="description">
-			<?php esc_html_e( 'Auto-generated token. Copy this to your Aura dashboard when connecting this site.', 'digitizer-site-worker' ); ?>
+			<?php esc_html_e( 'Regenerating invalidates the current token and disconnects this site from Aura until you reconnect with the new token.', 'digitizer-site-worker' ); ?>
 		</p>
+		<script>
+		(function() {
+			var btn = document.getElementById('aura-regen-btn');
+			if ( ! btn ) { return; }
+			btn.addEventListener('click', function() {
+				if ( ! window.confirm(<?php echo wp_json_encode( __( 'Regenerate the site token? The current connection to Aura will stop working until you reconnect.', 'digitizer-site-worker' ) ); ?>) ) { return; }
+				var status = document.getElementById('aura-regen-status');
+				btn.disabled = true;
+				status.textContent = <?php echo wp_json_encode( __( 'Regenerating…', 'digitizer-site-worker' ) ); ?>;
+				var data = new FormData();
+				data.append('action', 'aura_worker_regenerate_token');
+				data.append('nonce', btn.getAttribute('data-nonce'));
+				fetch(<?php echo wp_json_encode( admin_url( 'admin-ajax.php' ) ); ?>, { method: 'POST', body: data })
+					.then(function(r) { return r.json(); })
+					.then(function(res) {
+						if ( res.success ) {
+							window.location.reload();
+						} else {
+							btn.disabled = false;
+							status.style.color = '#c62828';
+							status.textContent = (res.data && res.data.message) ? res.data.message : 'Error';
+						}
+					})
+					.catch(function() {
+						btn.disabled = false;
+						status.style.color = '#c62828';
+						status.textContent = <?php echo wp_json_encode( __( 'Network error. Please try again.', 'digitizer-site-worker' ) ); ?>;
+					});
+			});
+		})();
+		</script>
 		<?php
 	}
 

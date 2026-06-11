@@ -17,6 +17,39 @@ if ( ! defined( 'ABSPATH' ) ) {
 class Aura_Worker_Security {
 
 	/**
+	 * Max failed token attempts per client IP before requests are throttled.
+	 */
+	const MAX_TOKEN_FAILURES = 10;
+
+	/**
+	 * Window (seconds) over which failed token attempts are counted.
+	 */
+	const TOKEN_FAILURE_WINDOW = 900; // 15 minutes.
+
+	/**
+	 * Hash a raw site token for storage / comparison.
+	 *
+	 * Tokens are stored as a SHA-256 hash so a database leak does not expose a
+	 * usable bearer credential. The Aura dashboard holds the only raw copy.
+	 *
+	 * @param string $raw Raw token value.
+	 * @return string 64-char lowercase hex SHA-256 digest.
+	 */
+	public static function hash_token( $raw ) {
+		return hash( 'sha256', (string) $raw );
+	}
+
+	/**
+	 * Whether a stored value is already a SHA-256 hash (vs a legacy raw token).
+	 *
+	 * @param string $value Stored token value.
+	 * @return bool
+	 */
+	private function is_hashed( $value ) {
+		return (bool) preg_match( '/^[0-9a-f]{64}$/', (string) $value );
+	}
+
+	/**
 	 * Validate an incoming REST API request.
 	 *
 	 * @param WP_REST_Request $request The incoming request.
@@ -137,7 +170,29 @@ class Aura_Worker_Security {
 			);
 		}
 
-		if ( empty( $provided_token ) || ! hash_equals( $stored_token, $provided_token ) ) {
+		// Throttle brute-force attempts before doing any comparison.
+		$throttle = $this->check_token_throttle();
+		if ( is_wp_error( $throttle ) ) {
+			return $throttle;
+		}
+
+		$valid = false;
+		if ( '' !== $provided_token ) {
+			if ( $this->is_hashed( $stored_token ) ) {
+				// Modern path: stored value is a SHA-256 hash of the token.
+				$valid = hash_equals( $stored_token, self::hash_token( $provided_token ) );
+			} else {
+				// Legacy path: stored value is a raw token from an older version.
+				// Compare raw, then opportunistically migrate to a stored hash.
+				$valid = hash_equals( $stored_token, $provided_token );
+				if ( $valid ) {
+					update_option( 'aura_worker_site_token', self::hash_token( $provided_token ) );
+				}
+			}
+		}
+
+		if ( ! $valid ) {
+			$this->record_token_failure();
 			return new WP_Error(
 				'aura_invalid_token',
 				__( 'Invalid or missing Aura token.', 'digitizer-site-worker' ),
@@ -145,7 +200,45 @@ class Aura_Worker_Security {
 			);
 		}
 
+		// Successful auth clears the failure counter for this IP.
+		delete_transient( $this->token_failure_key() );
+
 		return true;
+	}
+
+	/**
+	 * Transient key for tracking failed token attempts from the current IP.
+	 *
+	 * @return string
+	 */
+	private function token_failure_key() {
+		return 'aura_worker_tokfail_' . md5( $this->get_client_ip() );
+	}
+
+	/**
+	 * Block the request if this IP has exceeded the failed-attempt threshold.
+	 *
+	 * @return bool|WP_Error True if under the limit, WP_Error (429) if throttled.
+	 */
+	private function check_token_throttle() {
+		$failures = (int) get_transient( $this->token_failure_key() );
+		if ( $failures >= self::MAX_TOKEN_FAILURES ) {
+			return new WP_Error(
+				'aura_too_many_attempts',
+				__( 'Too many failed authentication attempts. Try again later.', 'digitizer-site-worker' ),
+				array( 'status' => 429 )
+			);
+		}
+		return true;
+	}
+
+	/**
+	 * Increment the failed-attempt counter for the current IP.
+	 */
+	private function record_token_failure() {
+		$key      = $this->token_failure_key();
+		$failures = (int) get_transient( $key );
+		set_transient( $key, $failures + 1, self::TOKEN_FAILURE_WINDOW );
 	}
 
 	/**

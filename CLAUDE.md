@@ -40,7 +40,14 @@ digitizer-site-worker/                                      # Repo root (develop
         ├── class-aura-worker.php            # Main orchestrator — admin menu, settings, wiring
         ├── class-aura-worker-api.php        # REST API route registration and handlers
         ├── class-aura-worker-updater.php    # Update operations (core, plugins, themes, translations, DB)
-        └── class-aura-worker-security.php   # Three-layer authentication and permission callbacks
+        ├── class-aura-worker-security.php   # Three-layer authentication and permission callbacks
+        ├── class-aura-worker-health.php     # Site health report (PHP/DB/disk, error-log tail)
+        ├── class-aura-worker-rollback.php   # Zip backup + restore of plugin directories
+        ├── class-aura-worker-backup.php     # Backup helpers
+        ├── class-aura-worker-magic-link.php # Short-lived one-time admin login links
+        ├── class-aura-worker-mcp.php        # MCP server + tool registration
+        ├── class-aura-worker-tools.php      # MCP tool base + registry
+        └── tools/                           # Individual MCP tools (site-context, update-plugin-safely, ...)
 ```
 
 To create an installable ZIP: `cd` to the repo root and run `zip -r digitizer-site-worker.zip digitizer-site-worker/`.
@@ -53,17 +60,23 @@ To create an installable ZIP: `cd` to the repo root and run `zip -r digitizer-si
 
 | Class | File | Role |
 |-------|------|------|
-| `Digitizer_Site_Worker` | `digitizer-site-worker/includes/class-digitizer-site-worker.php` | Orchestrator — creates Security and API instances, registers admin menu and settings |
-| `Digitizer_Site_Worker_API` | `digitizer-site-worker/includes/class-digitizer-site-worker-api.php` | Registers all REST routes under `aura/v1`, handles request/response logic |
-| `Digitizer_Site_Worker_Updater` | `digitizer-site-worker/includes/class-digitizer-site-worker-updater.php` | Wraps WordPress Upgrader classes for core/plugin/theme/translation/DB updates |
-| `Digitizer_Site_Worker_Security` | `digitizer-site-worker/includes/class-digitizer-site-worker-security.php` | Implements IP whitelist, site token verification, and capability checks |
+| `Aura_Worker` | `includes/class-aura-worker.php` | Orchestrator — creates Security and API instances, registers admin menu and settings |
+| `Aura_Worker_API` | `includes/class-aura-worker-api.php` | Registers all REST routes under `aura/v1`, handles request/response logic |
+| `Aura_Worker_Updater` | `includes/class-aura-worker-updater.php` | Wraps WordPress Upgrader classes for core/plugin/theme/translation/DB updates |
+| `Aura_Worker_Security` | `includes/class-aura-worker-security.php` | Implements IP whitelist, domain whitelist, site token verification, and capability checks |
+| `Aura_Worker_Health` | `includes/class-aura-worker-health.php` | Builds site health report (PHP/DB/disk, recent error-log tail) |
+| `Aura_Worker_Rollback` | `includes/class-aura-worker-rollback.php` | Zip backup + restore of plugin directories |
+| `Aura_Worker_Backup` | `includes/class-aura-worker-backup.php` | Backup helpers |
+| `Aura_Worker_Magic_Link` | `includes/class-aura-worker-magic-link.php` | Short-lived one-time admin login links |
+| `Aura_Worker_MCP` | `includes/class-aura-worker-mcp.php` | MCP server endpoint + tool registration |
+| `Aura_Worker_Tools` | `includes/class-aura-worker-tools.php` | MCP tool base class (`Aura_Tool_Base`) + registry; individual tools live in `includes/tools/` |
 
 ### Initialization Flow
 
-1. `digitizer-site-worker.php` defines constants and loads all class files
-2. `digitizer_site_worker_init()` runs on `plugins_loaded` — creates `Digitizer_Site_Worker` and calls `init()`
-3. `init()` creates `Digitizer_Site_Worker_Security`, passes it to `Digitizer_Site_Worker_API`
-4. `Digitizer_Site_Worker_API` internally creates its own `Digitizer_Site_Worker_Updater` instance
+1. `digitizer-site-worker.php` defines `AURA_WORKER_*` constants and loads all class files
+2. `aura_worker_init()` runs on `plugins_loaded` — creates `Aura_Worker` and calls `init()`
+3. `init()` creates `Aura_Worker_Security`, passes it to `Aura_Worker_API`
+4. `Aura_Worker_API` internally creates its own `Aura_Worker_Updater` instance
 5. REST routes are registered on `rest_api_init`
 6. Admin settings page is registered on `admin_menu` / `admin_init` (admin only)
 
@@ -73,8 +86,16 @@ Every REST request passes through three checks in order:
 
 1. **IP Whitelist** (`check_ip_whitelist`) — If IPs are configured in settings, the client IP must match. Uses `REMOTE_ADDR` only (proxy headers are not trusted).
 2. **Domain Whitelist** (`check_domain_whitelist`) — If domains are configured, the request's `Origin` or `Referer` header must match.
-3. **Aura Site Token** (`check_aura_token`) — `X-Aura-Token` header must match the stored token. Comparison uses `hash_equals()` for timing safety.
-4. **WordPress Capability** — All endpoints require `manage_options`.
+3. **Aura Site Token** (`check_aura_token`) — `X-Aura-Token` header is SHA-256 hashed and compared with `hash_equals()` against the stored hash (timing-safe). The raw token is never stored. Per-IP brute-force throttling blocks after `MAX_TOKEN_FAILURES` failures within `TOKEN_FAILURE_WINDOW`. Legacy plaintext tokens are migrated to a hash on first successful auth.
+4. **WordPress Capability** — All endpoints require `manage_options` (or the relevant `update_*` capability).
+
+### Magic-Link Connect Signing
+
+The public `POST /connect` endpoint is protected by an HMAC handshake instead of being open:
+
+1. When an admin clicks **Connect to Aura**, the plugin mints a one-time `connect_secret`, stores it in the `aura_magic_<id>` transient, and sends it to the dashboard alongside `magic_id` / `site_url`.
+2. The dashboard issues the site token and calls `/connect` with `{ magic_id, token, dashboard_url, timestamp, signature }`, where `signature = HMAC-SHA256(connect_secret, magic_id\ntoken\ndashboard_url\ntimestamp)`.
+3. The plugin re-derives the signature (`Aura_Worker_Magic_Link::sign_connect_payload()`), rejects stale timestamps (±5 min) and bad signatures, then stores only the **hash** of the token. The dashboard keeps the raw copy.
 
 ---
 
@@ -105,11 +126,12 @@ All routes are under `/wp-json/aura/v1/`.
 
 | Option Key | Description |
 |------------|-------------|
-| `digitizer_site_worker_site_token` | 32-char alphanumeric token for API auth |
-| `digitizer_site_worker_allowed_ips` | Newline-separated IP whitelist (empty = allow all) |
-| `digitizer_site_worker_allowed_domains` | Newline-separated domain whitelist (empty = allow all) |
-| `digitizer_site_worker_activated` | Activation timestamp |
-| `digitizer_site_worker_version` | Plugin version at activation |
+| `aura_worker_site_token` | 32-char alphanumeric token for API auth |
+| `aura_worker_allowed_ips` | Newline-separated IP whitelist (empty = allow all) |
+| `aura_worker_allowed_domains` | Newline-separated domain whitelist (empty = allow all) |
+| `aura_worker_dashboard_url` | Aura dashboard base URL (magic-link / callback target) |
+| `aura_worker_activated` | Activation timestamp |
+| `aura_worker_version` | Plugin version at activation |
 
 All options are cleaned up in `uninstall.php`.
 
@@ -129,11 +151,12 @@ All options are cleaned up in `uninstall.php`.
 
 | Kind | Convention | Example |
 |------|-----------|---------|
-| Classes | `Digitizer_Site_Worker_*` prefix | `Digitizer_Site_Worker_Security` |
-| Files | `class-digitizer-site-worker-*.php` | `class-digitizer-site-worker-api.php` |
-| Functions (global) | `digitizer_site_worker_*` prefix | `digitizer_site_worker_activate` |
-| Options | `digitizer_site_worker_*` prefix | `digitizer_site_worker_site_token` |
-| Constants | `DIGITIZER_SITE_WORKER_*` | `DIGITIZER_SITE_WORKER_VERSION` |
+| Classes | `Aura_Worker_*` prefix | `Aura_Worker_Security` |
+| MCP tool classes | `Aura_Tool_*` (extend `Aura_Tool_Base`) | `Aura_Tool_Site_Context` |
+| Files | `class-aura-worker-*.php` | `class-aura-worker-api.php` |
+| Functions (global) | `aura_worker_*` prefix | `aura_worker_activate` |
+| Options | `aura_worker_*` prefix | `aura_worker_site_token` |
+| Constants | `AURA_WORKER_*` | `AURA_WORKER_VERSION` |
 | REST namespace | `aura/v1` | — |
 | Settings group | `aura_worker_settings` | — |
 
@@ -163,12 +186,12 @@ All options are cleaned up in `uninstall.php`.
 
 ## Known Issues
 
-Most issues from the initial code review were fixed in v1.2.0. Remaining items:
+Most issues from the initial code review were fixed in v1.2.0 and v2.0.0. Remaining items:
 
-1. **Token stored in plaintext** — The site token is stored as-is in `wp_options`. Ideally should store a SHA-256 hash and only show the raw token once at generation. Low risk since the token is already protected by the settings page capability check.
-2. **No token rotation UI** — There is no "Regenerate Token" button. The only way to rotate is to delete the option and re-activate the plugin.
-3. **No rate limiting on token validation** — An attacker can brute-force the `X-Aura-Token` header without throttling. Consider adding transient-based failed-attempt tracking.
-4. **`update_database()` always returns success** — `wp_upgrade()` has no error channel; SQL failures are silently swallowed.
+1. ~~**Token stored in plaintext**~~ — Resolved in v2.0.0. Tokens are stored as a SHA-256 hash; the raw value is shown once via a reveal transient at generation/regeneration. Legacy plaintext tokens migrate on first successful auth.
+2. ~~**No token rotation UI**~~ — Resolved in v2.0.0. **Regenerate Token** button on the settings page (`ajax_regenerate_token`) rotates the token and disconnects the dashboard until reconnected.
+3. ~~**No rate limiting on token validation**~~ — Resolved in v2.0.0. Per-IP transient-based failed-attempt throttling (`MAX_TOKEN_FAILURES` / `TOKEN_FAILURE_WINDOW`) returns HTTP 429 once exceeded.
+4. ~~**`update_database()` always returns success**~~ — Resolved in v2.0.0. The core path wraps `wp_upgrade()` in try/catch and verifies `db_version` reached the target `$wp_db_version`, returning `success => false` otherwise.
 
 ---
 

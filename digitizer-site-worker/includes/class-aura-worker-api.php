@@ -67,7 +67,7 @@ class Aura_Worker_API {
 					'sanitize_callback' => 'sanitize_text_field',
 					'description'       => __( 'One-time magic link ID generated during the connect flow.', 'digitizer-site-worker' ),
 				),
-				'aura_token' => array(
+				'token' => array(
 					'required'          => true,
 					'type'              => 'string',
 					'sanitize_callback' => 'sanitize_text_field',
@@ -78,6 +78,18 @@ class Aura_Worker_API {
 					'type'              => 'string',
 					'sanitize_callback' => 'esc_url_raw',
 					'description'       => __( 'Base URL of the Aura dashboard that issued the token.', 'digitizer-site-worker' ),
+				),
+				'timestamp' => array(
+					'required'          => true,
+					'type'              => 'integer',
+					'sanitize_callback' => 'absint',
+					'description'       => __( 'Unix timestamp of the callback, for replay protection.', 'digitizer-site-worker' ),
+				),
+				'signature' => array(
+					'required'          => true,
+					'type'              => 'string',
+					'sanitize_callback' => 'sanitize_text_field',
+					'description'       => __( 'HMAC-SHA256 signature of the connect payload.', 'digitizer-site-worker' ),
 				),
 			),
 		) );

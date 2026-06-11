@@ -18,3 +18,4 @@ delete_option( 'aura_worker_version' );
 delete_option( 'aura_worker_site_token' );
 delete_option( 'aura_worker_allowed_ips' );
 delete_option( 'aura_worker_allowed_domains' );
+delete_option( 'aura_worker_dashboard_url' );

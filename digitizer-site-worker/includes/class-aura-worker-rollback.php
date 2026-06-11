@@ -25,8 +25,14 @@ class Aura_Worker_Rollback {
 		$this->backup_dir = WP_CONTENT_DIR . '/aura-backups/';
 		if ( ! file_exists( $this->backup_dir ) ) {
 			wp_mkdir_p( $this->backup_dir );
-			file_put_contents( $this->backup_dir . '.htaccess', 'Deny from all' );
-			file_put_contents( $this->backup_dir . 'index.php', '<?php // Silence is golden.' );
+
+			global $wp_filesystem;
+			if ( ! function_exists( 'WP_Filesystem' ) ) {
+				require_once ABSPATH . 'wp-admin/includes/file.php';
+			}
+			WP_Filesystem();
+			$wp_filesystem->put_contents( $this->backup_dir . '.htaccess', 'Deny from all', FS_CHMOD_FILE );
+			$wp_filesystem->put_contents( $this->backup_dir . 'index.php', '<?php // Silence is golden.', FS_CHMOD_FILE );
 		}
 	}
 
