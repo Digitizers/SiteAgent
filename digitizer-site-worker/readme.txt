@@ -2,9 +2,9 @@
 Contributors: benkalsky
 Tags: wordpress management, remote updates, site monitoring, maintenance, dashboard
 Requires at least: 6.2
-Tested up to: 6.9
+Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 1.3.5
+Stable tag: 2.0.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -105,7 +105,7 @@ No. The plugin registers only REST API endpoints. It does not load any code, scr
 
 = What WordPress versions are supported? =
 
-WordPress 6.2 or higher is required. This is needed for full Application Password support. The plugin has been tested up to WordPress 6.9.
+WordPress 6.2 or higher is required. This is needed for full Application Password support. The plugin has been tested up to WordPress 7.0.
 
 = What PHP versions are supported? =
 
@@ -121,7 +121,7 @@ The plugin is designed for single WordPress installations. Multisite support is 
 
 = Where is the Site Token stored? =
 
-The Site Token is stored as a WordPress option (`aura_site_token`) in your database. It is generated automatically on first activation using `wp_generate_password(32, false)` and is unique to each installation.
+The Site Token is stored as a WordPress option (`aura_worker_site_token`) in your database. It is generated automatically on first activation using `wp_generate_password(32, false)` and is unique to each installation.
 
 = Can I regenerate the Site Token? =
 
@@ -148,9 +148,17 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 == Changelog ==
 
 = 2.0.0 =
-* Feature: Site health checks, rollback/backup of plugins, magic-link admin access, MCP tools.
-* Improvement: Tested with WordPress 6.9.
-* Compliance: WordPress.org Plugin Check fixes (WP_Filesystem usage, gmdate, wp_delete_file).
+* Feature: Site health checks — read recent error-log tail, surface PHP/DB/disk status in the health report.
+* Feature: Plugin rollback & backup — zip-snapshot a plugin before updating and restore on demand if an update breaks the site.
+* Feature: Magic-link admin access — generate a short-lived one-time login link from Aura for support sessions.
+* Feature: MCP tools — expose site context, safe plugin updates, asset cleanup, and vulnerability checks to AI agents.
+* Security: Site token is now stored hashed (SHA-256) instead of plaintext; existing tokens migrate automatically on first use.
+* Security: Brute-force throttling on token authentication (per-IP failure limit).
+* Security: Signed magic-link connect — the dashboard callback is HMAC-verified with a one-time secret and replay-protected by timestamp.
+* Feature: Regenerate Token button under Settings → SiteAgent.
+* Fix: Core database upgrade now reports real failures instead of always returning success (verifies db_version reached the target).
+* Improvement: Tested with WordPress 7.0.
+* Compliance: WordPress.org Plugin Check fixes — WP_Filesystem usage (no direct file_put_contents), gmdate(), wp_delete_file().
 
 = 1.3.5 =
 * Security: Enhanced authentication with timing-safe token comparison.
@@ -170,6 +178,9 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 * Zero frontend performance impact.
 
 == Upgrade Notice ==
+
+= 2.0.0 =
+Major update: plugin rollback/backup, site health checks, magic-link admin access, and MCP tools. Tested with WordPress 7.0. Recommended for all users.
 
 = 1.3.5 =
 Enhanced security with timing-safe comparison and IP whitelisting. Recommended for all users.

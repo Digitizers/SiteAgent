@@ -38,7 +38,7 @@ class Aura_Worker_Magic_Link {
 
 		if ( $dashboard_url && $site_token ) {
 			echo '<p style="color:#2e7d32;">';
-			echo '<span dashicons dashicons-yes-alt></span> ';
+			echo '<span class="dashicons dashicons-yes-alt"></span> ';
 			echo esc_html__( 'Connected to Aura dashboard:', 'digitizer-site-worker' ) . ' ';
 			echo '<strong>' . esc_html( $dashboard_url ) . '</strong>';
 			echo '</p>';
@@ -112,13 +112,19 @@ class Aura_Worker_Magic_Link {
 		$site_url      = get_site_url();
 		$site_name     = get_bloginfo( 'name' );
 
-		// Store site info keyed by magic_id; expires in 10 minutes.
+		// One-time secret minted by this site. Handed to the dashboard now and
+		// used by the dashboard to HMAC-sign the /connect callback, proving the
+		// callback genuinely originates from the dashboard we just contacted.
+		$connect_secret = wp_generate_password( 64, false );
+
+		// Store site info + secret keyed by magic_id; expires in 10 minutes.
 		set_transient(
 			'aura_magic_' . $magic_id,
 			array(
-				'site_url'   => $site_url,
-				'site_name'  => $site_name,
-				'created_at' => time(),
+				'site_url'       => $site_url,
+				'site_name'      => $site_name,
+				'connect_secret' => $connect_secret,
+				'created_at'     => time(),
 			),
 			10 * MINUTE_IN_SECONDS
 		);
@@ -130,9 +136,10 @@ class Aura_Worker_Magic_Link {
 				'headers' => array( 'Content-Type' => 'application/json' ),
 				'body'    => wp_json_encode(
 					array(
-						'magic_id'  => $magic_id,
-						'site_url'  => $site_url,
-						'site_name' => $site_name,
+						'magic_id'       => $magic_id,
+						'site_url'       => $site_url,
+						'site_name'      => $site_name,
+						'connect_secret' => $connect_secret,
 					)
 				),
 				'timeout' => 15,
@@ -170,31 +177,64 @@ class Aura_Worker_Magic_Link {
 	 *
 	 * POST /wp-json/aura/v1/connect
 	 *
-	 * Validates the magic_id transient (proves the request originated from a
-	 * genuine magic-link flow initiated by an admin of this site), then stores
-	 * the aura_token and dashboard_url options.
+	 * Validates the magic_id transient and the HMAC signature (proves the
+	 * request originated from the dashboard this site contacted), enforces a
+	 * timestamp freshness window, then stores the hashed token and dashboard_url.
 	 *
 	 * @param WP_REST_Request $request Incoming REST request.
 	 * @return WP_REST_Response
 	 */
 	public function handle_connect( $request ) {
 		$magic_id      = sanitize_text_field( $request->get_param( 'magic_id' ) );
-		$aura_token    = sanitize_text_field( $request->get_param( 'aura_token' ) );
+		$token         = sanitize_text_field( $request->get_param( 'token' ) );
 		$dashboard_url = esc_url_raw( $request->get_param( 'dashboard_url' ) );
+		$timestamp     = (int) $request->get_param( 'timestamp' );
+		$signature     = sanitize_text_field( $request->get_param( 'signature' ) );
 
-		if ( empty( $magic_id ) || empty( $aura_token ) || empty( $dashboard_url ) ) {
+		if ( empty( $magic_id ) || empty( $token ) || empty( $dashboard_url ) || empty( $signature ) || $timestamp <= 0 ) {
 			return new WP_REST_Response( array( 'error' => 'Missing required parameters.' ), 400 );
 		}
 
 		$stored = get_transient( 'aura_magic_' . $magic_id );
-		if ( ! $stored ) {
+		if ( ! $stored || empty( $stored['connect_secret'] ) ) {
 			return new WP_REST_Response( array( 'error' => 'Invalid or expired magic link.' ), 400 );
 		}
 
-		update_option( 'aura_worker_site_token', $aura_token );
+		// Reject stale/replayed callbacks (±5 minutes).
+		if ( abs( time() - $timestamp ) > 5 * MINUTE_IN_SECONDS ) {
+			return new WP_REST_Response( array( 'error' => 'Request timestamp outside the allowed window.' ), 400 );
+		}
+
+		// Verify the HMAC signature using the one-time secret this site issued.
+		$expected = self::sign_connect_payload( $stored['connect_secret'], $magic_id, $token, $dashboard_url, $timestamp );
+		if ( ! hash_equals( $expected, $signature ) ) {
+			return new WP_REST_Response( array( 'error' => 'Invalid signature.' ), 401 );
+		}
+
+		// Store only the hash of the token; the dashboard keeps the raw copy.
+		update_option( 'aura_worker_site_token', Aura_Worker_Security::hash_token( $token ) );
 		update_option( 'aura_worker_dashboard_url', $dashboard_url );
 		delete_transient( 'aura_magic_' . $magic_id );
 
 		return new WP_REST_Response( array( 'success' => true ), 200 );
+	}
+
+	/**
+	 * Build the HMAC-SHA256 signature for a /connect callback payload.
+	 *
+	 * The canonical message is the magic_id, token, dashboard_url and timestamp
+	 * joined by newlines. The Aura dashboard MUST compute the signature the same
+	 * way using the connect_secret it received from /api/onboarding/magic-link.
+	 *
+	 * @param string $secret        One-time connect secret.
+	 * @param string $magic_id      Magic link ID.
+	 * @param string $token         Raw site token issued by the dashboard.
+	 * @param string $dashboard_url Dashboard base URL.
+	 * @param int    $timestamp     Unix timestamp of the callback.
+	 * @return string Lowercase hex HMAC-SHA256 digest.
+	 */
+	public static function sign_connect_payload( $secret, $magic_id, $token, $dashboard_url, $timestamp ) {
+		$message = implode( "\n", array( $magic_id, $token, $dashboard_url, (string) $timestamp ) );
+		return hash_hmac( 'sha256', $message, $secret );
 	}
 }

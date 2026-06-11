@@ -51,9 +51,14 @@ function aura_worker_activate() {
 	update_option( 'aura_worker_activated', time() );
 	update_option( 'aura_worker_version', AURA_WORKER_VERSION );
 
-	// Generate a unique site token if not exists.
+	// Generate a unique site token if not exists. Only the SHA-256 hash is
+	// stored; the raw value is revealed once via a transient on the settings
+	// page so the admin can copy it into the Aura dashboard.
 	if ( ! get_option( 'aura_worker_site_token' ) ) {
-		update_option( 'aura_worker_site_token', wp_generate_password( 32, false ) );
+		require_once AURA_WORKER_DIR . 'includes/class-aura-worker-security.php';
+		$raw = wp_generate_password( 48, false );
+		update_option( 'aura_worker_site_token', Aura_Worker_Security::hash_token( $raw ) );
+		set_transient( 'aura_worker_token_reveal', $raw, 30 * MINUTE_IN_SECONDS );
 	}
 }
 register_activation_hook( __FILE__, 'aura_worker_activate' );
