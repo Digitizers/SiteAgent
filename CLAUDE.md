@@ -43,7 +43,6 @@ digitizer-site-worker/                                      # Repo root (develop
         ├── class-aura-worker-security.php   # Three-layer authentication and permission callbacks
         ├── class-aura-worker-health.php     # Site health report (PHP/DB/disk, error-log tail)
         ├── class-aura-worker-rollback.php   # Zip backup + restore of plugin directories
-        ├── class-aura-worker-backup.php     # Backup helpers
         ├── class-aura-worker-magic-link.php # Short-lived one-time admin login links
         ├── class-aura-worker-mcp.php        # MCP server + tool registration
         ├── class-aura-worker-tools.php      # MCP tool base + registry
@@ -66,7 +65,6 @@ To create an installable ZIP: `cd` to the repo root and run `zip -r digitizer-si
 | `Aura_Worker_Security` | `includes/class-aura-worker-security.php` | Implements IP whitelist, domain whitelist, site token verification, and capability checks |
 | `Aura_Worker_Health` | `includes/class-aura-worker-health.php` | Builds site health report (PHP/DB/disk, recent error-log tail) |
 | `Aura_Worker_Rollback` | `includes/class-aura-worker-rollback.php` | Zip backup + restore of plugin directories |
-| `Aura_Worker_Backup` | `includes/class-aura-worker-backup.php` | Backup helpers |
 | `Aura_Worker_Magic_Link` | `includes/class-aura-worker-magic-link.php` | Short-lived one-time admin login links |
 | `Aura_Worker_MCP` | `includes/class-aura-worker-mcp.php` | MCP server endpoint + tool registration |
 | `Aura_Worker_Tools` | `includes/class-aura-worker-tools.php` | MCP tool base class (`Aura_Tool_Base`) + registry; individual tools live in `includes/tools/` |
