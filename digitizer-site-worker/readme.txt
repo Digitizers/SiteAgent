@@ -19,36 +19,50 @@ Install this plugin on any WordPress site to unlock remote management capabiliti
 = What You Can Do =
 
 * **Monitor site health** — See WordPress version, PHP version, installed plugins & themes, database info, and disk usage in real time.
-* **Update plugins remotely** — Push plugin updates to any connected site from the Aura dashboard.
-* **Update themes remotely** — Keep themes current across all your sites with a single click.
-* **Update WordPress core** — Upgrade to the latest WordPress version without touching wp-admin.
-* **Bulk translation updates** — Update all language packs in one operation.
-* **Run database upgrades** — Execute WordPress database migrations remotely after updates.
+* **Update plugins, themes & core remotely** — Push updates to any connected site from the Aura dashboard, no wp-admin login.
+* **Safe batch updates with auto-rollback** — Run chunked updates with health checks; if an update breaks the site, the plugin restores the previous version automatically.
+* **Per-plugin rollback** — Every update is zip-snapshotted first; restore any plugin to its last good state on demand.
+* **Bulk translation & database upgrades** — Update all language packs and run WordPress database migrations remotely.
+* **One-click connect (magic link)** — Connect a site to Aura straight from wp-admin — no manual token copy/paste.
+* **AI-agent ready (MCP tools)** — Exposes machine-readable tools (site context, safe plugin update, asset cleanup, vulnerability checks) for AI-driven management.
 * **Zero frontend impact** — The plugin only registers REST API endpoints. No scripts, no styles, no database queries on visitor-facing page loads.
 
 = How It Works =
 
-After activation, the plugin registers a set of secure REST API endpoints under `/wp-json/aura/v1/`. You copy the auto-generated Site Token from **Tools → SiteAgent** and paste it into your Aura dashboard. From that point, Aura can communicate with your site to pull health data and push updates.
+After activation, click **Connect to Aura** on the **Settings → SiteAgent** page for a one-click magic-link connection, or copy the Site Token shown once and paste it into your Aura dashboard manually. From that point, Aura communicates with your site over a signed, authenticated REST API to pull health data and push updates.
 
 = Security =
 
-Three layers of authentication protect every request:
+Defence-in-depth protects every request:
 
-1. **WordPress Application Password** — Standard WordPress auth with capability checks (`manage_options` / `update_plugins`). Only authorized administrators can trigger actions.
-2. **Site Token** — A unique 32-character token sent via the `X-Aura-Token` header and verified with timing-safe comparison on every request.
-3. **IP Whitelist** (optional) — Restrict API access to your Aura instance's IP address only, with full support for Cloudflare and reverse proxy headers.
+1. **WordPress Application Password** — Standard WordPress auth with capability checks (`manage_options` / `update_*`). Only authorized administrators can trigger actions.
+2. **Hashed Site Token** — A per-site token sent via the `X-Aura-Token` header. Only a SHA-256 **hash** is stored (never the raw token), compared timing-safely. Tokens from older versions migrate to a hash automatically.
+3. **Brute-force throttling** — Repeated bad-token attempts from an IP are blocked.
+4. **Signed magic-link connect** — The onboarding callback is HMAC-signed with a one-time secret and timestamp, so the token exchange can't be hijacked or replayed.
+5. **IP / Domain allowlist** (optional) — Restrict API access to your Aura instance, with Cloudflare and reverse-proxy header support.
+
+You can rotate the token anytime from **Settings → SiteAgent → Regenerate Token**.
 
 = REST API Endpoints =
 
-All endpoints live under `/wp-json/aura/v1/`:
+Core endpoints under `/wp-json/aura/v1/`:
 
 * `GET /status` — Full site health report
 * `GET /updates` — Check available updates (core, plugins, themes, translations)
-* `POST /update/core` — Update WordPress core
-* `POST /update/plugin` — Update a specific plugin
-* `POST /update/theme` — Update a specific theme
-* `POST /update/translations` — Bulk update all translation packs
+* `POST /update/core` / `/update/plugin` / `/update/theme` / `/update/translations` — Apply updates
 * `POST /update/database` — Run WordPress database upgrades
+* `POST /connect` — Magic-link token exchange (public, HMAC-signed, 10-minute expiry)
+
+Version 2 endpoints under `/wp-json/aura/v2/`:
+
+* `GET /health` — HTTP, PHP fatal, white-screen and DB connectivity checks
+* `POST /update/batch` — Chunked batch updates with auto-rollback on health failure
+* `POST /rollback/{plugin}` — Restore a plugin from its most recent backup
+
+MCP tools under `/wp-json/aura/mcp/`:
+
+* `POST /tools/list` / `POST /tools/execute` — Enumerate and run AI-agent tools
+* `GET /context` — Full site context for AI decision-making
 
 = About Aura =
 
@@ -74,9 +88,8 @@ The plugin is completely free and open source (GPLv2+). You need a free or paid 
 1. Go to **Plugins → Add New** in your WordPress admin.
 2. Search for **SiteAgent**.
 3. Click **Install Now**, then **Activate**.
-4. Navigate to **Tools → SiteAgent**.
-5. Copy the generated **Site Token**.
-6. In your Aura dashboard, add a new WordPress site and paste the token.
+4. Navigate to **Settings → SiteAgent**.
+5. Click **Connect to Aura** for one-click magic-link onboarding — or copy the Site Token (shown once) and paste it into your Aura dashboard manually.
 
 = Via WP-CLI =
 
@@ -87,7 +100,7 @@ The plugin is completely free and open source (GPLv2+). You need a free or paid 
 1. Download the plugin ZIP from WordPress.org.
 2. Go to **Plugins → Add New → Upload Plugin**.
 3. Upload the ZIP and click **Install Now**, then **Activate**.
-4. Navigate to **Tools → SiteAgent** to get your Site Token.
+4. Navigate to **Settings → SiteAgent** to connect or get your Site Token.
 
 == Frequently Asked Questions ==
 
@@ -97,7 +110,7 @@ Yes, you need an Aura account to connect your WordPress sites. Aura offers a fre
 
 = Is this plugin safe to use? =
 
-Yes. The plugin uses three authentication layers: WordPress Application Passwords (the same standard mechanism used by Gutenberg and the block editor), a unique per-site token verified with timing-safe comparison, and an optional IP whitelist. No data is transmitted unless a request is made by your Aura instance.
+Yes. The plugin uses defence-in-depth: WordPress Application Passwords (the same standard mechanism used by the block editor), a per-site token stored only as a SHA-256 hash and verified timing-safely, per-IP brute-force throttling, an HMAC-signed onboarding handshake, and an optional IP/domain allowlist. No data is transmitted unless a request is made by your Aura instance.
 
 = Does it slow down my site? =
 
@@ -121,11 +134,11 @@ The plugin is designed for single WordPress installations. Multisite support is 
 
 = Where is the Site Token stored? =
 
-The Site Token is stored as a WordPress option (`aura_worker_site_token`) in your database. It is generated automatically on first activation using `wp_generate_password(32, false)` and is unique to each installation.
+Only a SHA-256 **hash** of the Site Token is stored, in the WordPress option `aura_worker_site_token` — the raw token is never persisted. It is generated on first activation and shown once so you can copy it; the Aura dashboard keeps the only raw copy. Tokens created by older versions are upgraded to a hash automatically on first use.
 
 = Can I regenerate the Site Token? =
 
-Yes. You can regenerate a new token from **Tools → SiteAgent**. After regenerating, update the token in your Aura dashboard to maintain the connection.
+Yes. Use **Regenerate Token** on the **Settings → SiteAgent** page. The new token is shown once. Regenerating invalidates the old token and disconnects the site from Aura until you reconnect with the new one.
 
 = How do I disconnect a site from Aura? =
 
@@ -141,7 +154,7 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 
 == Screenshots ==
 
-1. The SiteAgent settings page in WordPress admin (Tools → SiteAgent) showing the Site Token and connection status.
+1. The SiteAgent settings page in WordPress admin (Settings → SiteAgent) showing the Site Token and connection status.
 2. The Aura dashboard showing connected WordPress sites with health status, WordPress version, PHP version, and available updates.
 3. Remote plugin update in progress from the Aura dashboard — select a plugin and update it with a single click.
 
