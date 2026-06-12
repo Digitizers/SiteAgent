@@ -4,7 +4,7 @@ Tags: wordpress management, remote updates, site monitoring, maintenance, dashbo
 Requires at least: 6.2
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 2.0.0
+Stable tag: 2.0.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -160,6 +160,10 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 
 == Changelog ==
 
+= 2.0.1 =
+* Docs: readme rewritten for the 2.0 feature set (safe batch updates, rollback, magic-link, MCP), corrected security description, and added v2/MCP endpoint reference.
+* Docs: fixed admin menu location — the settings page lives under **Settings → SiteAgent**.
+
 = 2.0.0 =
 * Feature: Site health checks — read recent error-log tail, surface PHP/DB/disk status in the health report.
 * Feature: Plugin rollback & backup — zip-snapshot a plugin before updating and restore on demand if an update breaks the site.
@@ -191,6 +195,9 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 * Zero frontend performance impact.
 
 == Upgrade Notice ==
+
+= 2.0.1 =
+Documentation update — corrected feature list, security description, endpoint reference, and admin menu location. No code changes.
 
 = 2.0.0 =
 Major update: plugin rollback/backup, site health checks, magic-link admin access, and MCP tools. Tested with WordPress 7.0. Recommended for all users.
