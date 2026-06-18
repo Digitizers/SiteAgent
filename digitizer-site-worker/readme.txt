@@ -4,7 +4,7 @@ Tags: wordpress management, remote updates, site monitoring, maintenance, dashbo
 Requires at least: 6.2
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 2.0.1
+Stable tag: 2.0.2
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -154,11 +154,14 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 
 == Screenshots ==
 
-1. The SiteAgent settings page in WordPress admin (Settings → SiteAgent) showing the Site Token and connection status.
+1. The SiteAgent settings page in WordPress admin (under the Settings menu) showing the Site Token and connection status.
 2. The Aura dashboard showing connected WordPress sites with health status, WordPress version, PHP version, and available updates.
 3. Remote plugin update in progress from the Aura dashboard — select a plugin and update it with a single click.
 
 == Changelog ==
+
+= 2.0.2 =
+* Fix: Removed an arrow character from screenshot caption #1 that WordPress.org wrapped in emoji markup inside the image `alt` attribute, breaking the plugin page's HTML.
 
 = 2.0.1 =
 * Docs: readme rewritten for the 2.0 feature set (safe batch updates, rollback, magic-link, MCP), corrected security description, and added v2/MCP endpoint reference.
@@ -195,6 +198,9 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 * Zero frontend performance impact.
 
 == Upgrade Notice ==
+
+= 2.0.2 =
+Fixes the plugin page screenshot caption rendering on WordPress.org. No code changes.
 
 = 2.0.1 =
 Documentation update — corrected feature list, security description, endpoint reference, and admin menu location. No code changes.
