@@ -1,0 +1,21 @@
+name: Update WordPress.org Assets
+
+# Assets-only deploy (icon, banner, screenshots) to the SVN /assets/ dir.
+# Does not touch plugin code or the version. Trigger manually.
+on:
+  workflow_dispatch:
+
+jobs:
+  assets:
+    name: Update WordPress.org Assets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: WordPress.org Plugin Assets Update
+        uses: 10up/action-wordpress-plugin-asset-update@stable
+        env:
+          SVN_USERNAME: ${{ secrets.SVN_USERNAME }}
+          SVN_PASSWORD: ${{ secrets.SVN_PASSWORD }}
+          SLUG: digitizer-site-worker
+          ASSETS_DIR: .wordpress-org
