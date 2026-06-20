@@ -19,3 +19,4 @@ jobs:
           SVN_PASSWORD: ${{ secrets.SVN_PASSWORD }}
           SLUG: digitizer-site-worker
           ASSETS_DIR: .wordpress-org
+          IGNORE_OTHER_FILES: true
