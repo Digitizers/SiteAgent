@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/aura_icon.png" alt="Aura" width="160" />
+  <img src="assets/aura_icon.png" alt="Aura" width="120" />
 </p>
 <p align="center">
   <img src="assets/aura_logotype.png" alt="Aura" width="140" />
@@ -51,11 +51,13 @@ SiteAgent is built for performance. It only registers REST API routes and has **
 ## Installation
 
 ### Via WordPress.org (Recommended)
+
 1. Go to **Plugins > Add New** in your WordPress admin.
 2. Search for **SiteAgent**.
 3. Click **Install Now** and then **Activate**.
 
 ### Via WP-CLI
+
 ```bash
 wp plugin install digitizer-site-worker --activate
 ```
@@ -128,17 +130,21 @@ Built-in MCP tools: `get_site_context`, `update_plugin_safely`, `cleanup_orphane
 - **Compliance:** WordPress.org Plugin Check fixes — `WP_Filesystem`, `wp_json_encode()`, `gmdate()`, `wp_delete_file()`. Tested up to WordPress 7.0.
 
 ### 1.3.5
+
 - Security: timing-safe token comparison, optional IP whitelisting, Cloudflare/reverse-proxy header support.
 
 ### 1.3.4
+
 - **Branding Update:** New official icons and banners for WordPress.org.
 - **Improved UX:** Updated documentation and installation guides.
 
 ### 1.3.3
+
 - **Official WordPress.org Launch:** Now available in the official plugin repository.
 - GitHub Release: [v1.3.3](https://github.com/Digitizers/SiteAgent/releases/tag/v1.3.3)
 
 ### 1.3.0
+
 - Rebranded from "AuraWorker" to "Digitizer Site Worker for Aura"
 - New slug: `digitizer-site-worker`
 
