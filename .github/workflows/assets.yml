@@ -12,6 +12,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # The asset-update action requires a root-level readme.txt; the plugin's
+      # lives in the build dir. Stage a copy in CI only (not committed).
+      - name: Stage readme.txt at repo root
+        run: cp digitizer-site-worker/readme.txt readme.txt
+
       - name: WordPress.org Plugin Assets Update
         uses: 10up/action-wordpress-plugin-asset-update@stable
         env:
