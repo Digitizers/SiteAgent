@@ -4,7 +4,7 @@ Tags: wordpress management, remote updates, site monitoring, maintenance, dashbo
 Requires at least: 6.2
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 2.0.2
+Stable tag: 2.1.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -160,6 +160,17 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 
 == Changelog ==
 
+= 2.1.0 =
+* Feature: MCP ops toolset expansion — new agent tools governed by Aura's approval/risk policy:
+  * `get_database_info` (read) — database size, largest tables, autoload weight, expired transient count.
+  * `scan_security` (read) — scored security posture (file-edit lockdown, debug exposure, SSL, default admin/prefix, open registration, PHP version).
+  * `list_users` (read) — users with roles and post counts, admins flagged; never returns secrets.
+  * `check_health` (read) — live health gate (home-page HTTP, PHP fatals, white-screen, DB) for wrapping updates.
+  * `scan_error_log` (read) — tails and severity-groups the PHP/WordPress error log, surfacing recent fatals.
+  * `clear_caches` (write) — flush object cache, opcache, and detected page-cache plugins (W3TC, WP Super Cache, WP Rocket, LiteSpeed, Autoptimize).
+  * `cleanup_transients` (write) — remove expired transients to reduce autoload bloat.
+  * `backup_plugins` (write) — zip-snapshot one or all active plugins (rollback safety net) before mutating actions.
+
 = 2.0.2 =
 * Fix: Removed an arrow character from screenshot caption #1 that WordPress.org wrapped in emoji markup inside the image `alt` attribute, breaking the plugin page's HTML.
 
@@ -198,6 +209,9 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 * Zero frontend performance impact.
 
 == Upgrade Notice ==
+
+= 2.1.0 =
+Adds five new MCP agent tools (database info, security scan, user list, cache flush, transient cleanup). Read tools run on demand; cache/transient tools are mutating and gated by Aura's approval policy.
 
 = 2.0.2 =
 Fixes the plugin page screenshot caption rendering on WordPress.org. No code changes.
