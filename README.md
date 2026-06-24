@@ -17,7 +17,7 @@
   </a>
   <img src="https://img.shields.io/badge/WordPress-6.2%E2%80%937.0-21759b?logo=wordpress" alt="WordPress" />
   <img src="https://img.shields.io/badge/PHP-7.4%2B-777bb4?logo=php" alt="PHP" />
-  <img src="https://img.shields.io/badge/Stable-2.0.2-green" alt="Stable" />
+  <img src="https://img.shields.io/badge/Stable-2.1.0-green" alt="Stable" />
 </p>
 
 ---
@@ -114,11 +114,34 @@ Onboarding via magic link is **HMAC-signed**: the `/connect` callback carries a 
 | `POST` | `/tools/execute` | Execute a tool with validated parameters |
 | `GET` | `/context` | Full site context for AI decision-making |
 
-Built-in MCP tools: `get_site_context`, `update_plugin_safely`, `cleanup_orphaned_assets`, `check_vulnerabilities`.
+**Built-in MCP tools (12):**
+
+| Tool | Kind | Purpose |
+|------|------|---------|
+| `get_site_context` | read | WP/PHP/theme/plugins/disk/performance snapshot + detected issues |
+| `get_database_info` | read | DB size, largest tables, autoload weight, expired transients |
+| `scan_security` | read | scored posture (file-edit, debug, SSL, default admin/prefix, registration, PHP) |
+| `list_users` | read | users + roles + post counts, admins flagged (never returns secrets) |
+| `check_health` | read | live health gate — HTTP, PHP fatals, white-screen, DB |
+| `scan_error_log` | read | tail + severity-group the error log, surface recent fatals |
+| `check_vulnerabilities` | read | plugins/themes vs the WordPress.org vulnerability DB |
+| `update_plugin_safely` | write | backup → update → health check → auto-rollback |
+| `clear_caches` | write | flush object/opcode caches + detected page-cache plugins |
+| `cleanup_transients` | write | remove expired transients (autoload hygiene) |
+| `cleanup_orphaned_assets` | write | find/remove unused media (dry-run by default) |
+| `backup_plugins` | write | zip-snapshot one or all active plugins (rollback safety net) |
+
+These plug straight into **Aura's Fleet MCP Gateway**: read tools run on demand, write tools are gated behind human approval, every call is audited. Tool names are classified by verb so the gateway applies the right risk policy automatically.
 
 ---
 
 ## Changelog
+
+### 2.1.0
+
+- **MCP ops toolset expansion** — eight new agent tools (`get_database_info`, `scan_security`, `list_users`, `check_health`, `scan_error_log`, `clear_caches`, `cleanup_transients`, `backup_plugins`), bringing the built-in set to **12**. Each auto-registers via the tool loader and is governed by Aura's risk/approval policy.
+- `check_health` + `backup_plugins` reuse the existing health-check and rollback engines — building blocks for health-gated fleet-wide safe updates.
+- Read tools run on demand; cache/transient/backup tools are mutating and approval-gated.
 
 ### 2.0.0 *(stable — live on WordPress.org)*
 
