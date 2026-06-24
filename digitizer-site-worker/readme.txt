@@ -161,12 +161,15 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 == Changelog ==
 
 = 2.1.0 =
-* Feature: MCP ops toolset expansion — five new agent tools governed by Aura's approval/risk policy:
+* Feature: MCP ops toolset expansion — new agent tools governed by Aura's approval/risk policy:
   * `get_database_info` (read) — database size, largest tables, autoload weight, expired transient count.
   * `scan_security` (read) — scored security posture (file-edit lockdown, debug exposure, SSL, default admin/prefix, open registration, PHP version).
   * `list_users` (read) — users with roles and post counts, admins flagged; never returns secrets.
+  * `check_health` (read) — live health gate (home-page HTTP, PHP fatals, white-screen, DB) for wrapping updates.
+  * `scan_error_log` (read) — tails and severity-groups the PHP/WordPress error log, surfacing recent fatals.
   * `clear_caches` (write) — flush object cache, opcache, and detected page-cache plugins (W3TC, WP Super Cache, WP Rocket, LiteSpeed, Autoptimize).
   * `cleanup_transients` (write) — remove expired transients to reduce autoload bloat.
+  * `backup_plugins` (write) — zip-snapshot one or all active plugins (rollback safety net) before mutating actions.
 
 = 2.0.2 =
 * Fix: Removed an arrow character from screenshot caption #1 that WordPress.org wrapped in emoji markup inside the image `alt` attribute, breaking the plugin page's HTML.
