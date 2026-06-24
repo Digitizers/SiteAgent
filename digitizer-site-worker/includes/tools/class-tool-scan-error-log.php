@@ -51,7 +51,18 @@ class Aura_Tool_Scan_Error_Log extends Aura_Tool_Base {
 		if ( empty( $log_file ) || ! file_exists( $log_file ) ) {
 			$log_file = WP_CONTENT_DIR . '/debug.log';
 		}
-		if ( ! file_exists( $log_file ) || ! is_readable( $log_file ) ) {
+
+		// Containment: only tail a log that resolves inside the WordPress
+		// install. Prevents a hostile error_log php.ini value (e.g. /etc/passwd)
+		// from turning this read-only tool into an arbitrary-file reader.
+		if ( ! $this->path_is_contained( $log_file ) ) {
+			$log_file = WP_CONTENT_DIR . '/debug.log';
+			if ( ! $this->path_is_contained( $log_file ) ) {
+				$log_file = '';
+			}
+		}
+
+		if ( empty( $log_file ) || ! file_exists( $log_file ) || ! is_readable( $log_file ) ) {
 			return array(
 				'log_found'      => false,
 				'file'           => null,
@@ -126,5 +137,30 @@ class Aura_Tool_Scan_Error_Log extends Aura_Tool_Base {
 			'recent_fatals'  => array_values( $recent_fatals ),
 			'generated_at'   => gmdate( 'c' ),
 		);
+	}
+
+	/**
+	 * Whether a path resolves inside the WordPress install (ABSPATH or
+	 * WP_CONTENT_DIR). Guards against reading arbitrary files via a hostile
+	 * error_log setting.
+	 *
+	 * @param string $path Candidate file path.
+	 * @return bool
+	 */
+	private function path_is_contained( $path ) {
+		if ( empty( $path ) || ! file_exists( $path ) ) {
+			return false;
+		}
+		$real = realpath( $path );
+		if ( false === $real ) {
+			return false;
+		}
+		$roots = array( realpath( WP_CONTENT_DIR ), realpath( ABSPATH ) );
+		foreach ( $roots as $root ) {
+			if ( $root && 0 === strpos( $real, $root . DIRECTORY_SEPARATOR ) ) {
+				return true;
+			}
+		}
+		return false;
 	}
 }
