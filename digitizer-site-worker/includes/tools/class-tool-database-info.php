@@ -1,0 +1,125 @@
+<?php
+/**
+ * MCP Tool: get_database_info
+ *
+ * Read-only database health snapshot: total size, largest tables, autoloaded
+ * options weight, and expired transient count.
+ *
+ * @package Aura_Worker
+ */
+
+if ( ! defined( 'ABSPATH' ) ) {
+	exit;
+}
+
+class Aura_Tool_Database_Info extends Aura_Tool_Base {
+
+	public function get_name() {
+		return 'get_database_info';
+	}
+
+	public function get_description() {
+		return 'Returns database health info: total size, the largest tables, table prefix, autoloaded options weight with the heaviest options, and the number of expired transients. Read-only.';
+	}
+
+	public function get_parameters() {
+		return array(
+			'table_limit' => array(
+				'type'        => 'integer',
+				'description' => 'How many of the largest tables to return (default 10, max 50).',
+				'required'    => false,
+				'default'     => 10,
+			),
+		);
+	}
+
+	public function get_returns() {
+		return array(
+			'database'           => 'string — database name',
+			'table_prefix'       => 'string',
+			'table_count'        => 'integer',
+			'total_size_bytes'   => 'integer',
+			'total_size_human'   => 'string',
+			'largest_tables'     => 'array — { name, size_bytes, size_human, rows (approx) }',
+			'autoload'           => 'array — { total_bytes, total_human, option_count, heaviest: [{ name, bytes, human }] }',
+			'expired_transients' => 'integer — expired transient rows still in the options table',
+		);
+	}
+
+	public function execute( $params ) {
+		global $wpdb;
+
+		$limit = isset( $params['table_limit'] ) ? max( 1, min( 50, (int) $params['table_limit'] ) ) : 10;
+
+		// Per-table sizes from information_schema (prepared on the schema name).
+		$tables = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT table_name AS name, ( data_length + index_length ) AS size_bytes, table_rows AS row_count
+				 FROM information_schema.TABLES
+				 WHERE table_schema = %s
+				 ORDER BY size_bytes DESC",
+				DB_NAME
+			)
+		); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+
+		$total_bytes = 0;
+		$table_count = 0;
+		$largest     = array();
+		if ( is_array( $tables ) ) {
+			$table_count = count( $tables );
+			foreach ( $tables as $i => $t ) {
+				$total_bytes += (int) $t->size_bytes;
+				if ( $i < $limit ) {
+					$largest[] = array(
+						'name'       => $t->name,
+						'size_bytes' => (int) $t->size_bytes,
+						'size_human' => size_format( (int) $t->size_bytes ),
+						'rows'       => (int) $t->row_count,
+					);
+				}
+			}
+		}
+
+		// Autoloaded options weight ($wpdb->options is a trusted identifier).
+		$autoload_total = (int) $wpdb->get_var( "SELECT SUM(LENGTH(option_value)) FROM {$wpdb->options} WHERE autoload = 'yes'" ); // phpcs:ignore WordPress.DB
+		$autoload_count = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->options} WHERE autoload = 'yes'" ); // phpcs:ignore WordPress.DB
+
+		$heaviest_rows = $wpdb->get_results( "SELECT option_name AS name, LENGTH(option_value) AS bytes FROM {$wpdb->options} WHERE autoload = 'yes' ORDER BY bytes DESC LIMIT 10" ); // phpcs:ignore WordPress.DB
+		$heaviest      = array();
+		if ( is_array( $heaviest_rows ) ) {
+			foreach ( $heaviest_rows as $r ) {
+				$heaviest[] = array(
+					'name'  => $r->name,
+					'bytes' => (int) $r->bytes,
+					'human' => size_format( (int) $r->bytes ),
+				);
+			}
+		}
+
+		// Expired transients still sitting in the options table.
+		$expired = (int) $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT COUNT(*) FROM {$wpdb->options} WHERE option_name LIKE %s AND option_value < %d",
+				$wpdb->esc_like( '_transient_timeout_' ) . '%',
+				time()
+			)
+		); // phpcs:ignore WordPress.DB
+
+		return array(
+			'database'           => DB_NAME,
+			'table_prefix'       => $wpdb->prefix,
+			'table_count'        => $table_count,
+			'total_size_bytes'   => $total_bytes,
+			'total_size_human'   => size_format( $total_bytes ),
+			'largest_tables'     => $largest,
+			'autoload'           => array(
+				'total_bytes'  => $autoload_total,
+				'total_human'  => size_format( $autoload_total ),
+				'option_count' => $autoload_count,
+				'heaviest'     => $heaviest,
+			),
+			'expired_transients' => $expired,
+			'generated_at'       => gmdate( 'c' ),
+		);
+	}
+}
