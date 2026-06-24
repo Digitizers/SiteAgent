@@ -80,11 +80,34 @@ class Aura_Tool_Database_Info extends Aura_Tool_Base {
 			}
 		}
 
-		// Autoloaded options weight ($wpdb->options is a trusted identifier).
-		$autoload_total = (int) $wpdb->get_var( "SELECT SUM(LENGTH(option_value)) FROM {$wpdb->options} WHERE autoload = 'yes'" ); // phpcs:ignore WordPress.DB
-		$autoload_count = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->options} WHERE autoload = 'yes'" ); // phpcs:ignore WordPress.DB
+		// Autoloaded options weight. WP 6.6+ stores several "autoload on" values
+		// (yes, on, auto-on, auto), so build the IN clause from core's list
+		// instead of hard-coding 'yes' (which would under-report on new sites).
+		$autoload_values = function_exists( 'wp_autoload_values_to_autoload' )
+			? wp_autoload_values_to_autoload()
+			: array( 'yes' );
+		$placeholders    = implode( ', ', array_fill( 0, count( $autoload_values ), '%s' ) );
 
-		$heaviest_rows = $wpdb->get_results( "SELECT option_name AS name, LENGTH(option_value) AS bytes FROM {$wpdb->options} WHERE autoload = 'yes' ORDER BY bytes DESC LIMIT 10" ); // phpcs:ignore WordPress.DB
+		$autoload_total = (int) $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT SUM(LENGTH(option_value)) FROM {$wpdb->options} WHERE autoload IN ($placeholders)", // phpcs:ignore WordPress.DB.PreparedSQL
+				$autoload_values
+			)
+		); // phpcs:ignore WordPress.DB
+
+		$autoload_count = (int) $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT COUNT(*) FROM {$wpdb->options} WHERE autoload IN ($placeholders)", // phpcs:ignore WordPress.DB.PreparedSQL
+				$autoload_values
+			)
+		); // phpcs:ignore WordPress.DB
+
+		$heaviest_rows = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT option_name AS name, LENGTH(option_value) AS bytes FROM {$wpdb->options} WHERE autoload IN ($placeholders) ORDER BY bytes DESC LIMIT 10", // phpcs:ignore WordPress.DB.PreparedSQL
+				$autoload_values
+			)
+		); // phpcs:ignore WordPress.DB
 		$heaviest      = array();
 		if ( is_array( $heaviest_rows ) ) {
 			foreach ( $heaviest_rows as $r ) {

@@ -76,14 +76,14 @@ class Aura_Tool_List_Users extends Aura_Tool_Base {
 			$args['search_columns'] = array( 'user_login', 'user_email', 'display_name' );
 		}
 
-		// Total matching the filter, without pagination.
-		$count_args           = $args;
-		$count_args['number'] = -1;
-		$count_args['offset'] = 0;
-		$count_args['fields'] = 'ID';
-		$total                = count( get_users( $count_args ) );
+		// Page of users + total in a single query. count_total uses
+		// SQL_CALC_FOUND_ROWS rather than materializing every matching ID, so
+		// the total is correct without loading the whole user table.
+		$args['count_total'] = true;
+		$user_query          = new WP_User_Query( $args );
+		$users               = $user_query->get_results();
+		$total               = (int) $user_query->get_total();
 
-		$users  = get_users( $args );
 		$result = array();
 		foreach ( $users as $user ) {
 			$roles      = (array) $user->roles;
@@ -99,7 +99,15 @@ class Aura_Tool_List_Users extends Aura_Tool_Base {
 			);
 		}
 
-		$admin_count = count( get_users( array( 'role' => 'administrator', 'fields' => 'ID' ) ) );
+		$admin_query = new WP_User_Query(
+			array(
+				'role'        => 'administrator',
+				'number'      => 1,
+				'count_total' => true,
+				'fields'      => 'ID',
+			)
+		);
+		$admin_count = (int) $admin_query->get_total();
 
 		return array(
 			'total'        => $total,
