@@ -24,7 +24,7 @@ Install this plugin on any WordPress site to unlock remote management capabiliti
 * **Per-plugin rollback** — Every update is zip-snapshotted first; restore any plugin to its last good state on demand.
 * **Bulk translation & database upgrades** — Update all language packs and run WordPress database migrations remotely.
 * **One-click connect (magic link)** — Connect a site to Aura straight from wp-admin — no manual token copy/paste.
-* **AI-agent ready (12 MCP tools)** — Exposes machine-readable, JSON-schema tools for AI-driven management. Read tools run on demand; mutating tools are approval-gated through Aura, and every call is audited.
+* **AI-agent ready (16 MCP tools)** — Exposes machine-readable, JSON-schema tools for AI-driven management, including SEO, accessibility, performance, and broken-link auditors. Read tools run on demand; mutating tools are approval-gated through Aura, and every call is audited.
 * **Zero frontend impact** — The plugin only registers REST API endpoints. No scripts, no styles, no database queries on visitor-facing page loads.
 
 = How It Works =
@@ -66,13 +66,17 @@ MCP tools under `/wp-json/aura/mcp/`:
 
 = AI Agent Tools (MCP) =
 
-SiteAgent ships **12 built-in tools** for AI agents. Read tools return information and run on demand; write tools change the site and are queued for human approval through Aura — an agent can never silently mutate a production site.
+SiteAgent ships **16 built-in tools** for AI agents. Read tools return information and run on demand; write tools change the site and are queued for human approval through Aura — an agent can never silently mutate a production site.
 
 Read tools:
 
 * `get_site_context` — WordPress/PHP/theme/plugin/disk/performance snapshot with detected issues
 * `get_database_info` — Database size, largest tables, autoloaded-options weight, expired transients
 * `scan_security` — Scored security posture (file-edit lockdown, debug exposure, SSL, default admin/prefix, open registration, PHP version)
+* `scan_seo` — SEO posture (search-engine visibility, permalinks, XML sitemap, site title) plus a sampled content audit (thin content, missing excerpts/featured images)
+* `scan_a11y` — Accessibility audit over sampled content (images missing alt text, non-descriptive link text, heading structure, document language)
+* `perf_check` — Performance posture (persistent object cache, OPcache, page-cache plugin, PHP version, autoload weight, active plugin count, memory limit)
+* `scan_broken_links` — Link triage over a content sample with no outbound HTTP (empty/anchor-only links, dev/staging hosts, unresolved internal links)
 * `list_users` — Users with roles and post counts, administrators flagged (never returns secrets)
 * `check_health` — Live health gate: HTTP status, PHP fatals, white-screen, database connectivity
 * `scan_error_log` — Tails and severity-groups the error log, surfacing recent fatals
