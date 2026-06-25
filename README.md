@@ -114,13 +114,15 @@ Onboarding via magic link is **HMAC-signed**: the `/connect` callback carries a 
 | `POST` | `/tools/execute` | Execute a tool with validated parameters |
 | `GET` | `/context` | Full site context for AI decision-making |
 
-**Built-in MCP tools (12):**
+**Built-in MCP tools (14):**
 
 | Tool | Kind | Purpose |
 |------|------|---------|
 | `get_site_context` | read | WP/PHP/theme/plugins/disk/performance snapshot + detected issues |
 | `get_database_info` | read | DB size, largest tables, autoload weight, expired transients |
 | `scan_security` | read | scored posture (file-edit, debug, SSL, default admin/prefix, registration, PHP) |
+| `scan_seo` | read | scored SEO posture (indexability, permalinks, sitemap, title) + sampled content audit |
+| `scan_a11y` | read | scored accessibility audit (image alt text, link text, headings, document language) |
 | `list_users` | read | users + roles + post counts, admins flagged (never returns secrets) |
 | `check_health` | read | live health gate — HTTP, PHP fatals, white-screen, DB |
 | `scan_error_log` | read | tail + severity-group the error log, surface recent fatals |
@@ -136,6 +138,11 @@ These plug straight into **Aura's Fleet MCP Gateway**: read tools run on demand,
 ---
 
 ## Changelog
+
+### 2.2.0
+
+- **SEO & accessibility auditors** — two new read-only agent tools (`scan_seo`, `scan_a11y`), bringing the built-in set to **14**. Both are scored, no-AI-cost structural audits over a sampled set of published content (indexability/permalinks/sitemap/title + missing excerpts/featured images/thin content for SEO; image alt text, non-descriptive link text, heading structure, document language for accessibility). Auto-register via the tool loader; governed by Aura's risk policy as read tools.
+- Cheap, fleet-friendly: run across every site through Aura's Fleet MCP Gateway to spot SEO/a11y regressions at scale.
 
 ### 2.1.0
 

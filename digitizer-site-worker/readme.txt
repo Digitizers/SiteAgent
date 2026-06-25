@@ -4,7 +4,7 @@ Tags: wordpress management, remote updates, site monitoring, maintenance, dashbo
 Requires at least: 6.2
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 2.1.0
+Stable tag: 2.2.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -184,6 +184,12 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 
 == Changelog ==
 
+= 2.2.0 =
+* Feature: SEO & accessibility auditors — two new read-only agent tools, scored and no-AI-cost, governed by Aura's risk policy:
+  * `scan_seo` (read) — SEO posture (search-engine visibility, permalink structure, XML sitemap, site title) plus a sampled content audit (missing excerpts/featured images, thin content).
+  * `scan_a11y` (read) — accessibility audit over sampled content (images missing alt text, non-descriptive link text, missing heading structure, document language attribute).
+* Both run fleet-wide through Aura's Fleet MCP Gateway to catch SEO/accessibility regressions across many sites at once.
+
 = 2.1.0 =
 * Feature: MCP ops toolset expansion — new agent tools governed by Aura's approval/risk policy:
   * `get_database_info` (read) — database size, largest tables, autoload weight, expired transient count.
@@ -233,6 +239,9 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 * Zero frontend performance impact.
 
 == Upgrade Notice ==
+
+= 2.2.0 =
+Adds two read-only auditor tools — `scan_seo` and `scan_a11y` — for SEO and accessibility checks across your fleet. No changes to your site; run on demand through Aura.
 
 = 2.1.0 =
 Adds five new MCP agent tools (database info, security scan, user list, cache flush, transient cleanup). Read tools run on demand; cache/transient tools are mutating and gated by Aura's approval policy.
