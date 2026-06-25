@@ -4,7 +4,7 @@ Tags: wordpress management, remote updates, site monitoring, maintenance, dashbo
 Requires at least: 6.2
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 2.2.1
+Stable tag: 2.2.2
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -24,7 +24,7 @@ Install this plugin on any WordPress site to unlock remote management capabiliti
 * **Per-plugin rollback** — Every update is zip-snapshotted first; restore any plugin to its last good state on demand.
 * **Bulk translation & database upgrades** — Update all language packs and run WordPress database migrations remotely.
 * **One-click connect (magic link)** — Connect a site to Aura straight from wp-admin — no manual token copy/paste.
-* **AI-agent ready (16 MCP tools)** — Exposes machine-readable, JSON-schema tools for AI-driven management, including SEO, accessibility, performance, and broken-link auditors. Read tools run on demand; mutating tools are approval-gated through Aura, and every call is audited.
+* **AI-agent ready (18 MCP tools)** — Exposes machine-readable, JSON-schema tools for AI-driven management, including SEO/accessibility/performance/broken-link auditors and on-site SEO-meta read/write (Rank Math, Yoast, SEOPress). Read tools run on demand; mutating tools are approval-gated through Aura, and every call is audited.
 * **Zero frontend impact** — The plugin only registers REST API endpoints. No scripts, no styles, no database queries on visitor-facing page loads.
 
 = How It Works =
@@ -66,7 +66,7 @@ MCP tools under `/wp-json/aura/mcp/`:
 
 = AI Agent Tools (MCP) =
 
-SiteAgent ships **16 built-in tools** for AI agents. Read tools return information and run on demand; write tools change the site and are queued for human approval through Aura — an agent can never silently mutate a production site.
+SiteAgent ships **18 built-in tools** for AI agents. Read tools return information and run on demand; write tools change the site and are queued for human approval through Aura — an agent can never silently mutate a production site.
 
 Read tools:
 
@@ -81,6 +81,7 @@ Read tools:
 * `check_health` — Live health gate: HTTP status, PHP fatals, white-screen, database connectivity
 * `scan_error_log` — Tails and severity-groups the error log, surfacing recent fatals
 * `check_vulnerabilities` — Plugins/themes checked against the WordPress.org vulnerability database
+* `get_seo_meta` — Read a post/page's SEO title, description, and focus keyword from the active SEO plugin (Rank Math, Yoast, or SEOPress)
 
 Write tools (approval-gated):
 
@@ -89,6 +90,7 @@ Write tools (approval-gated):
 * `cleanup_transients` — Remove expired transients to reduce autoload bloat
 * `cleanup_orphaned_assets` — Find and remove unused media (dry-run by default)
 * `backup_plugins` — Zip-snapshot one or all active plugins as a rollback safety net
+* `set_seo_meta` — Write a post/page's SEO title / description / focus keyword on the active SEO plugin (Rank Math, Yoast, or SEOPress) — on-site, so it works even when a WAF blocks the plugin's own REST endpoint
 
 Tools are classified by verb so the Aura Fleet gateway applies the right risk and approval policy automatically.
 
@@ -188,6 +190,12 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 
 == Changelog ==
 
+= 2.2.2 =
+* Feature: On-site SEO-meta tools — two agent tools that read and write a post/page's SEO meta directly on the active SEO plugin (Rank Math, Yoast, or SEOPress):
+  * `get_seo_meta` (read) — returns the SEO title, description, and focus keyword.
+  * `set_seo_meta` (write, approval-gated) — sets any of title / description / focus keyword; only the fields you pass change.
+* Because these run on-site via the plugin's own meta keys (not the SEO plugin's REST endpoint), they work even on sites where a firewall/WAF blocks those endpoints. Built-in tool set is now 18.
+
 = 2.2.1 =
 * Feature: Performance & broken-link auditors — two more read-only agent tools, scored/structured and no-AI-cost:
   * `perf_check` (read) — performance posture (persistent object cache, OPcache, page-cache plugin, PHP version, autoload weight, active plugin count, PHP memory limit, expired transients).
@@ -249,6 +257,9 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 * Zero frontend performance impact.
 
 == Upgrade Notice ==
+
+= 2.2.2 =
+Adds on-site SEO-meta tools (`get_seo_meta` / `set_seo_meta`) for Rank Math, Yoast, and SEOPress — read and update a page's SEO title, description, and focus keyword across your fleet, even on sites where a WAF blocks the SEO plugin's REST endpoint. Writes are approval-gated through Aura.
 
 = 2.2.1 =
 Adds two read-only auditor tools — `perf_check` and `scan_broken_links` — for performance and link triage across your fleet. No changes to your site; `scan_broken_links` performs no outbound HTTP.
