@@ -4,7 +4,7 @@ Tags: wordpress management, remote updates, site monitoring, maintenance, dashbo
 Requires at least: 6.2
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 2.2.0
+Stable tag: 2.2.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -184,6 +184,12 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 
 == Changelog ==
 
+= 2.2.1 =
+* Feature: Performance & broken-link auditors — two more read-only agent tools, scored/structured and no-AI-cost:
+  * `perf_check` (read) — performance posture (persistent object cache, OPcache, page-cache plugin, PHP version, autoload weight, active plugin count, PHP memory limit, expired transients).
+  * `scan_broken_links` (read) — link triage over a content sample with NO outbound HTTP: empty/anchor-only links, links to dev/staging hosts, and internal links that don't resolve locally.
+* Built-in tool set is now 16.
+
 = 2.2.0 =
 * Feature: SEO & accessibility auditors — two new read-only agent tools, scored and no-AI-cost, governed by Aura's risk policy:
   * `scan_seo` (read) — SEO posture (search-engine visibility, permalink structure, XML sitemap, site title) plus a sampled content audit (missing excerpts/featured images, thin content).
@@ -239,6 +245,9 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 * Zero frontend performance impact.
 
 == Upgrade Notice ==
+
+= 2.2.1 =
+Adds two read-only auditor tools — `perf_check` and `scan_broken_links` — for performance and link triage across your fleet. No changes to your site; `scan_broken_links` performs no outbound HTTP.
 
 = 2.2.0 =
 Adds two read-only auditor tools — `scan_seo` and `scan_a11y` — for SEO and accessibility checks across your fleet. No changes to your site; run on demand through Aura.

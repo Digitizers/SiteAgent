@@ -114,7 +114,7 @@ Onboarding via magic link is **HMAC-signed**: the `/connect` callback carries a 
 | `POST` | `/tools/execute` | Execute a tool with validated parameters |
 | `GET` | `/context` | Full site context for AI decision-making |
 
-**Built-in MCP tools (14):**
+**Built-in MCP tools (16):**
 
 | Tool | Kind | Purpose |
 |------|------|---------|
@@ -123,6 +123,8 @@ Onboarding via magic link is **HMAC-signed**: the `/connect` callback carries a 
 | `scan_security` | read | scored posture (file-edit, debug, SSL, default admin/prefix, registration, PHP) |
 | `scan_seo` | read | scored SEO posture (indexability, permalinks, sitemap, title) + sampled content audit |
 | `scan_a11y` | read | scored accessibility audit (image alt text, link text, headings, document language) |
+| `perf_check` | read | scored performance posture (object cache, OPcache, page cache, PHP, autoload, plugins, memory) |
+| `scan_broken_links` | read | link triage (empty/anchor, dev/staging hosts, unresolved internal links) — no outbound HTTP |
 | `list_users` | read | users + roles + post counts, admins flagged (never returns secrets) |
 | `check_health` | read | live health gate — HTTP, PHP fatals, white-screen, DB |
 | `scan_error_log` | read | tail + severity-group the error log, surface recent fatals |
@@ -138,6 +140,10 @@ These plug straight into **Aura's Fleet MCP Gateway**: read tools run on demand,
 ---
 
 ## Changelog
+
+### 2.2.1
+
+- **Performance & broken-link auditors** — two more read-only agent tools (`perf_check`, `scan_broken_links`), bringing the built-in set to **16**. `perf_check` scores caching layers, PHP, autoload weight, plugin count, memory, and expired transients. `scan_broken_links` triages links over a content sample **without any outbound HTTP** (empty/anchor links, dev/staging hosts, internal links that don't resolve locally). Both auto-register and run as read tools.
 
 ### 2.2.0
 
