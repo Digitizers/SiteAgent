@@ -74,8 +74,27 @@ class Aura_Worker_Security {
 			return $token_check;
 		}
 
-		// Layer 3: WordPress Application Password (handled by WP REST auth).
-		// The permission_callback checks current_user_can().
+		// Layer 2.5: Token-only authorization. A valid token alone is sufficient
+		// to manage the site (the standard site-management model). If no WP user
+		// is authenticated on this request (i.e. no application-password Basic
+		// auth), run as the connecting administrator so the Layer-3
+		// current_user_can() route gates pass. Requests that DID send an
+		// app-password keep their own user context untouched.
+		if ( ! is_user_logged_in() ) {
+			$run_as = $this->resolve_connect_user();
+			if ( ! $run_as ) {
+				return new WP_Error(
+					'aura_not_configured',
+					__( 'SiteAgent has no administrator to run as. Reconnect from the Aura dashboard.', 'digitizer-site-worker' ),
+					array( 'status' => 500 )
+				);
+			}
+			wp_set_current_user( $run_as );
+		}
+
+		// Layer 3: WordPress capability is checked by each route's
+		// permission_callback (current_user_can()), now satisfied by the run-as
+		// admin above for token-only requests.
 		return true;
 	}
 
@@ -204,6 +223,35 @@ class Aura_Worker_Security {
 		delete_transient( $this->token_failure_key() );
 
 		return true;
+	}
+
+	/**
+	 * Resolve the administrator to run token-only requests as.
+	 *
+	 * Prefers the stored connecting admin; falls back to the first administrator.
+	 * The returned user MUST hold manage_options so a token can never grant more
+	 * than an administrator already has.
+	 *
+	 * @return int User ID, or 0 if no suitable administrator exists.
+	 */
+	private function resolve_connect_user() {
+		$stored = (int) get_option( 'aura_worker_connect_user_id', 0 );
+		if ( $stored > 0 && user_can( $stored, 'manage_options' ) ) {
+			return $stored;
+		}
+
+		$admins = get_users(
+			array(
+				'role'   => 'administrator',
+				'number' => 1,
+				'fields' => 'ID',
+			)
+		);
+		if ( ! empty( $admins ) ) {
+			return (int) $admins[0];
+		}
+
+		return 0;
 	}
 
 	/**

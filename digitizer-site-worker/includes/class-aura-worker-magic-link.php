@@ -121,10 +121,11 @@ class Aura_Worker_Magic_Link {
 		set_transient(
 			'aura_magic_' . $magic_id,
 			array(
-				'site_url'       => $site_url,
-				'site_name'      => $site_name,
-				'connect_secret' => $connect_secret,
-				'created_at'     => time(),
+				'site_url'        => $site_url,
+				'site_name'       => $site_name,
+				'connect_secret'  => $connect_secret,
+				'connect_user_id' => get_current_user_id(),
+				'created_at'      => time(),
 			),
 			10 * MINUTE_IN_SECONDS
 		);
@@ -211,7 +212,12 @@ class Aura_Worker_Magic_Link {
 			return new WP_REST_Response( array( 'error' => 'Invalid signature.' ), 401 );
 		}
 
-		// Store only the hash of the token; the dashboard keeps the raw copy.
+		// Persist the connecting administrator so token-only requests can run as
+		// them (an admin context lets current_user_can() pass without an
+		// application password). Falls back to the first admin if absent.
+		if ( ! empty( $stored['connect_user_id'] ) ) {
+			update_option( 'aura_worker_connect_user_id', (int) $stored['connect_user_id'] );
+		}
 		update_option( 'aura_worker_site_token', Aura_Worker_Security::hash_token( $token ) );
 		update_option( 'aura_worker_dashboard_url', $dashboard_url );
 		delete_transient( 'aura_magic_' . $magic_id );
