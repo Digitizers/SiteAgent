@@ -3,6 +3,11 @@ on:
   release:
     types: [published]
 
+# Least privilege: the job only checks out the repo and deploys to WordPress.org
+# SVN using SVN_USERNAME/SVN_PASSWORD secrets — it never writes back via GITHUB_TOKEN.
+permissions:
+  contents: read
+
 jobs:
   deploy:
     name: Deploy to WordPress.org
