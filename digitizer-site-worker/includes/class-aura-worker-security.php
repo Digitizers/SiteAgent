@@ -90,6 +90,19 @@ class Aura_Worker_Security {
 				);
 			}
 			wp_set_current_user( $run_as );
+
+			/**
+			 * Fires when a request is authorized by its Aura site token alone
+			 * (no application-password user) and run as an administrator.
+			 *
+			 * Lets site owners record token-only actions for forensics — the WP
+			 * actor is the resolved admin, so without this the audit trail can't
+			 * distinguish a token-run-as from an interactive admin action.
+			 *
+			 * @param int    $run_as The administrator user ID the request runs as.
+			 * @param string $route  The REST route being authorized.
+			 */
+			do_action( 'aura_worker_token_run_as', $run_as, $request->get_route() );
 		}
 
 		// Layer 3: WordPress capability is checked by each route's
@@ -242,9 +255,11 @@ class Aura_Worker_Security {
 
 		$admins = get_users(
 			array(
-				'role'   => 'administrator',
-				'number' => 1,
-				'fields' => 'ID',
+				'role'    => 'administrator',
+				'number'  => 1,
+				'orderby' => 'ID',
+				'order'   => 'ASC',
+				'fields'  => 'ID',
 			)
 		);
 		if ( ! empty( $admins ) ) {

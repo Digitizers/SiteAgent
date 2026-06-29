@@ -192,6 +192,7 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 
 = 2.3.0 =
 * **Token-only connection** — a valid Aura Site Token now authorizes management on its own. After connecting (magic link or Regenerate Token), the plugin runs requests as the connecting administrator, so Aura no longer needs a WordPress Application Password. Existing app-password connections keep working unchanged. No new tools — the set stays at **18**.
+* **Forensics hook** — fires `do_action( 'aura_worker_token_run_as', $user_id, $route )` whenever a request is authorized by token alone and run as an admin, so site owners can distinguish token-run-as from interactive admin actions in their audit log. The admin fallback is now deterministic (lowest-ID administrator).
 
 = 2.2.4 =
 * Fix: "Connect to Aura" (magic-link onboarding) now targets the Aura app host (`app.my-aura.app`) instead of the marketing domain, so one-click connect works out of the box. (Sites that set the `AURA_DASHBOARD_URL` constant are unaffected.)
