@@ -17,7 +17,7 @@
   </a>
   <img src="https://img.shields.io/badge/WordPress-6.2%E2%80%937.0-21759b?logo=wordpress" alt="WordPress" />
   <img src="https://img.shields.io/badge/PHP-7.4%2B-777bb4?logo=php" alt="PHP" />
-  <img src="https://img.shields.io/badge/Stable-2.2.4-green" alt="Stable" />
+  <img src="https://img.shields.io/badge/Stable-2.3.0-green" alt="Stable" />
 </p>
 
 ---
@@ -142,6 +142,10 @@ These plug straight into **Aura's Fleet MCP Gateway**: read tools run on demand,
 ---
 
 ## Changelog
+
+### 2.3.0
+
+- **Token-only connection** (no new tools — set stays at **18**): a valid Aura Site Token authorizes management on its own. After connecting, the plugin runs requests as the connecting administrator (`current_user_can()` passes without an Application Password). Existing app-password connections are unaffected; deploy order vs. the Aura dashboard does not matter.
 
 ### 2.2.4
 
