@@ -133,6 +133,13 @@ class Aura_Tool_Scan_Seo extends Aura_Tool_Base {
 				? 'All sampled posts/pages have a featured image.'
 				: "$missing_featured of $audited sampled posts/pages lack a featured image.",
 		);
+		$findings[] = array(
+			'check'   => 'excerpts',
+			'status'  => 0 === $missing_excerpt ? 'ok' : 'warning',
+			'message' => 0 === $missing_excerpt
+				? 'All sampled posts/pages have an excerpt.'
+				: "$missing_excerpt of $audited sampled posts/pages lack an excerpt.",
+		);
 
 		$total  = count( $findings );
 		$passed = 0;
