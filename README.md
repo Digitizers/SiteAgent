@@ -17,7 +17,7 @@
   </a>
   <img src="https://img.shields.io/badge/WordPress-6.2%E2%80%937.0-21759b?logo=wordpress" alt="WordPress" />
   <img src="https://img.shields.io/badge/PHP-7.4%2B-777bb4?logo=php" alt="PHP" />
-  <img src="https://img.shields.io/badge/Stable-2.1.0-green" alt="Stable" />
+  <img src="https://img.shields.io/badge/Stable-2.2.3-green" alt="Stable" />
 </p>
 
 ---
@@ -114,7 +114,7 @@ Onboarding via magic link is **HMAC-signed**: the `/connect` callback carries a 
 | `POST` | `/tools/execute` | Execute a tool with validated parameters |
 | `GET` | `/context` | Full site context for AI decision-making |
 
-**Built-in MCP tools (16):**
+**Built-in MCP tools (18):**
 
 | Tool | Kind | Purpose |
 |------|------|---------|
@@ -125,10 +125,12 @@ Onboarding via magic link is **HMAC-signed**: the `/connect` callback carries a 
 | `scan_a11y` | read | scored accessibility audit (image alt text, link text, headings, document language) |
 | `perf_check` | read | scored performance posture (object cache, OPcache, page cache, PHP, autoload, plugins, memory) |
 | `scan_broken_links` | read | link triage (empty/anchor, dev/staging hosts, unresolved internal links) — no outbound HTTP |
+| `get_seo_meta` | read | a post/page's SEO title, description, focus keyword (Rank Math / Yoast / SEOPress) |
 | `list_users` | read | users + roles + post counts, admins flagged (never returns secrets) |
 | `check_health` | read | live health gate — HTTP, PHP fatals, white-screen, DB |
 | `scan_error_log` | read | tail + severity-group the error log, surface recent fatals |
 | `check_vulnerabilities` | read | plugins/themes vs the WordPress.org vulnerability DB |
+| `set_seo_meta` | write | set a post/page's SEO title / description / focus keyword (approval-gated; only fields you pass change) |
 | `update_plugin_safely` | write | backup → update → health check → auto-rollback |
 | `clear_caches` | write | flush object/opcode caches + detected page-cache plugins |
 | `cleanup_transients` | write | remove expired transients (autoload hygiene) |
@@ -140,6 +142,14 @@ These plug straight into **Aura's Fleet MCP Gateway**: read tools run on demand,
 ---
 
 ## Changelog
+
+### 2.2.3
+
+- **Auditor accuracy fixes** (no new tools — set stays at **18**): `set_seo_meta` now invalidates Yoast's cached indexable so SEO changes show on the frontend immediately; `perf_check` counts all WP 6.6+ autoload values (`yes`/`on`/`auto-on`/`auto`); `scan_broken_links` reports true totals instead of the capped sample count; `scan_seo` scores missing excerpts; `scan_a11y` checks the rendered `<html lang>` rather than the configured locale.
+
+### 2.2.2
+
+- **On-site SEO-meta tools** — two agent tools that read and write a post/page's SEO meta directly via the active SEO plugin's own meta keys (Rank Math, Yoast, SEOPress), bringing the built-in set to **18**. `get_seo_meta` (read) returns title / description / focus keyword; `set_seo_meta` (write, approval-gated) sets any subset. Because they run on-site rather than via the SEO plugin's REST endpoint, they work even where a WAF blocks those endpoints.
 
 ### 2.2.1
 
