@@ -98,8 +98,19 @@ class Aura_Tool_Perf_Check extends Aura_Tool_Base {
 				: "PHP $php is older; 8.1+ is recommended for performance.",
 		);
 
-		// 5. Autoload weight.
-		$autoload_bytes = (int) $wpdb->get_var( "SELECT SUM(LENGTH(option_value)) FROM {$wpdb->options} WHERE autoload = 'yes'" ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+		// 5. Autoload weight. WP 6.6+ stores several "autoload on" values
+		// (yes, on, auto-on, auto), so build the IN clause from core's list
+		// instead of hard-coding 'yes' (which would under-report on new sites).
+		$autoload_values = function_exists( 'wp_autoload_values_to_autoload' )
+			? wp_autoload_values_to_autoload()
+			: array( 'yes' );
+		$placeholders    = implode( ', ', array_fill( 0, count( $autoload_values ), '%s' ) );
+		$autoload_bytes  = (int) $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT SUM(LENGTH(option_value)) FROM {$wpdb->options} WHERE autoload IN ($placeholders)", // phpcs:ignore WordPress.DB.PreparedSQL
+				$autoload_values
+			)
+		); // phpcs:ignore WordPress.DB
 		$autoload_mb    = $autoload_bytes / 1048576;
 		$findings[]     = array(
 			'check'   => 'autoload_weight',
