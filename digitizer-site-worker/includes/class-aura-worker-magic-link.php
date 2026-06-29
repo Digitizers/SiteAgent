@@ -107,7 +107,7 @@ class Aura_Worker_Magic_Link {
 			wp_send_json_error( array( 'message' => __( 'Insufficient permissions.', 'digitizer-site-worker' ) ), 403 );
 		}
 
-		$dashboard_url = defined( 'AURA_DASHBOARD_URL' ) ? AURA_DASHBOARD_URL : 'https://my-aura.app';
+		$dashboard_url = defined( 'AURA_DASHBOARD_URL' ) ? AURA_DASHBOARD_URL : 'https://app.my-aura.app';
 		$magic_id      = wp_generate_uuid4();
 		$site_url      = get_site_url();
 		$site_name     = get_bloginfo( 'name' );
