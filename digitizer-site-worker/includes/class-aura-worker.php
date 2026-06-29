@@ -78,6 +78,7 @@ class Aura_Worker {
 
 		$raw = wp_generate_password( 48, false );
 		update_option( 'aura_worker_site_token', Aura_Worker_Security::hash_token( $raw ) );
+		update_option( 'aura_worker_connect_user_id', get_current_user_id() );
 		delete_option( 'aura_worker_dashboard_url' );
 		set_transient( 'aura_worker_token_reveal', $raw, 2 * MINUTE_IN_SECONDS );
 
