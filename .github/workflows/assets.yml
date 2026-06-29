@@ -5,6 +5,10 @@ name: Update WordPress.org Assets
 on:
   workflow_dispatch:
 
+# Least privilege: checkout + SVN asset upload (SVN secrets) only; no GITHUB_TOKEN writes.
+permissions:
+  contents: read
+
 jobs:
   assets:
     name: Update WordPress.org Assets
