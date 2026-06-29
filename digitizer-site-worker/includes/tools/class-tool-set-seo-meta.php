@@ -123,10 +123,51 @@ class Aura_Tool_Set_Seo_Meta extends Aura_Tool_Base {
 			return array( 'error' => 'Nothing to update — provide title, description, and/or focus_keyword.' );
 		}
 
+		// Writing the meta directly bypasses each plugin's own save flow, which can
+		// leave a cached SEO title/description being served on the frontend. Always
+		// flush core post caches; on Yoast, also drop the stale indexable row so it
+		// rebuilds from the new meta on the next request. All guarded so non-matching
+		// sites are unaffected.
+		clean_post_cache( $post_id );
+		if ( 'yoast' === $fields['plugin'] ) {
+			$this->flush_yoast_indexable( $post_id );
+		}
+
 		return array(
 			'plugin'  => $fields['plugin'],
 			'post_id' => $post_id,
 			'updated' => $updated,
 		);
+	}
+
+	/**
+	 * Invalidate Yoast's cached indexable for a post so the new meta is served.
+	 *
+	 * Yoast keeps a denormalised "indexable" row per post; writing the meta
+	 * directly leaves it stale until a manual save/reindex. Deleting the row via
+	 * Yoast's public repository surface forces a rebuild on the next request.
+	 * Everything is guarded so the call is a no-op on non-Yoast or older Yoast.
+	 *
+	 * @param int $post_id The post whose indexable should be invalidated.
+	 * @return void
+	 */
+	private function flush_yoast_indexable( $post_id ) {
+		if ( ! function_exists( 'YoastSEO' ) ) {
+			return;
+		}
+		try {
+			$repository = YoastSEO()->classes->get( '\Yoast\WP\SEO\Repositories\Indexable_Repository' );
+			if ( ! is_object( $repository ) || ! method_exists( $repository, 'find_by_id_and_type' ) ) {
+				return;
+			}
+			$indexable = $repository->find_by_id_and_type( (int) $post_id, 'post', false );
+			if ( is_object( $indexable ) && method_exists( $indexable, 'delete' ) ) {
+				$indexable->delete();
+			}
+		} catch ( \Throwable $e ) {
+			// Yoast internals changed or unavailable — the meta is still written and
+			// clean_post_cache() already ran, so fail silently.
+			return;
+		}
 	}
 }

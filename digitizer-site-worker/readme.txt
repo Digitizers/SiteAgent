@@ -4,7 +4,7 @@ Tags: wordpress management, remote updates, site monitoring, maintenance, dashbo
 Requires at least: 6.2
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 2.2.2
+Stable tag: 2.2.3
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -190,6 +190,13 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 
 == Changelog ==
 
+= 2.2.3 =
+* Fix: `set_seo_meta` on Yoast — after writing the meta, the cached Yoast indexable is now invalidated so the frontend serves the new SEO title/description immediately instead of the stale value (previously required a manual save/reindex).
+* Fix: `perf_check` autoload weight — counts all WP 6.6+ autoload values (`yes`, `on`, `auto-on`, `auto`) instead of only `yes`, so the figure is no longer under-reported on newer cores.
+* Fix: `scan_broken_links` — the reported counts now reflect the true number of matches; previously they were capped at the 10-item sample limit. Samples remain capped.
+* Fix: `scan_seo` — missing excerpts now count toward the score (an `excerpts` finding is reported) instead of being tallied but ignored.
+* Fix: `scan_a11y` document language — verified against the rendered `<html lang>` attribute of the home page rather than the configured locale, so a theme that omits `language_attributes()` is correctly flagged.
+
 = 2.2.2 =
 * Feature: On-site SEO-meta tools — two agent tools that read and write a post/page's SEO meta directly on the active SEO plugin (Rank Math, Yoast, or SEOPress):
   * `get_seo_meta` (read) — returns the SEO title, description, and focus keyword.
@@ -257,6 +264,9 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 * Zero frontend performance impact.
 
 == Upgrade Notice ==
+
+= 2.2.3 =
+Accuracy fixes for the auditor tools: `set_seo_meta` now refreshes Yoast's cache so SEO changes show immediately, `perf_check` counts all WP 6.6+ autoload values, `scan_broken_links` reports true totals, `scan_seo` scores missing excerpts, and `scan_a11y` checks the rendered page language. No changes to your site's content.
 
 = 2.2.2 =
 Adds on-site SEO-meta tools (`get_seo_meta` / `set_seo_meta`) for Rank Math, Yoast, and SEOPress — read and update a page's SEO title, description, and focus keyword across your fleet, even on sites where a WAF blocks the SEO plugin's REST endpoint. Writes are approval-gated through Aura.

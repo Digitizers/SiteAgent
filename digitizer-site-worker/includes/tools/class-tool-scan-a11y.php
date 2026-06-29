@@ -122,12 +122,32 @@ class Aura_Tool_Scan_A11y extends Aura_Tool_Base {
 				: "$posts_without_headings substantial sampled post(s) have no headings.",
 		);
 
-		$lang       = trim( (string) get_bloginfo( 'language' ) );
-		$findings[] = array(
-			'check'   => 'document_language',
-			'status'  => '' !== $lang ? 'ok' : 'warning',
-			'message' => '' !== $lang ? "Document language is set ($lang)." : 'No document language attribute is set.',
-		);
+		// Document language: inspect the RENDERED front page, not the configured
+		// locale. A theme that omits language_attributes() ships <html> with no lang
+		// attribute even though get_bloginfo('language') is set, so checking the
+		// option alone gives a false pass. Fetch the home page and read the actual
+		// <html ... lang="..."> attribute; fail gracefully if the fetch fails.
+		$response = wp_remote_get( home_url( '/' ), array( 'timeout' => 15, 'sslverify' => false ) );
+		if ( is_wp_error( $response ) ) {
+			$findings[] = array(
+				'check'   => 'document_language',
+				'status'  => 'warning',
+				'message' => 'Could not verify the document language — fetching the home page failed (' . $response->get_error_message() . ').',
+			);
+		} else {
+			$body      = (string) wp_remote_retrieve_body( $response );
+			$html_lang = '';
+			if ( preg_match( '/<html\b[^>]*\blang\s*=\s*("[^"]*"|\'[^\']*\')/i', $body, $m ) ) {
+				$html_lang = trim( $m[1], "\"'" );
+			}
+			$findings[] = array(
+				'check'   => 'document_language',
+				'status'  => '' !== $html_lang ? 'ok' : 'warning',
+				'message' => '' !== $html_lang
+					? "Document language is set ($html_lang)."
+					: 'No lang attribute on the rendered <html> tag — the theme may be missing language_attributes().',
+			);
+		}
 
 		$total  = count( $findings );
 		$passed = 0;
@@ -149,7 +169,7 @@ class Aura_Tool_Scan_A11y extends Aura_Tool_Base {
 				'generic_links'          => $generic_links,
 				'posts_without_headings' => $posts_without_headings,
 			),
-			'note'           => 'Reads post_content (classic/Gutenberg); page-builder content stored in postmeta is not inspected here.',
+			'note'           => 'Reads post_content (classic/Gutenberg); page-builder content stored in postmeta is not inspected here. The document_language check fetches the rendered home page to read the actual <html lang> attribute.',
 			'generated_at'   => gmdate( 'c' ),
 		);
 	}

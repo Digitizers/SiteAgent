@@ -69,6 +69,9 @@ class Aura_Tool_Scan_Broken_Links extends Aura_Tool_Base {
 		$empty_anchor     = array();
 		$dev_links        = array();
 		$unresolved       = array();
+		$empty_anchor_total = 0;
+		$dev_links_total    = 0;
+		$unresolved_total   = 0;
 		$sample_cap       = 10;
 
 		foreach ( $ids as $id ) {
@@ -82,6 +85,7 @@ class Aura_Tool_Scan_Broken_Links extends Aura_Tool_Base {
 
 				// Empty or anchor-only.
 				if ( '' === $href || '#' === $href ) {
+					++$empty_anchor_total;
 					if ( count( $empty_anchor ) < $sample_cap ) {
 						$empty_anchor[] = array( 'post_id' => $id, 'href' => $href );
 					}
@@ -97,6 +101,7 @@ class Aura_Tool_Scan_Broken_Links extends Aura_Tool_Base {
 				$lower = strtolower( $href );
 				foreach ( $dev_markers as $marker ) {
 					if ( false !== strpos( $lower, $marker ) ) {
+						++$dev_links_total;
 						if ( count( $dev_links ) < $sample_cap ) {
 							$dev_links[] = array( 'post_id' => $id, 'href' => $href );
 						}
@@ -124,6 +129,7 @@ class Aura_Tool_Scan_Broken_Links extends Aura_Tool_Base {
 				}
 
 				if ( 0 === (int) url_to_postid( $href ) ) {
+					++$unresolved_total;
 					if ( count( $unresolved ) < $sample_cap ) {
 						$unresolved[] = array( 'post_id' => $id, 'href' => $href );
 					}
@@ -134,9 +140,9 @@ class Aura_Tool_Scan_Broken_Links extends Aura_Tool_Base {
 		return array(
 			'scanned'             => $scanned,
 			'links_total'         => $links_total,
-			'empty_or_anchor'     => array( 'count' => count( $empty_anchor ), 'samples' => $empty_anchor ),
-			'dev_staging_links'   => array( 'count' => count( $dev_links ), 'samples' => $dev_links ),
-			'unresolved_internal' => array( 'count' => count( $unresolved ), 'samples' => $unresolved ),
+			'empty_or_anchor'     => array( 'count' => $empty_anchor_total, 'samples' => $empty_anchor ),
+			'dev_staging_links'   => array( 'count' => $dev_links_total, 'samples' => $dev_links ),
+			'unresolved_internal' => array( 'count' => $unresolved_total, 'samples' => $unresolved ),
 			'note'               => 'No outbound HTTP performed; external links are not validated. Internal links resolved via url_to_postid — custom routes may appear unresolved.',
 			'generated_at'       => gmdate( 'c' ),
 		);
