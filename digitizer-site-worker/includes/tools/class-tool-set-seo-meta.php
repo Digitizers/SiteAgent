@@ -156,7 +156,7 @@ class Aura_Tool_Set_Seo_Meta extends Aura_Tool_Base {
 			return;
 		}
 		try {
-			$repository = YoastSEO()->classes->get( '\Yoast\WP\SEO\Repositories\Indexable_Repository' );
+			$repository = YoastSEO()->classes->get( 'Yoast\WP\SEO\Repositories\Indexable_Repository' );
 			if ( ! is_object( $repository ) || ! method_exists( $repository, 'find_by_id_and_type' ) ) {
 				return;
 			}
