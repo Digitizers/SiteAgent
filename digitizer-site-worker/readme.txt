@@ -4,7 +4,7 @@ Tags: wordpress management, remote updates, site monitoring, maintenance, dashbo
 Requires at least: 6.2
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 2.2.3
+Stable tag: 2.2.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -190,6 +190,9 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 
 == Changelog ==
 
+= 2.2.4 =
+* Fix: "Connect to Aura" (magic-link onboarding) now targets the Aura app host (`app.my-aura.app`) instead of the marketing domain, so one-click connect works out of the box. (Sites that set the `AURA_DASHBOARD_URL` constant are unaffected.)
+
 = 2.2.3 =
 * Fix: `set_seo_meta` on Yoast — after writing the meta, the cached Yoast indexable is now invalidated so the frontend serves the new SEO title/description immediately instead of the stale value (previously required a manual save/reindex).
 * Fix: `perf_check` autoload weight — counts all WP 6.6+ autoload values (`yes`, `on`, `auto-on`, `auto`) instead of only `yes`, so the figure is no longer under-reported on newer cores.
@@ -264,6 +267,9 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 * Zero frontend performance impact.
 
 == Upgrade Notice ==
+
+= 2.2.4 =
+Fixes one-click "Connect to Aura": the magic-link onboarding now targets the Aura app host (`app.my-aura.app`) instead of the marketing domain, so connect works out of the box. Sites that set the `AURA_DASHBOARD_URL` constant are unaffected.
 
 = 2.2.3 =
 Accuracy fixes for the auditor tools: `set_seo_meta` now refreshes Yoast's cache so SEO changes show immediately, `perf_check` counts all WP 6.6+ autoload values, `scan_broken_links` reports true totals, `scan_seo` scores missing excerpts, and `scan_a11y` checks the rendered page language. No changes to your site's content.

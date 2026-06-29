@@ -17,7 +17,7 @@
   </a>
   <img src="https://img.shields.io/badge/WordPress-6.2%E2%80%937.0-21759b?logo=wordpress" alt="WordPress" />
   <img src="https://img.shields.io/badge/PHP-7.4%2B-777bb4?logo=php" alt="PHP" />
-  <img src="https://img.shields.io/badge/Stable-2.2.3-green" alt="Stable" />
+  <img src="https://img.shields.io/badge/Stable-2.2.4-green" alt="Stable" />
 </p>
 
 ---
@@ -142,6 +142,10 @@ These plug straight into **Aura's Fleet MCP Gateway**: read tools run on demand,
 ---
 
 ## Changelog
+
+### 2.2.4
+
+- **Connect-to-Aura host fix** (no new tools — set stays at **18**): the "Connect to Aura" magic-link onboarding now targets the Aura app host (`app.my-aura.app`) instead of the marketing domain (`my-aura.app`), which has no onboarding API, so one-click connect works out of the box. Sites that set the `AURA_DASHBOARD_URL` constant are unaffected.
 
 ### 2.2.3
 
