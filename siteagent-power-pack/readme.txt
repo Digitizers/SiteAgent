@@ -1,5 +1,5 @@
 === SiteAgent Power Pack ===
-Contributors: digitizer
+Contributors: benkalsky
 Requires at least: 6.2
 Tested up to: 7.0
 Requires PHP: 7.4
