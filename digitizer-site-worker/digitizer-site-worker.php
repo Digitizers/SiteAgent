@@ -3,7 +3,7 @@
  * Plugin Name:       SiteAgent for Aura
  * Plugin URI:        https://my-aura.app/siteagent
  * Description:       Remote site management agent for Aura dashboard. Enables secure updates, health monitoring, and maintenance operations via REST API.
- * Version:           2.3.0
+ * Version:           2.4.0
  * Requires at least: 6.2
  * Requires PHP:      7.4
  * Author:            Digitizer

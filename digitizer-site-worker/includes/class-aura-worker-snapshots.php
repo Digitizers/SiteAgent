@@ -144,6 +144,34 @@ class Aura_Worker_Snapshots {
 	}
 
 	/**
+	 * Capture a post's current content before it is edited (Gutenberg/block edits).
+	 *
+	 * @param int $post_id Post ID.
+	 * @return array { success: bool, snapshot?: array, error?: string }
+	 */
+	public function snapshot_post( $post_id ) {
+		$post_id = (int) $post_id;
+		if ( $post_id <= 0 ) {
+			return array( 'success' => false, 'error' => 'Invalid post id.' );
+		}
+
+		$post = get_post( $post_id );
+		if ( ! $post ) {
+			return array( 'success' => false, 'error' => 'Post not found: ' . $post_id );
+		}
+
+		$record = $this->persist(
+			array(
+				'kind'    => 'post',
+				'target'  => $post_id,
+			),
+			(string) $post->post_content
+		);
+
+		return array( 'success' => true, 'snapshot' => $record );
+	}
+
+	/**
 	 * Load a snapshot record by id.
 	 *
 	 * @param string $id Snapshot id.
@@ -190,6 +218,20 @@ class Aura_Worker_Snapshots {
 				$raw          = ( $payload_path && file_exists( $payload_path ) ) ? file_get_contents( $payload_path ) : '';
 				update_option( $record['target'], unserialize( $raw ) );
 				return array( 'success' => true );
+
+			case 'post':
+				$payload_path = $record['payload_path'] ?? '';
+				$content      = ( $payload_path && file_exists( $payload_path ) ) ? file_get_contents( $payload_path ) : '';
+				$result       = wp_update_post(
+					array(
+						'ID'           => (int) $record['target'],
+						'post_content' => $content,
+					),
+					true
+				);
+				return is_wp_error( $result )
+					? array( 'success' => false, 'error' => $result->get_error_message() )
+					: array( 'success' => true );
 
 			default:
 				return array( 'success' => false, 'error' => 'Unsupported snapshot kind: ' . $record['kind'] );
