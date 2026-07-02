@@ -407,11 +407,6 @@ require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-rollback.php';
 require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-snapshots.php';
 require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-mcp.php';
 
-// Companion Power Pack tool classes (extend Aura_Tool_Base above).
-define( 'SA_POWER_PACK_DIR', dirname( __DIR__ ) . '/siteagent-power-pack' );
-require_once SA_POWER_PACK_DIR . '/includes/tools/class-tool-fs-read.php';
-require_once SA_POWER_PACK_DIR . '/includes/tools/class-tool-db-query.php';
-
 /**
  * Reset all mutable stub state. Call from each test's setUp().
  */

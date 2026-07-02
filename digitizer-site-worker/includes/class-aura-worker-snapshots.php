@@ -52,7 +52,15 @@ class Aura_Worker_Snapshots {
 	 * @return string
 	 */
 	private function new_id() {
-		return 'snap_' . gmdate( 'Ymd_His' ) . '_' . substr( md5( uniqid( '', true ) ), 0, 8 );
+		// Timestamp prefix keeps ids newest-first sortable; the suffix is a CSPRNG
+		// value (not a predictable uniqid) so payload filenames can't be guessed
+		// on a host where the .htaccess deny is ignored (nginx).
+		try {
+			$rand = bin2hex( random_bytes( 12 ) );
+		} catch ( \Exception $e ) {
+			$rand = substr( md5( uniqid( '', true ) ), 0, 24 );
+		}
+		return 'snap_' . gmdate( 'Ymd_His' ) . '_' . $rand;
 	}
 
 	/**
