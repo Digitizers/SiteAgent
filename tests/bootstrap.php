@@ -411,6 +411,9 @@ require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-mcp.php';
 define( 'SA_POWER_PACK_DIR', dirname( __DIR__ ) . '/siteagent-power-pack' );
 require_once SA_POWER_PACK_DIR . '/includes/tools/class-tool-fs-read.php';
 require_once SA_POWER_PACK_DIR . '/includes/tools/class-tool-db-query.php';
+require_once SA_POWER_PACK_DIR . '/includes/tools/class-tool-fs-write.php';
+require_once SA_POWER_PACK_DIR . '/includes/tools/class-tool-wp-cli.php';
+require_once SA_POWER_PACK_DIR . '/includes/tools/class-tool-execute-php.php';
 
 /**
  * Reset all mutable stub state. Call from each test's setUp().

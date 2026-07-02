@@ -3,7 +3,7 @@
  * Plugin Name:       SiteAgent Power Pack
  * Plugin URI:        https://my-aura.app/siteagent
  * Description:        Governed power tools for SiteAgent — approval-gated, snapshot-first filesystem and database operations exposed to the Aura Fleet Gateway. NOT distributed on wordpress.org (companion to the digitizer-site-worker base plugin).
- * Version:           0.1.0
+ * Version:           0.2.0
  * Requires PHP:      7.4
  * Requires Plugins:  digitizer-site-worker
  * Author:            Digitizer
@@ -45,9 +45,15 @@ function aura_power_pack_register_tools( $tools ) {
 	$dir = AURA_POWER_PACK_DIR . 'includes/tools/';
 	require_once $dir . 'class-tool-fs-read.php';
 	require_once $dir . 'class-tool-db-query.php';
+	require_once $dir . 'class-tool-fs-write.php';
+	require_once $dir . 'class-tool-wp-cli.php';
+	require_once $dir . 'class-tool-execute-php.php';
 
 	$tools[] = 'Aura_Power_Tool_Fs_Read';
 	$tools[] = 'Aura_Power_Tool_Db_Query';
+	$tools[] = 'Aura_Power_Tool_Fs_Write';
+	$tools[] = 'Aura_Power_Tool_Wp_Cli';
+	$tools[] = 'Aura_Power_Tool_Execute_Php';
 
 	return $tools;
 }
