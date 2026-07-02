@@ -183,9 +183,36 @@ final class GrantTest extends TestCase {
 		$this->assertSame( 'bad nonce', $result );
 	}
 
-	public function test_no_pubkey_reports_not_provisioned(): void {
+	public function test_unconfigured_key_is_not_enforced(): void {
 		unset( $GLOBALS['_options']['aura_worker_grant_pubkey'] );
+		$this->assertFalse( Aura_Worker_Grant::is_enforced() );
+		// verify() called directly (bypassing is_enforced) still refuses.
 		$grant = $this->mint();
-		$this->assertSame( 'no grant key provisioned', Aura_Worker_Grant::verify( $grant, 'execute_php', array( 'code' => '1+1' ) ) );
+		$this->assertSame( 'grant key is misconfigured', Aura_Worker_Grant::verify( $grant, 'execute_php', array( 'code' => '1+1' ) ) );
+	}
+
+	public function test_invalid_pubkey_is_enforced_and_fails_closed(): void {
+		// A configured-but-invalid key must NOT disable enforcement (fail-open);
+		// enforcement stays on and verification is refused.
+		$GLOBALS['_options']['aura_worker_grant_pubkey'] = 'not-valid-base64!!';
+		$this->assertTrue( Aura_Worker_Grant::is_enforced() );
+		$grant = $this->mint();
+		$this->assertSame( 'grant key is misconfigured', Aura_Worker_Grant::verify( $grant, 'execute_php', array( 'code' => '1+1' ) ) );
+	}
+
+	public function test_wrong_length_pubkey_fails_closed(): void {
+		// Valid base64 but not 32 bytes → still enforced, still refused.
+		$GLOBALS['_options']['aura_worker_grant_pubkey'] = base64_encode( 'too-short' );
+		$this->assertTrue( Aura_Worker_Grant::is_enforced() );
+		$grant = $this->mint();
+		$this->assertSame( 'grant key is misconfigured', Aura_Worker_Grant::verify( $grant, 'execute_php', array( 'code' => '1+1' ) ) );
+	}
+
+	public function test_spent_nonce_schedules_cleanup(): void {
+		$grant = $this->mint();
+		$this->assertTrue( Aura_Worker_Grant::verify( $grant, 'execute_php', array( 'code' => '1+1' ) ) );
+		// A self-cleaning deletion event was scheduled for the reserved nonce.
+		$this->assertNotEmpty( $GLOBALS['_scheduled'] );
+		$this->assertSame( Aura_Worker_Grant::NONCE_GC_HOOK, $GLOBALS['_scheduled'][0]['hook'] );
 	}
 }

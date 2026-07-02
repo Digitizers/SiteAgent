@@ -35,29 +35,44 @@ class Aura_Worker_Grant {
 	const MAX_TTL = 900;
 
 	/**
-	 * Transient key prefix for spent nonces (single-use enforcement).
+	 * Option-name prefix for spent nonces (single-use enforcement).
 	 */
 	const NONCE_PREFIX = 'aura_grant_nonce_';
 
 	/**
+	 * Cron hook that deletes a single spent-nonce reservation after it expires.
+	 */
+	const NONCE_GC_HOOK = 'aura_worker_delete_grant_nonce';
+
+	/**
 	 * Whether grant enforcement is active for this site.
 	 *
-	 * Enforcement turns ON once the gateway has provisioned its public key. Until
-	 * then the site keeps its prior behavior (forensic hook only), so existing
-	 * deployments don't break on upgrade.
+	 * Enforcement turns ON as soon as a key is CONFIGURED (the option is
+	 * non-empty), regardless of whether that key parses. This is deliberate: a
+	 * misconfigured, truncated, or corrupted key must fail CLOSED in verify() —
+	 * never silently revert approval-required tools to token-only execution.
+	 * Until a key is configured, the site keeps its prior behavior (forensic hook
+	 * only), so existing deployments don't break on upgrade.
 	 *
 	 * @return bool
 	 */
 	public static function is_enforced() {
-		return '' !== self::pubkey_raw();
+		return '' !== (string) get_option( 'aura_worker_grant_pubkey', '' );
 	}
 
 	/**
-	 * The raw 32-byte Ed25519 public key, or '' when not provisioned / invalid.
+	 * The raw 32-byte Ed25519 public key, or '' when unconfigured / invalid /
+	 * unusable (no libsodium). Callers reached via is_enforced() treat '' as a
+	 * hard failure, not a bypass.
 	 *
 	 * @return string
 	 */
 	private static function pubkey_raw() {
+		// Guard the sodium constant so a no-libsodium host doesn't fatal here
+		// before verify() can return its intended error.
+		if ( ! defined( 'SODIUM_CRYPTO_SIGN_PUBLICKEYBYTES' ) ) {
+			return '';
+		}
 		$b64 = (string) get_option( 'aura_worker_grant_pubkey', '' );
 		if ( '' === $b64 ) {
 			return '';
@@ -84,7 +99,9 @@ class Aura_Worker_Grant {
 
 		$pubkey = self::pubkey_raw();
 		if ( '' === $pubkey ) {
-			return 'no grant key provisioned';
+			// Reached only when is_enforced() is true (a key IS configured), so an
+			// empty result means the configured key is invalid — fail closed.
+			return 'grant key is misconfigured';
 		}
 
 		$header = trim( (string) $header );
@@ -154,19 +171,38 @@ class Aura_Worker_Grant {
 			return 'grant expired';
 		}
 
-		// Single-use: a spent nonce is refused. Stored only until the grant would
-		// expire anyway (the window check above bounds replay past that).
+		// Single-use: reserve the nonce ATOMICALLY. add_option() is an INSERT
+		// guarded by the option_name unique index, so exactly one of two
+		// concurrent workers handling the same grant wins — a check-then-set on a
+		// transient would let both pass. The row is self-cleaning: each nonce
+		// schedules its own deletion just past the grant's expiry, so spent
+		// nonces don't accumulate and a bulk GC query is unnecessary.
 		$nonce = isset( $g['nonce'] ) ? (string) $g['nonce'] : '';
 		if ( '' === $nonce || strlen( $nonce ) > 128 || ! ctype_xdigit( $nonce ) ) {
 			return 'bad nonce';
 		}
 		$key = self::NONCE_PREFIX . hash( 'sha256', $nonce );
-		if ( false !== get_transient( $key ) ) {
+		if ( ! add_option( $key, $exp, '', 'no' ) ) {
 			return 'grant already used';
 		}
-		set_transient( $key, 1, max( 1, ( $exp - $now ) + self::CLOCK_SKEW ) );
+		if ( function_exists( 'wp_schedule_single_event' ) ) {
+			wp_schedule_single_event( $exp + self::CLOCK_SKEW, self::NONCE_GC_HOOK, array( $key ) );
+		}
 
 		return true;
+	}
+
+	/**
+	 * Delete a spent-nonce reservation. Fired by the single event scheduled when
+	 * the nonce was reserved; also runs as a sweep in case an event was missed.
+	 *
+	 * @param string $key Nonce option name.
+	 * @return void
+	 */
+	public static function delete_spent_nonce( $key ) {
+		if ( is_string( $key ) && 0 === strpos( $key, self::NONCE_PREFIX ) ) {
+			delete_option( $key );
+		}
 	}
 
 	/**

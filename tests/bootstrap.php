@@ -144,6 +144,26 @@ if ( ! function_exists( 'update_option' ) ) {
 	}
 }
 
+if ( ! function_exists( 'add_option' ) ) {
+	// Atomic in core (INSERT guarded by option_name's unique index): fails when
+	// the option already exists. The verifier relies on this for single-use
+	// nonce reservation, so the stub mirrors that fail-if-exists semantics.
+	function add_option( string $option, $value = '', $deprecated = '', $autoload = 'yes' ): bool {
+		if ( array_key_exists( $option, $GLOBALS['_options'] ) ) {
+			return false;
+		}
+		$GLOBALS['_options'][ $option ] = $value;
+		return true;
+	}
+}
+
+if ( ! function_exists( 'wp_schedule_single_event' ) ) {
+	function wp_schedule_single_event( int $timestamp, string $hook, array $args = array() ) {
+		$GLOBALS['_scheduled'][] = array( 'ts' => $timestamp, 'hook' => $hook, 'args' => $args );
+		return true;
+	}
+}
+
 if ( ! function_exists( 'delete_option' ) ) {
 	function delete_option( string $option ): bool {
 		unset( $GLOBALS['_options'][ $option ] );
@@ -507,6 +527,7 @@ function sa_reset_state(): void {
 	$GLOBALS['_posts']        = array();
 	$GLOBALS['_abilities']    = array();
 	$GLOBALS['_ability_categories'] = array();
+	$GLOBALS['_scheduled']    = array();
 	if ( isset( $GLOBALS['wpdb'] ) ) {
 		$GLOBALS['wpdb']->last_error = '';
 		$GLOBALS['wpdb']->last_query = '';
