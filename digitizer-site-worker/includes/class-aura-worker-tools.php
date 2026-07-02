@@ -154,4 +154,58 @@ class Aura_Worker_Tools {
 			);
 		}
 	}
+
+	/**
+	 * Produce a preview of what a tool would do, without executing it.
+	 *
+	 * Backs the aura/mcp/tools/preview endpoint: the Aura gateway calls this
+	 * before queuing a power action so a human can see the effect (static-scan
+	 * verdict, planned command, file diff, SQL) at approval time. Tools that do
+	 * not declare supports_preview return `supported: false` with a null preview.
+	 *
+	 * @param string $name   Tool name.
+	 * @param array  $params Parameters to preview.
+	 * @return array { success: bool, supported?: bool, preview?: mixed, error?: string, errors?: string[] }
+	 */
+	public function preview_tool( $name, $params ) {
+		$tool = $this->get_tool( $name );
+
+		if ( null === $tool ) {
+			return array(
+				'success' => false,
+				'error'   => "Unknown tool: $name",
+			);
+		}
+
+		$validation = $tool->validate_params( $params );
+		if ( ! $validation['valid'] ) {
+			return array(
+				'success' => false,
+				'error'   => 'Parameter validation failed.',
+				'errors'  => $validation['errors'],
+			);
+		}
+
+		$annotations = $tool->get_annotations();
+		if ( empty( $annotations['supports_preview'] ) ) {
+			return array(
+				'success'   => true,
+				'supported' => false,
+				'preview'   => null,
+			);
+		}
+
+		try {
+			return array(
+				'success'   => true,
+				'supported' => true,
+				'preview'   => $tool->dry_run( $params ),
+			);
+		} catch ( Exception $e ) {
+			return array(
+				'success' => false,
+				'error'   => $e->getMessage(),
+			);
+		}
+	}
 }

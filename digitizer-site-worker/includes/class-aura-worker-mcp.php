@@ -80,6 +80,27 @@ class Aura_Worker_MCP {
 			),
 		) );
 
+		// POST /aura/mcp/tools/preview — dry-run a tool (no state change).
+		register_rest_route( self::NAMESPACE, '/tools/preview', array(
+			'methods'             => 'POST',
+			'callback'            => array( $this, 'preview_tool' ),
+			'permission_callback' => array( $this->security, 'check_read_permission' ),
+			'args'                => array(
+				'tool' => array(
+					'required'          => true,
+					'type'              => 'string',
+					'sanitize_callback' => 'sanitize_text_field',
+					'description'       => __( 'Tool name to preview.', 'digitizer-site-worker' ),
+				),
+				'params' => array(
+					'required'    => false,
+					'type'        => 'object',
+					'description' => __( 'Parameters to preview (key/value pairs).', 'digitizer-site-worker' ),
+					'default'     => array(),
+				),
+			),
+		) );
+
 		// GET /aura/mcp/context — shortcut that returns site context.
 		register_rest_route( self::NAMESPACE, '/context', array(
 			'methods'             => 'GET',
@@ -121,6 +142,28 @@ class Aura_Worker_MCP {
 		}
 
 		$result = $this->tools->execute_tool( $tool_name, $params );
+		$status = $result['success'] ? 200 : 400;
+
+		return new WP_REST_Response( $result, $status );
+	}
+
+	/**
+	 * POST /aura/mcp/tools/preview
+	 *
+	 * Returns a non-executing preview of a tool for the given parameters.
+	 *
+	 * @param WP_REST_Request $request Request object.
+	 * @return WP_REST_Response
+	 */
+	public function preview_tool( $request ) {
+		$tool_name = $request->get_param( 'tool' );
+		$params    = $request->get_param( 'params' );
+
+		if ( ! is_array( $params ) ) {
+			$params = array();
+		}
+
+		$result = $this->tools->preview_tool( $tool_name, $params );
 		$status = $result['success'] ? 200 : 400;
 
 		return new WP_REST_Response( $result, $status );
