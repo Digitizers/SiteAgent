@@ -397,6 +397,66 @@ if ( ! class_exists( 'SA_Test_Filesystem' ) ) {
 }
 
 // ---------------------------------------------------------------------------
+// Post + Gutenberg-block stubs (for the block tools). Blocks are represented as
+// JSON in these tests so parse/serialize round-trip cleanly; the real plugin
+// uses WordPress's parse_blocks()/serialize_blocks() on real block markup.
+// ---------------------------------------------------------------------------
+
+$GLOBALS['_posts'] = array();
+
+if ( ! function_exists( 'get_post' ) ) {
+	function get_post( $post = null, string $output = 'OBJECT', string $filter = 'raw' ) {
+		$id = (int) ( is_object( $post ) ? ( $post->ID ?? 0 ) : $post );
+		return $GLOBALS['_posts'][ $id ] ?? null;
+	}
+}
+
+if ( ! function_exists( 'wp_insert_post' ) ) {
+	function wp_insert_post( array $args, bool $wp_error = false ) {
+		static $next = 1000;
+		$id = ++$next;
+		$GLOBALS['_posts'][ $id ] = (object) array(
+			'ID'           => $id,
+			'post_title'   => $args['post_title'] ?? '',
+			'post_content' => $args['post_content'] ?? '',
+			'post_status'  => $args['post_status'] ?? 'draft',
+			'post_type'    => $args['post_type'] ?? 'page',
+		);
+		return $id;
+	}
+}
+
+if ( ! function_exists( 'wp_update_post' ) ) {
+	function wp_update_post( array $args, bool $wp_error = false ) {
+		$id = (int) ( $args['ID'] ?? 0 );
+		if ( ! isset( $GLOBALS['_posts'][ $id ] ) ) {
+			return $wp_error ? new WP_Error( 'invalid_post', 'Post does not exist.' ) : 0;
+		}
+		foreach ( $args as $k => $v ) {
+			$GLOBALS['_posts'][ $id ]->$k = $v;
+		}
+		return $id;
+	}
+}
+
+if ( ! function_exists( 'parse_blocks' ) ) {
+	function parse_blocks( string $content ): array {
+		$content = trim( $content );
+		if ( '' === $content ) {
+			return array();
+		}
+		$decoded = json_decode( $content, true );
+		return is_array( $decoded ) ? $decoded : array();
+	}
+}
+
+if ( ! function_exists( 'serialize_blocks' ) ) {
+	function serialize_blocks( array $blocks ): string {
+		return wp_json_encode( $blocks );
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Load the classes under test
 // ---------------------------------------------------------------------------
 
@@ -406,6 +466,12 @@ require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-security.php';
 require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-rollback.php';
 require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-snapshots.php';
 require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-mcp.php';
+
+// Load every shipped tool class so tool-level tests can instantiate them
+// directly (the registry auto-loads the same set at construction time).
+foreach ( glob( SA_PLUGIN_DIR . '/includes/tools/class-tool-*.php' ) as $tool_file ) {
+	require_once $tool_file;
+}
 
 /**
  * Reset all mutable stub state. Call from each test's setUp().
@@ -420,6 +486,7 @@ function sa_reset_state(): void {
 	$GLOBALS['_did_actions']  = array();
 	$GLOBALS['_filters']      = array();
 	$GLOBALS['_db_rows']      = array();
+	$GLOBALS['_posts']        = array();
 	if ( isset( $GLOBALS['wpdb'] ) ) {
 		$GLOBALS['wpdb']->last_error = '';
 		$GLOBALS['wpdb']->last_query = '';
