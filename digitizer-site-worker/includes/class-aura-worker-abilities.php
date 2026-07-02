@@ -77,6 +77,18 @@ class Aura_Worker_Abilities {
 			return;
 		}
 
+		// The Abilities API rejects a registration whose category isn't
+		// registered (WP_Abilities_Registry::register() returns null), so declare
+		// our category first when the API supports categories.
+		if ( function_exists( 'wp_register_ability_category' ) ) {
+			wp_register_ability_category(
+				'site-management',
+				array(
+					'label' => __( 'Site Management', 'digitizer-site-worker' ),
+				)
+			);
+		}
+
 		foreach ( $this->tools->list_tools() as $meta ) {
 			$name = $meta['name'];
 			$ann  = isset( $meta['annotations'] ) && is_array( $meta['annotations'] ) ? $meta['annotations'] : array();
