@@ -61,6 +61,7 @@ $GLOBALS['_admins']       = array();
 $GLOBALS['_current_user'] = 0;
 $GLOBALS['_did_actions']  = array();
 $GLOBALS['_filters']      = array();
+$GLOBALS['_abilities']    = array();
 
 // ---------------------------------------------------------------------------
 // WordPress function stubs
@@ -213,6 +214,13 @@ if ( ! function_exists( 'get_users' ) ) {
 if ( ! function_exists( 'do_action' ) ) {
 	function do_action( string $tag, ...$args ): void {
 		$GLOBALS['_did_actions'][] = array( 'tag' => $tag, 'args' => $args );
+	}
+}
+
+if ( ! function_exists( 'wp_register_ability' ) ) {
+	function wp_register_ability( string $name, array $args ): bool {
+		$GLOBALS['_abilities'][ $name ] = $args;
+		return true;
 	}
 }
 
@@ -466,6 +474,7 @@ require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-security.php';
 require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-rollback.php';
 require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-snapshots.php';
 require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-mcp.php';
+require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-abilities.php';
 
 // Load every shipped tool class so tool-level tests can instantiate them
 // directly (the registry auto-loads the same set at construction time).
@@ -487,6 +496,7 @@ function sa_reset_state(): void {
 	$GLOBALS['_filters']      = array();
 	$GLOBALS['_db_rows']      = array();
 	$GLOBALS['_posts']        = array();
+	$GLOBALS['_abilities']    = array();
 	if ( isset( $GLOBALS['wpdb'] ) ) {
 		$GLOBALS['wpdb']->last_error = '';
 		$GLOBALS['wpdb']->last_query = '';

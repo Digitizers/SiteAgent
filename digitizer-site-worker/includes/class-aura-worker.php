@@ -26,6 +26,13 @@ class Aura_Worker {
 	private $mcp;
 
 	/**
+	 * Abilities API bridge instance.
+	 *
+	 * @var Aura_Worker_Abilities
+	 */
+	private $abilities;
+
+	/**
 	 * Magic link onboarding handler instance.
 	 *
 	 * @var Aura_Worker_Magic_Link
@@ -46,11 +53,17 @@ class Aura_Worker {
 		$this->security    = new Aura_Worker_Security();
 		$this->api         = new Aura_Worker_API( $this->security );
 		$this->mcp         = new Aura_Worker_MCP( $this->security );
+		$this->abilities   = new Aura_Worker_Abilities();
 		$this->magic_link  = new Aura_Worker_Magic_Link();
 
 		// Register REST API routes.
 		add_action( 'rest_api_init', array( $this->api, 'register_routes' ) );
 		add_action( 'rest_api_init', array( $this->mcp, 'register_routes' ) );
+
+		// Standards-alignment: also expose tools via the WordPress Abilities API
+		// (when present) so the official MCP adapter can discover them. Additive —
+		// the aura/mcp namespace above is unaffected.
+		add_action( 'wp_abilities_api_init', array( $this->abilities, 'register' ) );
 
 		// Add settings page and privacy policy.
 		if ( is_admin() ) {

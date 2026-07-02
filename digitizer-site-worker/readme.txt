@@ -4,7 +4,7 @@ Tags: wordpress management, remote updates, site monitoring, maintenance, dashbo
 Requires at least: 6.2
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 2.4.0
+Stable tag: 2.5.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -189,6 +189,11 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 3. Remote plugin update in progress from the Aura dashboard — select a plugin and update it with a single click.
 
 == Changelog ==
+
+= 2.5.0 =
+* WordPress Abilities API bridge: SiteAgent tools are now dual-registered as WP
+  abilities when the core Abilities API is present, so the official MCP adapter
+  and standard MCP clients can discover them (aura/mcp namespace unchanged).
 
 = 2.4.0 =
 * Gutenberg (block editor) tools: list_page_blocks (read), update_page_block
