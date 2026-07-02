@@ -62,6 +62,7 @@ $GLOBALS['_current_user'] = 0;
 $GLOBALS['_did_actions']  = array();
 $GLOBALS['_filters']      = array();
 $GLOBALS['_abilities']    = array();
+$GLOBALS['_ability_categories'] = array();
 
 // ---------------------------------------------------------------------------
 // WordPress function stubs
@@ -220,6 +221,13 @@ if ( ! function_exists( 'do_action' ) ) {
 if ( ! function_exists( 'wp_register_ability' ) ) {
 	function wp_register_ability( string $name, array $args ): bool {
 		$GLOBALS['_abilities'][ $name ] = $args;
+		return true;
+	}
+}
+
+if ( ! function_exists( 'wp_register_ability_category' ) ) {
+	function wp_register_ability_category( string $slug, array $args ): bool {
+		$GLOBALS['_ability_categories'][ $slug ] = $args;
 		return true;
 	}
 }
@@ -497,6 +505,7 @@ function sa_reset_state(): void {
 	$GLOBALS['_db_rows']      = array();
 	$GLOBALS['_posts']        = array();
 	$GLOBALS['_abilities']    = array();
+	$GLOBALS['_ability_categories'] = array();
 	if ( isset( $GLOBALS['wpdb'] ) ) {
 		$GLOBALS['wpdb']->last_error = '';
 		$GLOBALS['wpdb']->last_query = '';

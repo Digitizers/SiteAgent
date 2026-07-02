@@ -62,7 +62,10 @@ class Aura_Worker {
 
 		// Standards-alignment: also expose tools via the WordPress Abilities API
 		// (when present) so the official MCP adapter can discover them. Additive —
-		// the aura/mcp namespace above is unaffected.
+		// the aura/mcp namespace above is unaffected. The category must register
+		// on its own earlier hook, else every ability is rejected for an
+		// unregistered category.
+		add_action( 'wp_abilities_api_categories_init', array( $this->abilities, 'register_category' ) );
 		add_action( 'wp_abilities_api_init', array( $this->abilities, 'register' ) );
 
 		// Add settings page and privacy policy.

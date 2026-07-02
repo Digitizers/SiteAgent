@@ -194,6 +194,14 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 * WordPress Abilities API bridge: SiteAgent tools are now dual-registered as WP
   abilities when the core Abilities API is present, so the official MCP adapter
   and standard MCP clients can discover them (aura/mcp namespace unchanged).
+* Hardening (external review): register the abilities category before the
+  abilities (else a real Abilities API rejects them); default a missing input to
+  {} for parameterless abilities; snapshot engine fails closed when a payload/
+  metadata write fails, uses an uncollidable "absent option" sentinel, and post
+  restore refuses a missing payload instead of wiping the page; Gutenberg
+  update refuses inner_html on a block with nested children and surfaces the
+  inner_html change in its preview; the snapshot REST file endpoint jails targets
+  to wp-content and refuses wp-config.php; AURA_WORKER_VERSION synced.
 
 = 2.4.0 =
 * Gutenberg (block editor) tools: list_page_blocks (read), update_page_block

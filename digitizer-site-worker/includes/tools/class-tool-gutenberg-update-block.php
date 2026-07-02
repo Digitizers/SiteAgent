@@ -111,12 +111,29 @@ class Aura_Tool_Gutenberg_Update_Block extends Aura_Tool_Base {
 			$block['attrs']  = array_merge( $existing, $params['attrs'] );
 		}
 		if ( isset( $params['inner_html'] ) ) {
+			// Only reached for a leaf block (non-leaf inner_html is refused up
+			// front, see inner_html_conflict) — keep innerContent in sync so
+			// serialize_blocks emits the new markup.
 			$block['innerHTML']    = (string) $params['inner_html'];
-			// Leaf block: keep innerContent in sync so serialize_blocks emits the
-			// new markup. (innerBlocks, if any, are preserved untouched.)
 			$block['innerContent'] = array( (string) $params['inner_html'] );
 		}
 		return $block;
+	}
+
+	/**
+	 * Replacing inner_html on a block that has nested innerBlocks would drop the
+	 * child blocks on serialization (their null placeholders in innerContent are
+	 * lost). Refuse it rather than silently deleting the children.
+	 *
+	 * @param array $block  The target block.
+	 * @param array $params Parameters.
+	 * @return string|false Error message, or false if allowed.
+	 */
+	private function inner_html_conflict( $block, $params ) {
+		if ( isset( $params['inner_html'] ) && ! empty( $block['innerBlocks'] ) ) {
+			return 'Refused: cannot replace inner HTML of a block that has nested blocks — that would drop the child blocks. Edit the child blocks instead.';
+		}
+		return false;
 	}
 
 	public function dry_run( $params ) {
@@ -126,9 +143,15 @@ class Aura_Tool_Gutenberg_Update_Block extends Aura_Tool_Base {
 		}
 		$index   = $located['index'];
 		$current = $located['blocks'][ $index ];
+
+		$conflict = $this->inner_html_conflict( $current, $params );
+		if ( false !== $conflict ) {
+			return array( 'error' => $conflict );
+		}
+
 		$updated = $this->apply_change( $current, $params );
 
-		return array(
+		$preview = array(
 			'post_id'     => (int) $params['post_id'],
 			'block_index' => $index,
 			'current'     => array(
@@ -140,6 +163,15 @@ class Aura_Tool_Gutenberg_Update_Block extends Aura_Tool_Base {
 				'attrs' => isset( $updated['attrs'] ) ? $updated['attrs'] : array(),
 			),
 		);
+
+		// Surface an inner_html change so the approver sees what will actually
+		// change (the tool advertises supports_preview and approval depends on it).
+		if ( isset( $params['inner_html'] ) ) {
+			$preview['current']['inner_html']  = isset( $current['innerHTML'] ) ? $current['innerHTML'] : '';
+			$preview['proposed']['inner_html'] = (string) $params['inner_html'];
+		}
+
+		return $preview;
 	}
 
 	public function execute( $params ) {
@@ -151,6 +183,11 @@ class Aura_Tool_Gutenberg_Update_Block extends Aura_Tool_Base {
 		$post   = $located['post'];
 		$blocks = $located['blocks'];
 		$index  = $located['index'];
+
+		$conflict = $this->inner_html_conflict( $blocks[ $index ], $params );
+		if ( false !== $conflict ) {
+			return array( 'error' => $conflict );
+		}
 
 		// Snapshot-first (reversible). Fail closed if we can't capture a backup.
 		$snapshot_id = '';

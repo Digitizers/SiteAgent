@@ -43,8 +43,34 @@ class Aura_Worker_Abilities {
 	}
 
 	/**
+	 * Register the ability category.
+	 *
+	 * MUST run on `wp_abilities_api_categories_init`, which fires *before*
+	 * `wp_abilities_api_init`. The Abilities API rejects any ability whose
+	 * category isn't already registered (WP_Abilities_Registry::register()
+	 * returns null), so registering the category inside register() — on the
+	 * later hook — is too late: every tool would be silently dropped and the
+	 * MCP adapter would discover zero SiteAgent tools. A `description` is also
+	 * required by wp_register_ability_category().
+	 */
+	public function register_category() {
+		if ( ! function_exists( 'wp_register_ability_category' ) ) {
+			return;
+		}
+
+		wp_register_ability_category(
+			'site-management',
+			array(
+				'label'       => __( 'Site Management', 'digitizer-site-worker' ),
+				'description' => __( 'Manage this WordPress site — content, design, security, and maintenance.', 'digitizer-site-worker' ),
+			)
+		);
+	}
+
+	/**
 	 * Register every SiteAgent tool as a WordPress ability.
 	 * Hooked on `wp_abilities_api_init`; a no-op when the API is absent.
+	 * The category is registered separately on `wp_abilities_api_categories_init`.
 	 */
 	public function register() {
 		if ( ! function_exists( 'wp_register_ability' ) ) {
@@ -98,12 +124,21 @@ class Aura_Worker_Abilities {
 			}
 		}
 
-		return array(
+		$schema = array(
 			'type'                 => 'object',
 			'properties'           => empty( $properties ) ? (object) array() : $properties,
 			'required'             => $required,
 			'additionalProperties' => true,
 		);
+
+		// When nothing is required, default a missing input to {} so a
+		// no-argument ability (check_health, scan_security) isn't rejected by
+		// validate_input just because the caller omitted `input`.
+		if ( empty( $required ) ) {
+			$schema['default'] = (object) array();
+		}
+
+		return $schema;
 	}
 
 	/**

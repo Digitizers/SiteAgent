@@ -18,7 +18,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'AURA_WORKER_VERSION', '2.3.0' );
+define( 'AURA_WORKER_VERSION', '2.5.0' );
 define( 'AURA_WORKER_FILE', __FILE__ );
 define( 'AURA_WORKER_DIR', plugin_dir_path( __FILE__ ) );
 

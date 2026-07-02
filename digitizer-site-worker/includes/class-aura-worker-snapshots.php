@@ -68,7 +68,9 @@ class Aura_Worker_Snapshots {
 	 *
 	 * @param array       $meta    Record metadata (kind, target, created, ...).
 	 * @param string|null $payload Optional raw payload to store alongside.
-	 * @return array The stored record (including its id and paths).
+	 * @return array|false The stored record, or false if any write failed (so the
+	 *                     caller can fail closed — a power tool must not proceed
+	 *                     believing it has a rollback point when it doesn't).
 	 */
 	private function persist( $meta, $payload = null ) {
 		$id                  = $this->new_id();
@@ -76,13 +78,21 @@ class Aura_Worker_Snapshots {
 		$meta['created_gmt'] = gmdate( 'Y-m-d H:i:s' );
 
 		if ( null !== $payload ) {
-			$payload_path         = $this->dir . $id . '.payload';
-			file_put_contents( $payload_path, $payload );
+			$payload_path = $this->dir . $id . '.payload';
+			if ( false === file_put_contents( $payload_path, $payload ) ) {
+				return false;
+			}
 			$meta['payload_path'] = $payload_path;
 		}
 
+		$json = wp_json_encode( $meta );
+		if ( false === $json ) {
+			return false;
+		}
 		$meta_path = $this->dir . $id . '.json';
-		file_put_contents( $meta_path, wp_json_encode( $meta ) );
+		if ( false === file_put_contents( $meta_path, $json ) ) {
+			return false;
+		}
 		$meta['meta_path'] = $meta_path;
 
 		return $meta;
@@ -113,6 +123,9 @@ class Aura_Worker_Snapshots {
 			$contents
 		);
 
+		if ( false === $record ) {
+			return array( 'success' => false, 'error' => 'Failed to persist snapshot (disk full or unwritable).' );
+		}
 		return array( 'success' => true, 'snapshot' => $record );
 	}
 
@@ -127,7 +140,10 @@ class Aura_Worker_Snapshots {
 			return array( 'success' => false, 'error' => 'Invalid option name.' );
 		}
 
-		$sentinel = '__aura_absent__';
+		// Uncollidable sentinel: a fresh object can never equal a stored option
+		// value, so an option whose value happens to be a magic string isn't
+		// mistaken for "absent" (which restore would wrongly delete).
+		$sentinel = new stdClass();
 		$value    = get_option( $name, $sentinel );
 		$existed  = ( $value !== $sentinel );
 
@@ -140,6 +156,9 @@ class Aura_Worker_Snapshots {
 			$existed ? serialize( $value ) : ''
 		);
 
+		if ( false === $record ) {
+			return array( 'success' => false, 'error' => 'Failed to persist snapshot (disk full or unwritable).' );
+		}
 		return array( 'success' => true, 'snapshot' => $record );
 	}
 
@@ -168,6 +187,9 @@ class Aura_Worker_Snapshots {
 			(string) $post->post_content
 		);
 
+		if ( false === $record ) {
+			return array( 'success' => false, 'error' => 'Failed to persist snapshot (disk full or unwritable).' );
+		}
 		return array( 'success' => true, 'snapshot' => $record );
 	}
 
@@ -220,9 +242,14 @@ class Aura_Worker_Snapshots {
 				return array( 'success' => true );
 
 			case 'post':
+				// Fail closed if the payload is gone — writing '' would WIPE the
+				// page instead of restoring it (matches the file case).
 				$payload_path = $record['payload_path'] ?? '';
-				$content      = ( $payload_path && file_exists( $payload_path ) ) ? file_get_contents( $payload_path ) : '';
-				$result       = wp_update_post(
+				if ( ! $payload_path || ! file_exists( $payload_path ) ) {
+					return array( 'success' => false, 'error' => 'Snapshot payload missing.' );
+				}
+				$content = file_get_contents( $payload_path );
+				$result  = wp_update_post(
 					array(
 						'ID'           => (int) $record['target'],
 						'post_content' => $content,

@@ -16,7 +16,31 @@ final class AbilitiesTest extends TestCase {
 
 	protected function setUp(): void {
 		sa_reset_state();
-		( new Aura_Worker_Abilities() )->register();
+		$abilities = new Aura_Worker_Abilities();
+		// Mirror the real hook order: category first (wp_abilities_api_categories_init),
+		// then the abilities (wp_abilities_api_init).
+		$abilities->register_category();
+		$abilities->register();
+	}
+
+	public function test_registers_the_category_with_a_description(): void {
+		// The category must be registered (on its own earlier init hook) or the
+		// Abilities API rejects every ability, so the MCP adapter finds nothing.
+		$this->assertArrayHasKey( 'site-management', $GLOBALS['_ability_categories'] );
+		$cat = $GLOBALS['_ability_categories']['site-management'];
+		$this->assertArrayHasKey( 'label', $cat );
+		$this->assertArrayHasKey( 'description', $cat );
+		$this->assertNotSame( '', $cat['description'] );
+	}
+
+	public function test_all_abilities_reference_a_registered_category(): void {
+		foreach ( $GLOBALS['_abilities'] as $name => $ability ) {
+			$this->assertArrayHasKey(
+				$ability['category'],
+				$GLOBALS['_ability_categories'],
+				"ability {$name} references an unregistered category"
+			);
+		}
 	}
 
 	public function test_registers_the_shipped_tools_as_abilities(): void {
@@ -65,6 +89,19 @@ final class AbilitiesTest extends TestCase {
 
 		$GLOBALS['_caps'] = array(); // no caps
 		$this->assertFalse( $cb() );
+	}
+
+	public function test_parameterless_ability_gets_an_input_default(): void {
+		// A tool with no required params must default a missing input to {} so
+		// the Abilities API doesn't reject a no-argument call.
+		$found = false;
+		foreach ( $GLOBALS['_abilities'] as $ability ) {
+			if ( empty( $ability['input_schema']['required'] ) ) {
+				$this->assertArrayHasKey( 'default', $ability['input_schema'] );
+				$found = true;
+			}
+		}
+		$this->assertTrue( $found, 'expected at least one parameterless ability' );
 	}
 
 	public function test_shipped_tools_are_registered(): void {
