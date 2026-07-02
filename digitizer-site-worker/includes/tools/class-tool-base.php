@@ -53,6 +53,50 @@ abstract class Aura_Tool_Base {
 	abstract public function execute( $params );
 
 	/**
+	 * Risk/behaviour annotations for this tool.
+	 *
+	 * Advisory metadata that lets the Aura Fleet Gateway classify a tool from
+	 * the plugin's own declaration instead of guessing from its name. Power
+	 * tools (execute-php, wp-cli, filesystem, DB writes) MUST override this to
+	 * declare themselves non-read-only, approval-required, and (where possible)
+	 * preview-capable.
+	 *
+	 * Keys:
+	 *  - read_only         (bool) Makes no state change; safe to run inline.
+	 *  - destructive       (bool) May irreversibly change/remove data.
+	 *  - requires_approval (bool) Must queue for human approval before executing.
+	 *  - supports_preview  (bool) Implements dry_run() for a pre-execution preview.
+	 *
+	 * Defaults are neutral (not read-only, no approval) so existing tools keep
+	 * their current gateway behaviour; the gateway's verb classifier stays
+	 * authoritative until a tool opts in by overriding this.
+	 *
+	 * @return array
+	 */
+	public function get_annotations() {
+		return array(
+			'read_only'         => false,
+			'destructive'       => false,
+			'requires_approval' => false,
+			'supports_preview'  => false,
+		);
+	}
+
+	/**
+	 * Produce a preview of what execute() would do, without changing state.
+	 *
+	 * Tools that set supports_preview=true in get_annotations() override this to
+	 * return a structured preview (e.g. a static-scan verdict, the wp-cli command
+	 * line, a unified file diff, or a SQL statement + affected-row estimate).
+	 *
+	 * @param array $params Validated parameters.
+	 * @return array|null Preview payload, or null when previews are unsupported.
+	 */
+	public function dry_run( $params ) {
+		return null;
+	}
+
+	/**
 	 * Get the full metadata array for this tool (used by list_tools).
 	 *
 	 * @return array
@@ -63,6 +107,7 @@ abstract class Aura_Tool_Base {
 			'description' => $this->get_description(),
 			'parameters'  => $this->get_parameters(),
 			'returns'     => $this->get_returns(),
+			'annotations' => $this->get_annotations(),
 		);
 	}
 
