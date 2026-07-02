@@ -43,24 +43,38 @@ class Aura_Worker_Abilities {
 	}
 
 	/**
+	 * Register the ability category.
+	 *
+	 * MUST run on `wp_abilities_api_categories_init`, which fires *before*
+	 * `wp_abilities_api_init`. The Abilities API rejects any ability whose
+	 * category isn't already registered (WP_Abilities_Registry::register()
+	 * returns null), so registering the category inside register() — on the
+	 * later hook — is too late: every tool would be silently dropped and the
+	 * MCP adapter would discover zero SiteAgent tools. A `description` is also
+	 * required by wp_register_ability_category().
+	 */
+	public function register_category() {
+		if ( ! function_exists( 'wp_register_ability_category' ) ) {
+			return;
+		}
+
+		wp_register_ability_category(
+			'site-management',
+			array(
+				'label'       => __( 'Site Management', 'digitizer-site-worker' ),
+				'description' => __( 'Manage this WordPress site — content, design, security, and maintenance.', 'digitizer-site-worker' ),
+			)
+		);
+	}
+
+	/**
 	 * Register every SiteAgent tool as a WordPress ability.
 	 * Hooked on `wp_abilities_api_init`; a no-op when the API is absent.
+	 * The category is registered separately on `wp_abilities_api_categories_init`.
 	 */
 	public function register() {
 		if ( ! function_exists( 'wp_register_ability' ) ) {
 			return;
-		}
-
-		// The Abilities API rejects a registration whose category isn't
-		// registered (WP_Abilities_Registry::register() returns null), so declare
-		// our category first when the API supports categories.
-		if ( function_exists( 'wp_register_ability_category' ) ) {
-			wp_register_ability_category(
-				'site-management',
-				array(
-					'label' => __( 'Site Management', 'digitizer-site-worker' ),
-				)
-			);
 		}
 
 		foreach ( $this->tools->list_tools() as $meta ) {
