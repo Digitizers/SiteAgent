@@ -4,7 +4,7 @@ Tags: wordpress management, remote updates, site monitoring, maintenance, dashbo
 Requires at least: 6.2
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 2.5.0
+Stable tag: 2.6.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -189,6 +189,17 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 3. Remote plugin update in progress from the Aura dashboard — select a plugin and update it with a single click.
 
 == Changelog ==
+
+= 2.6.0 =
+* Signed approval grants (G-grants): approval-required tools reached over the
+  Aura gateway (X-Aura-Token) path now require a single-use, Ed25519-signed
+  grant that binds the exact tool, parameters, site, and a short validity
+  window. The plugin stores only the gateway's PUBLIC key, so a stolen site
+  token — or even a fully compromised site — can no longer run a power tool
+  without a fresh, human-approved grant the gateway alone can mint. Enforcement
+  activates only once the gateway provisions its public key, so existing
+  deployments are unaffected until then. The WordPress Abilities /
+  Application-Password path (capability-gated) is unchanged.
 
 = 2.5.0 =
 * WordPress Abilities API bridge: SiteAgent tools are now dual-registered as WP
