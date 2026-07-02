@@ -74,4 +74,48 @@ final class ToolsRegistryTest extends TestCase {
 		$this->assertSame( 'Parameter validation failed.', $result['error'] );
 		$this->assertNotEmpty( $result['errors'] );
 	}
+
+	// --- aura_worker_register_tools filter (companion power-pack hook) ---------
+
+	public function test_filter_registers_an_external_tool_instance(): void {
+		add_filter( 'aura_worker_register_tools', function ( $tools ) {
+			// Anonymous subclass created here — declared only when the filter
+			// runs (inside the constructor), after the get_declared_classes scan,
+			// so this genuinely exercises the filter path.
+			$tools[] = new class extends Aura_Tool_Base {
+				public function get_name() { return 'ext_power_fake'; }
+				public function get_description() { return 'external'; }
+				public function get_parameters() { return array(); }
+				public function get_returns() { return array(); }
+				public function execute( $params ) { return array( 'ok' => true ); }
+			};
+			return $tools;
+		} );
+
+		$registry = new Aura_Worker_Tools();
+		$this->assertInstanceOf( Aura_Tool_Base::class, $registry->get_tool( 'ext_power_fake' ) );
+	}
+
+	public function test_filter_accepts_class_name_strings(): void {
+		add_filter( 'aura_worker_register_tools', function ( $tools ) {
+			$tools[] = SA_Fake_Power_Tool::class; // string form.
+			return $tools;
+		} );
+
+		$registry = new Aura_Worker_Tools();
+		$this->assertInstanceOf( SA_Fake_Power_Tool::class, $registry->get_tool( 'test_power_double' ) );
+	}
+
+	public function test_filter_ignores_non_tool_entries(): void {
+		add_filter( 'aura_worker_register_tools', function ( $tools ) {
+			$tools[] = 'NotAClassName';
+			$tools[] = new stdClass();
+			$tools[] = 42;
+			return $tools;
+		} );
+
+		// Must not fatal; registry still loads the shipped tools.
+		$registry = new Aura_Worker_Tools();
+		$this->assertGreaterThanOrEqual( 10, count( $registry->list_tools() ) );
+	}
 }

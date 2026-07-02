@@ -54,6 +54,7 @@ $GLOBALS['_logged_in']    = false;
 $GLOBALS['_admins']       = array();
 $GLOBALS['_current_user'] = 0;
 $GLOBALS['_did_actions']  = array();
+$GLOBALS['_filters']      = array();
 
 // ---------------------------------------------------------------------------
 // WordPress function stubs
@@ -104,6 +105,13 @@ if ( ! function_exists( 'plugin_dir_path' ) ) {
 if ( ! function_exists( 'wp_parse_url' ) ) {
 	function wp_parse_url( string $url, int $component = -1 ) {
 		return parse_url( $url, $component );
+	}
+}
+
+if ( ! function_exists( 'wp_json_encode' ) ) {
+	function wp_json_encode( $data, int $options = 0, int $depth = 512 ) {
+		$json = json_encode( $data, $options, $depth );
+		return ( JSON_ERROR_NONE === json_last_error() ) ? $json : false;
 	}
 }
 
@@ -202,8 +210,18 @@ if ( ! function_exists( 'do_action' ) ) {
 	}
 }
 
+if ( ! function_exists( 'add_filter' ) ) {
+	function add_filter( string $tag, $callback, int $priority = 10, int $accepted_args = 1 ): bool {
+		$GLOBALS['_filters'][ $tag ][] = $callback;
+		return true;
+	}
+}
+
 if ( ! function_exists( 'apply_filters' ) ) {
 	function apply_filters( string $tag, $value, ...$args ) {
+		foreach ( $GLOBALS['_filters'][ $tag ] ?? array() as $callback ) {
+			$value = $callback( $value, ...$args );
+		}
 		return $value;
 	}
 }
@@ -325,6 +343,7 @@ require_once SA_PLUGIN_DIR . '/includes/tools/class-tool-base.php';
 require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-tools.php';
 require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-security.php';
 require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-rollback.php';
+require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-snapshots.php';
 
 /**
  * Reset all mutable stub state. Call from each test's setUp().
@@ -337,5 +356,6 @@ function sa_reset_state(): void {
 	$GLOBALS['_admins']       = array();
 	$GLOBALS['_current_user'] = 0;
 	$GLOBALS['_did_actions']  = array();
+	$GLOBALS['_filters']      = array();
 	$_SERVER['REMOTE_ADDR']   = '203.0.113.10';
 }

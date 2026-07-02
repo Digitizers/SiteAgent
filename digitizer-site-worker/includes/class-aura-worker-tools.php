@@ -48,6 +48,48 @@ class Aura_Worker_Tools {
 				$this->tools[ $tool->get_name() ] = $tool;
 			}
 		}
+
+		$this->register_external_tools();
+	}
+
+	/**
+	 * Let companion plugins contribute additional MCP tools.
+	 *
+	 * A companion (e.g. the SiteAgent Power Pack, which ships the approval-gated
+	 * execute-php / wp-cli / filesystem / DB tools that must NOT live in the
+	 * wordpress.org build) hooks this filter to register its own tool classes:
+	 *
+	 *     add_filter( 'aura_worker_register_tools', function ( $tools ) {
+	 *         $tools[] = My_Power_Tool::class;      // class name, or
+	 *         $tools[] = new My_Power_Tool();        // an instance
+	 *         return $tools;
+	 *     } );
+	 *
+	 * Every contributed entry must resolve to an Aura_Tool_Base subclass; anything
+	 * else is ignored. This loads only locally-installed PHP — nothing remote.
+	 */
+	private function register_external_tools() {
+		$external = apply_filters( 'aura_worker_register_tools', array() );
+		if ( empty( $external ) || ! is_array( $external ) ) {
+			return;
+		}
+
+		foreach ( $external as $entry ) {
+			$tool = null;
+			if ( $entry instanceof Aura_Tool_Base ) {
+				$tool = $entry;
+			} elseif ( is_string( $entry ) && class_exists( $entry ) && is_subclass_of( $entry, 'Aura_Tool_Base' ) ) {
+				$tool = new $entry();
+			}
+
+			if ( $tool ) {
+				// First registration wins — a companion cannot silently shadow a core tool.
+				$name = $tool->get_name();
+				if ( ! isset( $this->tools[ $name ] ) ) {
+					$this->tools[ $name ] = $tool;
+				}
+			}
+		}
 	}
 
 	/**
