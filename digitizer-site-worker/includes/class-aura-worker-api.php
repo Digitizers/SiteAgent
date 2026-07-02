@@ -256,6 +256,48 @@ class Aura_Worker_API {
 			),
 		) );
 
+		// v2: Snapshots — capture-before-write for files/options (the reversal
+		// substrate the Governed Power Tools use; created before a power write,
+		// restored to undo it).
+		register_rest_route( self::NAMESPACE_V2, '/snapshot', array(
+			'methods'             => 'POST',
+			'callback'            => array( $this, 'create_snapshot' ),
+			'permission_callback' => array( $this->security, 'check_admin_permission' ),
+			'args'                => array(
+				'kind' => array(
+					'required'          => true,
+					'type'              => 'string',
+					'sanitize_callback' => 'sanitize_text_field',
+					'description'       => __( 'Snapshot kind: "file" or "option".', 'digitizer-site-worker' ),
+				),
+				'target' => array(
+					'required'    => true,
+					'type'        => 'string',
+					'description' => __( 'File path (kind=file) or option name (kind=option).', 'digitizer-site-worker' ),
+				),
+			),
+		) );
+
+		register_rest_route( self::NAMESPACE_V2, '/snapshot/restore', array(
+			'methods'             => 'POST',
+			'callback'            => array( $this, 'restore_snapshot' ),
+			'permission_callback' => array( $this->security, 'check_admin_permission' ),
+			'args'                => array(
+				'id' => array(
+					'required'          => true,
+					'type'              => 'string',
+					'sanitize_callback' => 'sanitize_text_field',
+					'description'       => __( 'Snapshot id to restore.', 'digitizer-site-worker' ),
+				),
+			),
+		) );
+
+		register_rest_route( self::NAMESPACE_V2, '/snapshots', array(
+			'methods'             => 'GET',
+			'callback'            => array( $this, 'list_snapshots' ),
+			'permission_callback' => array( $this->security, 'check_read_permission' ),
+		) );
+
 	}
 
 	/**
@@ -539,6 +581,71 @@ class Aura_Worker_API {
 		$result = $rollback->restore_plugin( $plugin_slug, $backup_path );
 		$status = $result['success'] ? 200 : 500;
 		return new WP_REST_Response( $result, $status );
+	}
+
+	/**
+	 * POST /aura/v2/snapshot
+	 *
+	 * Capture a file or option before a power write, so it can be reversed.
+	 *
+	 * @param WP_REST_Request $request The request object.
+	 * @return WP_REST_Response
+	 */
+	public function create_snapshot( $request ) {
+		$kind   = $request->get_param( 'kind' );
+		$target = $request->get_param( 'target' );
+
+		$snapshots = new Aura_Worker_Snapshots();
+
+		if ( 'file' === $kind ) {
+			$result = $snapshots->snapshot_file( $target );
+		} elseif ( 'option' === $kind ) {
+			$result = $snapshots->snapshot_option( $target );
+		} else {
+			return new WP_REST_Response( array(
+				'success' => false,
+				'error'   => __( 'Unknown snapshot kind. Use "file" or "option".', 'digitizer-site-worker' ),
+			), 400 );
+		}
+
+		$status = $result['success'] ? 200 : 400;
+		return new WP_REST_Response( $result, $status );
+	}
+
+	/**
+	 * POST /aura/v2/snapshot/restore
+	 *
+	 * Restore state captured by a prior snapshot (undo a power write).
+	 *
+	 * @param WP_REST_Request $request The request object.
+	 * @return WP_REST_Response
+	 */
+	public function restore_snapshot( $request ) {
+		$id = $request->get_param( 'id' );
+
+		$snapshots = new Aura_Worker_Snapshots();
+		$result    = $snapshots->restore( $id );
+
+		$status = $result['success'] ? 200 : 404;
+		return new WP_REST_Response( $result, $status );
+	}
+
+	/**
+	 * GET /aura/v2/snapshots
+	 *
+	 * List stored snapshots (newest first).
+	 *
+	 * @param WP_REST_Request $request The request object.
+	 * @return WP_REST_Response
+	 */
+	public function list_snapshots( $request ) {
+		$snapshots = new Aura_Worker_Snapshots();
+		$list      = $snapshots->list_snapshots();
+
+		return rest_ensure_response( array(
+			'snapshots' => $list,
+			'count'     => count( $list ),
+		) );
 	}
 
 	/**

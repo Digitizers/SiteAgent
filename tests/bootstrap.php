@@ -292,6 +292,7 @@ if ( ! class_exists( 'WP_REST_Request' ) ) {
 	 */
 	class WP_REST_Request {
 		private array $headers = array();
+		private array $params  = array();
 		private string $route  = '/aura/v1/status';
 
 		public function set_header( string $key, $value ): void {
@@ -302,6 +303,14 @@ if ( ! class_exists( 'WP_REST_Request' ) ) {
 			return $this->headers[ strtolower( $key ) ] ?? null;
 		}
 
+		public function set_param( string $key, $value ): void {
+			$this->params[ $key ] = $value;
+		}
+
+		public function get_param( string $key ) {
+			return $this->params[ $key ] ?? null;
+		}
+
 		public function set_route( string $route ): void {
 			$this->route = $route;
 		}
@@ -309,6 +318,32 @@ if ( ! class_exists( 'WP_REST_Request' ) ) {
 		public function get_route(): string {
 			return $this->route;
 		}
+	}
+}
+
+if ( ! class_exists( 'WP_REST_Response' ) ) {
+	class WP_REST_Response {
+		public $data;
+		public int $status;
+
+		public function __construct( $data = null, int $status = 200 ) {
+			$this->data   = $data;
+			$this->status = $status;
+		}
+
+		public function get_data() {
+			return $this->data;
+		}
+
+		public function get_status(): int {
+			return $this->status;
+		}
+	}
+}
+
+if ( ! function_exists( 'rest_ensure_response' ) ) {
+	function rest_ensure_response( $response ) {
+		return ( $response instanceof WP_REST_Response ) ? $response : new WP_REST_Response( $response, 200 );
 	}
 }
 
@@ -370,6 +405,7 @@ require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-tools.php';
 require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-security.php';
 require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-rollback.php';
 require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-snapshots.php';
+require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-mcp.php';
 
 // Companion Power Pack tool classes (extend Aura_Tool_Base above).
 define( 'SA_POWER_PACK_DIR', dirname( __DIR__ ) . '/siteagent-power-pack' );
