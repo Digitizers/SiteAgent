@@ -115,6 +115,24 @@ final class FsWriteTest extends TestCase {
 		$this->assertSame( "outside\n", file_get_contents( $this->outside ) );
 	}
 
+	public function test_refuses_dangling_symlink_target(): void {
+		if ( ! function_exists( 'symlink' ) ) {
+			$this->markTestSkipped( 'symlink() unavailable.' );
+		}
+		// Symlink inside wp-content whose target does NOT exist yet. file_exists()
+		// would report false; the write must still be refused (not created outside).
+		$ghost = sys_get_temp_dir() . '/sa_ghost_target_' . getmypid() . '.txt';
+		@unlink( $ghost );
+		$link = WP_CONTENT_DIR . '/dangling';
+		symlink( $ghost, $link );
+
+		$result = $this->tool->execute( array( 'path' => $link, 'content' => "pwned\n" ) );
+
+		$this->assertArrayHasKey( 'error', $result );
+		$this->assertStringContainsString( 'symlink', $result['error'] );
+		$this->assertFileDoesNotExist( $ghost ); // target was never created.
+	}
+
 	public function test_dry_run_flags_executable_target(): void {
 		$preview = $this->tool->dry_run( array( 'path' => WP_CONTENT_DIR . '/uploads/shell.php', 'content' => '<?php' ) );
 		// Parent doesn't exist yet → returns an error, so create the dir first.

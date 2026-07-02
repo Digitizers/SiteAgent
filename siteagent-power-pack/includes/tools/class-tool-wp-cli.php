@@ -129,6 +129,12 @@ class Aura_Power_Tool_Wp_Cli extends Aura_Tool_Base {
 			return 'Empty command.';
 		}
 
+		// Split flags from positional args. WP-CLI parses flags regardless of
+		// position, so ALLOWED/DENIED must be evaluated against the POSITIONAL
+		// subcommand chain — otherwise inserting a safe flag between the family
+		// and the real subcommand shifts it out of view (e.g.
+		// "plugin --skip-plugins install <url>" would dodge a raw-index check).
+		$positionals = array();
 		foreach ( $tokens as $t ) {
 			foreach ( self::META as $meta ) {
 				if ( false !== strpos( $t, $meta ) ) {
@@ -136,30 +142,37 @@ class Aura_Power_Tool_Wp_Cli extends Aura_Tool_Base {
 				}
 			}
 
-			// Positive flag allowlist: reject any --flag WP-CLI would treat as a
-			// global runtime flag that can load/run code (--require, --exec, --ssh,
-			// --http, --path, --url, --user, …). Only SAFE_FLAGS pass.
-			if ( 0 === strpos( $t, '--' ) ) {
-				$flag = substr( $t, 2 );
+			if ( '' !== $t && '-' === $t[0] ) {
+				// Any dash-prefixed token is a flag: positive allowlist. This blocks
+				// global runtime flags that load/run code (--require/--exec/--ssh/
+				// --http/--path/--url/--user) and any unknown short flag.
+				$flag = ltrim( $t, '-' );
 				$eq   = strpos( $flag, '=' );
 				if ( false !== $eq ) {
 					$flag = substr( $flag, 0, $eq );
 				}
 				if ( ! in_array( strtolower( $flag ), self::SAFE_FLAGS, true ) ) {
-					return 'Refused: flag "--' . $flag . '" is not permitted.';
+					return 'Refused: flag "' . $t . '" is not permitted.';
 				}
+				continue;
 			}
+
+			$positionals[] = $t;
 		}
 
-		$first = strtolower( $tokens[0] );
+		if ( empty( $positionals ) ) {
+			return 'Refused: no subcommand.';
+		}
+
+		$first = strtolower( $positionals[0] );
 		if ( ! in_array( $first, self::ALLOWED, true ) ) {
 			return 'Refused: "' . $first . '" is not an allowed WP-CLI command family.';
 		}
 
-		$first_two = $first . ' ' . ( isset( $tokens[1] ) ? strtolower( $tokens[1] ) : '' );
+		$first_two = trim( $first . ' ' . ( isset( $positionals[1] ) ? strtolower( $positionals[1] ) : '' ) );
 		foreach ( self::DENIED as $deny ) {
-			if ( $first === $deny || trim( $first_two ) === $deny ) {
-				return 'Refused: "' . trim( $deny ) . '" is not permitted.';
+			if ( $first === $deny || $first_two === $deny ) {
+				return 'Refused: "' . $deny . '" is not permitted.';
 			}
 		}
 

@@ -104,13 +104,17 @@ class Aura_Power_Tool_Fs_Write extends Aura_Tool_Base {
 
 		$abs = $parent . DIRECTORY_SEPARATOR . basename( $path );
 
+		// Reject a symlink at the final component FIRST — is_link() uses lstat, so
+		// it catches a DANGLING symlink (target not yet created) that file_exists()
+		// would report as absent, sending it down the new-file path to be written
+		// through — a jail escape.
+		if ( is_link( $abs ) ) {
+			return array( 'ok' => false, 'error' => 'Refused: target is a symlink.' );
+		}
+
 		if ( file_exists( $abs ) ) {
-			// Existing target must be a real regular file inside the jail — never a
-			// symlink (which could point at wp-config.php or outside the jail) and
-			// never wp-config.php in any case.
-			if ( is_link( $abs ) ) {
-				return array( 'ok' => false, 'error' => 'Refused: target is a symlink.' );
-			}
+			// Existing target must be a real regular file inside the jail — never
+			// wp-config.php (resolved, any case) or a path resolving out of jail.
 			$real = realpath( $abs );
 			if ( false === $real ) {
 				return array( 'ok' => false, 'error' => 'Cannot resolve target path.' );
