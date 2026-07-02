@@ -1,0 +1,9 @@
+{
+    "name": "digitizer/site-agent",
+    "description": "SiteAgent (digitizer-site-worker) — WordPress site agent for the Aura platform.",
+    "type": "wordpress-plugin",
+    "license": "GPL-2.0-or-later",
+    "require-dev": {
+        "phpunit/phpunit": "^9 || ^10"
+    }
+}
