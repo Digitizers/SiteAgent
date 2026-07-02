@@ -1,0 +1,75 @@
+<?php
+/**
+ * Tests for Aura_Worker_Abilities — the WordPress Abilities API bridge that
+ * dual-registers SiteAgent tools as WP abilities for the official MCP adapter.
+ *
+ * Uses the fake tools declared in ToolBaseTest.php (auto-registered by the
+ * registry): SA_Fake_Tool (required "target") and SA_Fake_Power_Tool
+ * (destructive + requires_approval).
+ *
+ * @package Aura_Worker\Tests
+ */
+
+use PHPUnit\Framework\TestCase;
+
+final class AbilitiesTest extends TestCase {
+
+	protected function setUp(): void {
+		sa_reset_state();
+		( new Aura_Worker_Abilities() )->register();
+	}
+
+	public function test_registers_the_shipped_tools_as_abilities(): void {
+		$abilities = $GLOBALS['_abilities'];
+		$this->assertGreaterThanOrEqual( 10, count( $abilities ) );
+		// Names are namespaced + hyphenated.
+		$this->assertArrayHasKey( 'aura-worker/test-double-tool', $abilities );
+	}
+
+	public function test_ability_shape(): void {
+		$a = $GLOBALS['_abilities']['aura-worker/test-double-tool'];
+
+		$this->assertArrayHasKey( 'label', $a );
+		$this->assertArrayHasKey( 'description', $a );
+		$this->assertSame( 'object', $a['input_schema']['type'] );
+		$this->assertContains( 'target', $a['input_schema']['required'] );
+		$this->assertIsCallable( $a['execute_callback'] );
+		$this->assertIsCallable( $a['permission_callback'] );
+		$this->assertTrue( $a['meta']['show_in_rest'] );
+		$this->assertTrue( $a['meta']['mcp']['public'] );
+	}
+
+	public function test_execute_callback_routes_back_to_the_tool(): void {
+		$a      = $GLOBALS['_abilities']['aura-worker/test-double-tool'];
+		$result = ( $a['execute_callback'] )( array( 'target' => 'homepage' ) );
+
+		$this->assertTrue( $result['success'] );
+		$this->assertSame( 'homepage', $result['result']['echo']['target'] );
+	}
+
+	public function test_annotations_map_from_tool_metadata(): void {
+		$power = $GLOBALS['_abilities']['aura-worker/test-power-double']['meta']['annotations'];
+		$this->assertTrue( $power['requires_approval'] );
+		$this->assertTrue( $power['destructive'] );
+		$this->assertFalse( $power['readonly'] );
+
+		$read = $GLOBALS['_abilities']['aura-worker/test-double-tool']['meta']['annotations'];
+		$this->assertFalse( $read['requires_approval'] );
+	}
+
+	public function test_permission_callback_requires_manage_options(): void {
+		$cb = $GLOBALS['_abilities']['aura-worker/test-double-tool']['permission_callback'];
+
+		$GLOBALS['_caps'] = array( 'manage_options' );
+		$this->assertTrue( $cb() );
+
+		$GLOBALS['_caps'] = array(); // no caps
+		$this->assertFalse( $cb() );
+	}
+
+	public function test_shipped_tools_are_registered(): void {
+		// A couple of real shipped tools appear as namespaced abilities.
+		$this->assertArrayHasKey( 'aura-worker/get-site-context', $GLOBALS['_abilities'] );
+		$this->assertIsBool( $GLOBALS['_abilities']['aura-worker/get-site-context']['meta']['annotations']['readonly'] );
+	}
+}
