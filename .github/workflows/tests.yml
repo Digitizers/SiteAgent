@@ -1,0 +1,45 @@
+name: Tests
+
+# PHPUnit unit suite for the SiteAgent plugin (tool base, tool registry,
+# security layers, rollback engine). No WordPress install required — the
+# suite runs against lightweight WP stubs in tests/bootstrap.php.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  phpunit:
+    name: PHPUnit (PHP ${{ matrix.php }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ["7.4", "8.1", "8.2"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: zip
+          coverage: none
+          tools: composer
+
+      - name: Install dependencies
+        run: composer install --no-interaction --prefer-dist --no-progress
+
+      - name: Lint PHP (syntax)
+        run: |
+          find digitizer-site-worker -name '*.php' -print0 \
+            | xargs -0 -n1 -P4 php -l > /dev/null
+
+      - name: PHPUnit
+        run: vendor/bin/phpunit --testdox

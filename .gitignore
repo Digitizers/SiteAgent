@@ -18,6 +18,12 @@ wp-content/upgrade/
 *.zip
 node_modules/
 
+# PHP / PHPUnit
+/vendor/
+/composer.lock
+.phpunit.cache/
+.phpunit.result.cache
+
 # Environment
 .env
 .env.*
