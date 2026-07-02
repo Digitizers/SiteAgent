@@ -42,6 +42,12 @@ if ( ! defined( 'WP_PLUGIN_DIR' ) ) {
 if ( ! defined( 'FS_CHMOD_FILE' ) ) {
 	define( 'FS_CHMOD_FILE', 0644 );
 }
+if ( ! defined( 'ARRAY_A' ) ) {
+	define( 'ARRAY_A', 'ARRAY_A' );
+}
+if ( ! defined( 'OBJECT' ) ) {
+	define( 'OBJECT', 'OBJECT' );
+}
 
 // ---------------------------------------------------------------------------
 // Mutable state used by the stubs
@@ -306,6 +312,26 @@ if ( ! class_exists( 'WP_REST_Request' ) ) {
 	}
 }
 
+if ( ! class_exists( 'SA_Test_Wpdb' ) ) {
+	/**
+	 * Minimal $wpdb stub. get_results() returns whatever a test placed in
+	 * $GLOBALS['_db_rows'] and records the SQL it was asked to run.
+	 */
+	class SA_Test_Wpdb {
+		public string $prefix     = 'wp_';
+		public string $last_error = '';
+		public string $last_query = '';
+
+		public function get_results( $query, $output = OBJECT ) {
+			$this->last_query = (string) $query;
+			return $GLOBALS['_db_rows'];
+		}
+	}
+
+	$GLOBALS['_db_rows'] = array();
+	$GLOBALS['wpdb']     = new SA_Test_Wpdb();
+}
+
 if ( ! class_exists( 'SA_Test_Filesystem' ) ) {
 	/**
 	 * Real-filesystem shim standing in for WP_Filesystem in the rollback tests.
@@ -345,6 +371,11 @@ require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-security.php';
 require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-rollback.php';
 require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-snapshots.php';
 
+// Companion Power Pack tool classes (extend Aura_Tool_Base above).
+define( 'SA_POWER_PACK_DIR', dirname( __DIR__ ) . '/siteagent-power-pack' );
+require_once SA_POWER_PACK_DIR . '/includes/tools/class-tool-fs-read.php';
+require_once SA_POWER_PACK_DIR . '/includes/tools/class-tool-db-query.php';
+
 /**
  * Reset all mutable stub state. Call from each test's setUp().
  */
@@ -357,5 +388,10 @@ function sa_reset_state(): void {
 	$GLOBALS['_current_user'] = 0;
 	$GLOBALS['_did_actions']  = array();
 	$GLOBALS['_filters']      = array();
+	$GLOBALS['_db_rows']      = array();
+	if ( isset( $GLOBALS['wpdb'] ) ) {
+		$GLOBALS['wpdb']->last_error = '';
+		$GLOBALS['wpdb']->last_query = '';
+	}
 	$_SERVER['REMOTE_ADDR']   = '203.0.113.10';
 }
