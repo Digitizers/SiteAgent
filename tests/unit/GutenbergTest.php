@@ -109,6 +109,59 @@ final class GutenbergTest extends TestCase {
 		$this->assertSame( $original, $GLOBALS['_posts'][8]->post_content );
 	}
 
+	public function test_update_refuses_inner_html_on_a_block_with_nested_blocks(): void {
+		$this->seed_post( 30, array(
+			array(
+				'blockName'   => 'core/columns',
+				'attrs'       => array(),
+				'innerHTML'   => '',
+				'innerBlocks' => array( array( 'blockName' => 'core/column', 'innerBlocks' => array() ) ),
+			),
+		) );
+		$original = $GLOBALS['_posts'][30]->post_content;
+
+		$result = ( new Aura_Tool_Gutenberg_Update_Block() )->execute( array(
+			'post_id'     => 30,
+			'block_index' => 0,
+			'inner_html'  => '<p>clobber</p>',
+		) );
+
+		$this->assertArrayHasKey( 'error', $result );
+		$this->assertStringContainsString( 'nested blocks', $result['error'] );
+		$this->assertSame( $original, $GLOBALS['_posts'][30]->post_content ); // untouched.
+	}
+
+	public function test_dry_run_surfaces_the_inner_html_change(): void {
+		$this->seed_post( 31, array(
+			array( 'blockName' => 'core/paragraph', 'attrs' => array(), 'innerHTML' => 'old', 'innerContent' => array( 'old' ), 'innerBlocks' => array() ),
+		) );
+
+		$preview = ( new Aura_Tool_Gutenberg_Update_Block() )->dry_run( array(
+			'post_id'     => 31,
+			'block_index' => 0,
+			'inner_html'  => 'new',
+		) );
+
+		$this->assertSame( 'old', $preview['current']['inner_html'] );
+		$this->assertSame( 'new', $preview['proposed']['inner_html'] );
+	}
+
+	public function test_post_restore_fails_closed_when_payload_missing(): void {
+		$this->seed_post( 40, array( array( 'blockName' => 'core/paragraph', 'innerBlocks' => array() ) ) );
+		$original = $GLOBALS['_posts'][40]->post_content;
+
+		$snaps = new Aura_Worker_Snapshots();
+		$snap  = $snaps->snapshot_post( 40 );
+		// Simulate a lost payload file.
+		@unlink( $snap['snapshot']['payload_path'] );
+
+		$result = $snaps->restore( $snap['snapshot']['id'] );
+		$this->assertFalse( $result['success'] );
+		$this->assertStringContainsString( 'payload missing', $result['error'] );
+		// The post must NOT be wiped to ''.
+		$this->assertSame( $original, $GLOBALS['_posts'][40]->post_content );
+	}
+
 	public function test_update_out_of_range_index_errors(): void {
 		$this->seed_post( 9, array( array( 'blockName' => 'core/paragraph', 'innerBlocks' => array() ) ) );
 		$result = ( new Aura_Tool_Gutenberg_Update_Block() )->execute( array( 'post_id' => 9, 'block_index' => 7 ) );

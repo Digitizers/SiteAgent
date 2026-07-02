@@ -88,6 +88,21 @@ final class SnapshotsTest extends TestCase {
 		$this->assertSame( 'DEFAULT', get_option( 'later_created', 'DEFAULT' ) );
 	}
 
+	public function test_option_valued_like_the_old_sentinel_is_not_treated_as_absent(): void {
+		// An option whose value is literally "__aura_absent__" must still be seen
+		// as existing (the sentinel is now an uncollidable object).
+		update_option( 'edge_opt', '__aura_absent__' );
+		$snaps = new Aura_Worker_Snapshots();
+
+		$snap = $snaps->snapshot_option( 'edge_opt' );
+		$this->assertTrue( $snap['snapshot']['existed'] );
+
+		update_option( 'edge_opt', 'changed' );
+		$snaps->restore( $snap['snapshot']['id'] );
+		// Restored to the original value, NOT deleted.
+		$this->assertSame( '__aura_absent__', get_option( 'edge_opt' ) );
+	}
+
 	public function test_restore_unknown_snapshot_fails(): void {
 		$snaps  = new Aura_Worker_Snapshots();
 		$result = $snaps->restore( 'snap_does_not_exist' );

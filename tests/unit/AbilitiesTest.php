@@ -67,6 +67,19 @@ final class AbilitiesTest extends TestCase {
 		$this->assertFalse( $cb() );
 	}
 
+	public function test_parameterless_ability_gets_an_input_default(): void {
+		// A tool with no required params must default a missing input to {} so
+		// the Abilities API doesn't reject a no-argument call.
+		$found = false;
+		foreach ( $GLOBALS['_abilities'] as $ability ) {
+			if ( empty( $ability['input_schema']['required'] ) ) {
+				$this->assertArrayHasKey( 'default', $ability['input_schema'] );
+				$found = true;
+			}
+		}
+		$this->assertTrue( $found, 'expected at least one parameterless ability' );
+	}
+
 	public function test_shipped_tools_are_registered(): void {
 		// A couple of real shipped tools appear as namespaced abilities.
 		$this->assertArrayHasKey( 'aura-worker/get-site-context', $GLOBALS['_abilities'] );

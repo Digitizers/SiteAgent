@@ -584,6 +584,38 @@ class Aura_Worker_API {
 	}
 
 	/**
+	 * Resolve + jail a snapshot file target to wp-content, refusing wp-config.php.
+	 *
+	 * @param string $target Requested file path.
+	 * @return string|WP_Error Safe real path, or a WP_Error to refuse.
+	 */
+	private function validate_snapshot_file_target( $target ) {
+		$target = (string) $target;
+		if ( '' === $target || false !== strpos( $target, "\0" ) ) {
+			return new WP_Error( 'aura_invalid_target', __( 'Invalid file target.', 'digitizer-site-worker' ) );
+		}
+
+		$real = realpath( $target );
+		if ( false === $real || ! is_file( $real ) ) {
+			return new WP_Error( 'aura_not_found', __( 'File not found.', 'digitizer-site-worker' ) );
+		}
+		if ( 'wp-config.php' === strtolower( basename( $real ) ) ) {
+			return new WP_Error( 'aura_refused', __( 'Refused: wp-config.php cannot be snapshotted.', 'digitizer-site-worker' ) );
+		}
+
+		$root = realpath( WP_CONTENT_DIR );
+		if ( false === $root ) {
+			return new WP_Error( 'aura_no_root', __( 'Content directory not found.', 'digitizer-site-worker' ) );
+		}
+		$in_jail = ( $real === $root ) || ( 0 === strpos( $real, rtrim( $root, '/\\' ) . DIRECTORY_SEPARATOR ) );
+		if ( ! $in_jail ) {
+			return new WP_Error( 'aura_outside_jail', __( 'Refused: path is outside wp-content.', 'digitizer-site-worker' ) );
+		}
+
+		return $real;
+	}
+
+	/**
 	 * POST /aura/v2/snapshot
 	 *
 	 * Capture a file or option before a power write, so it can be reversed.
@@ -598,7 +630,14 @@ class Aura_Worker_API {
 		$snapshots = new Aura_Worker_Snapshots();
 
 		if ( 'file' === $kind ) {
-			$result = $snapshots->snapshot_file( $target );
+			// Jail the file target to wp-content and refuse wp-config.php — otherwise
+			// a caller could snapshot a sensitive absolute path (e.g. wp-config.php)
+			// into the snapshots dir and fetch the payload, bypassing the read jail.
+			$jail = $this->validate_snapshot_file_target( $target );
+			if ( is_wp_error( $jail ) ) {
+				return new WP_REST_Response( array( 'success' => false, 'error' => $jail->get_error_message() ), 400 );
+			}
+			$result = $snapshots->snapshot_file( $jail );
 		} elseif ( 'option' === $kind ) {
 			$result = $snapshots->snapshot_option( $target );
 		} else {
