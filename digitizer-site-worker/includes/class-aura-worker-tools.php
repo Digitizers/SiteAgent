@@ -141,6 +141,24 @@ class Aura_Worker_Tools {
 			);
 		}
 
+		$annotations = $tool->get_annotations();
+		if ( ! empty( $annotations['requires_approval'] ) ) {
+			/**
+			 * Fires immediately before an approval-required (power) tool executes.
+			 *
+			 * The plugin cannot itself distinguish a gateway-approved call from a
+			 * raw token call — both carry the same site token — so approval is
+			 * enforced by the Aura gateway. This hook records EVERY execution of an
+			 * approval-required tool for forensics, so an inline/unapproved call is
+			 * at least auditable. (A signed one-time approval grant that the plugin
+			 * verifies is the planned hard enforcement; see the Power Pack readme.)
+			 *
+			 * @param string $tool   Tool name.
+			 * @param array  $params Parameters the tool was called with.
+			 */
+			do_action( 'aura_worker_power_execute', $name, $params );
+		}
+
 		try {
 			$result = $tool->execute( $params );
 			return array(
