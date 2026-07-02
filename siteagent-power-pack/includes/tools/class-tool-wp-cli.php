@@ -35,6 +35,8 @@ class Aura_Power_Tool_Wp_Cli extends Aura_Tool_Base {
 	const DENIED = array(
 		'eval', 'eval-file', 'shell', 'server', 'package', 'config', 'db',
 		'plugin install', 'theme install', 'core download', 'core update',
+		// Persistent credential + local-file/URL import into web-served uploads.
+		'user application-password', 'media import',
 	);
 
 	/**

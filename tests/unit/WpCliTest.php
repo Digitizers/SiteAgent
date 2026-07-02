@@ -114,4 +114,12 @@ final class WpCliTest extends TestCase {
 		$preview = $this->tool->dry_run( array( 'command' => '--status=active' ) );
 		$this->assertFalse( $preview['allowed'] );
 	}
+
+	public function test_denies_credential_and_import_subcommands(): void {
+		foreach ( array( 'user application-password create 1', 'media import /tmp/x.jpg' ) as $cmd ) {
+			$preview = $this->tool->dry_run( array( 'command' => $cmd ) );
+			$this->assertFalse( $preview['allowed'], $cmd );
+			$this->assertStringContainsString( 'not permitted', $preview['reason'] );
+		}
+	}
 }
