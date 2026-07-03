@@ -38,6 +38,36 @@ class SA_Fake_Read_Tool extends Aura_Tool_Base {
 	}
 }
 
+/**
+ * A read-only but approval-required tool — like db_query (read_only=true,
+ * requires_approval=true). Must STILL require a grant despite being read-only.
+ */
+class SA_Fake_Read_Approval_Tool extends Aura_Tool_Base {
+	public function get_name() {
+		return 'test_read_approval';
+	}
+	public function get_description() {
+		return 'A dangerous read that needs approval.';
+	}
+	public function get_parameters() {
+		return array();
+	}
+	public function get_returns() {
+		return array( 'ok' => array( 'type' => 'boolean' ) );
+	}
+	public function get_annotations() {
+		return array(
+			'read_only'         => true,
+			'destructive'       => false,
+			'requires_approval' => true,
+			'supports_preview'  => false,
+		);
+	}
+	public function execute( $params ) {
+		return array( 'ok' => true );
+	}
+}
+
 final class GrantEnforcementTest extends TestCase {
 
 	private string $secret;
@@ -128,6 +158,17 @@ final class GrantEnforcementTest extends TestCase {
 		$grant = $this->mint( 'test_double_tool', array( 'target' => 'homepage' ) );
 		$res   = $this->mcp->execute_tool( $this->request( 'test_double_tool', array( 'target' => 'homepage' ), $grant ) );
 		$this->assertSame( 200, $res->get_status() );
+	}
+
+	public function test_readonly_but_approval_tool_needs_a_grant(): void {
+		// A read_only tool that ALSO requires approval (like db_query) must not be
+		// exempted by the read-only carve-out — a stolen token can't dump the DB.
+		$res = $this->mcp->execute_tool( $this->request( 'test_read_approval', array() ) );
+		$this->assertSame( 403, $res->get_status() );
+		// ...and runs with a valid grant.
+		$grant = $this->mint( 'test_read_approval', array() );
+		$res2  = $this->mcp->execute_tool( $this->request( 'test_read_approval', array(), $grant ) );
+		$this->assertSame( 200, $res2->get_status() );
 	}
 
 	public function test_mutating_tool_runs_without_grant_when_not_provisioned(): void {

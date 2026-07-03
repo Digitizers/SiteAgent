@@ -82,4 +82,16 @@ final class ConnectProvisionTest extends TestCase {
 		$res = $this->ml->handle_connect( $this->request( array( 'timestamp' => time() - 3600 ) ) );
 		$this->assertSame( 400, $res->get_status() );
 	}
+
+	public function test_keyless_reconnect_clears_stale_key(): void {
+		// A key is already provisioned...
+		$GLOBALS['_options']['aura_worker_grant_pubkey'] = $this->pubkey;
+		$this->assertTrue( Aura_Worker_Grant::is_enforced() );
+		// ...then a signed 4-field (keyless) reconnect must clear it, so a fresh
+		// dashboard that doesn't use grants isn't blocked by a stale key.
+		$res = $this->ml->handle_connect( $this->request( array( 'grant_pubkey' => null ) ) );
+		$this->assertSame( 200, $res->get_status() );
+		$this->assertFalse( array_key_exists( 'aura_worker_grant_pubkey', $GLOBALS['_options'] ) );
+		$this->assertFalse( Aura_Worker_Grant::is_enforced() );
+	}
 }

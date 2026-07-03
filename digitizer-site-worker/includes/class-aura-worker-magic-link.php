@@ -216,9 +216,15 @@ class Aura_Worker_Magic_Link {
 			return new WP_REST_Response( array( 'error' => 'Invalid signature.' ), 401 );
 		}
 
-		// Validate a provisioned grant public key before storing anything: it must
-		// be a base64 32-byte Ed25519 key. Signature already proved authenticity.
+		// Validate a provisioned grant public key before storing anything: this
+		// host must have libsodium (grants can't be verified without it), and the
+		// key must be a base64 32-byte Ed25519 key. Signature already proved
+		// authenticity. Rejecting here avoids provisioning a key that would only
+		// ever fail closed and block every write.
 		if ( '' !== $grant_pubkey ) {
+			if ( ! function_exists( 'sodium_crypto_sign_verify_detached' ) ) {
+				return new WP_REST_Response( array( 'error' => 'This host lacks libsodium; approval grants cannot be enabled.' ), 400 );
+			}
 			$raw = base64_decode( $grant_pubkey, true );
 			if ( false === $raw || 32 !== strlen( $raw ) ) {
 				return new WP_REST_Response( array( 'error' => 'Invalid grant public key.' ), 400 );
@@ -234,9 +240,14 @@ class Aura_Worker_Magic_Link {
 		update_option( 'aura_worker_site_token', Aura_Worker_Security::hash_token( $token ) );
 		update_option( 'aura_worker_dashboard_url', $dashboard_url );
 		if ( '' !== $grant_pubkey ) {
-			// Provision the gateway key → turns on approval-grant enforcement for
-			// approval-required tools (Aura_Worker_Grant::is_enforced()).
+			// Provision the gateway key → turns on approval-grant enforcement
+			// (Aura_Worker_Grant::is_enforced()).
 			update_option( 'aura_worker_grant_pubkey', $grant_pubkey );
+		} else {
+			// Keyless (re)connect: clear any previously provisioned key so a fresh
+			// dashboard that doesn't use grants isn't left unable to run writes
+			// against a stale key it can't sign for. Enforcement follows the key.
+			delete_option( 'aura_worker_grant_pubkey' );
 		}
 		delete_transient( 'aura_magic_' . $magic_id );
 

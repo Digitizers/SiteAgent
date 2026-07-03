@@ -151,8 +151,14 @@ class Aura_Worker_MCP {
 		$tool = $this->tools->get_tool( $tool_name );
 		if ( null !== $tool ) {
 			$annotations = $tool->get_annotations();
-			$is_mutating = empty( $annotations['read_only'] );
-			if ( $is_mutating && Aura_Worker_Grant::is_enforced() ) {
+			// A grant is required for any mutating (non read-only) tool OR any tool
+			// that declares requires_approval. The second clause matters for a
+			// dangerous READ that still needs approval — e.g. `db_query`, which is
+			// read_only=true but requires_approval=true; without it a stolen token
+			// could dump the database. Read tools that don't require approval are
+			// exempt (a leaked token may still read).
+			$needs_grant = empty( $annotations['read_only'] ) || ! empty( $annotations['requires_approval'] );
+			if ( $needs_grant && Aura_Worker_Grant::is_enforced() ) {
 				$grant  = (string) $request->get_header( 'X-Aura-Approval-Grant' );
 				$reason = Aura_Worker_Grant::verify( $grant, $tool_name, $params );
 				if ( true !== $reason ) {
