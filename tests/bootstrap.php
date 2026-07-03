@@ -124,6 +124,14 @@ if ( ! function_exists( 'clean_post_cache' ) ) {
 	}
 }
 
+$GLOBALS['_did_delete_expired'] = false;
+
+if ( ! function_exists( 'delete_expired_transients' ) ) {
+	function delete_expired_transients( $force_db = false ) {
+		$GLOBALS['_did_delete_expired'] = true;
+	}
+}
+
 if ( ! function_exists( 'esc_url_raw' ) ) {
 	function esc_url_raw( $url ): string {
 		return trim( (string) $url );
@@ -501,6 +509,25 @@ if ( ! defined( 'DB_NAME' ) ) {
 	define( 'DB_NAME', 'testdb' );
 }
 
+if ( ! defined( 'WP_MEMORY_LIMIT' ) ) {
+	define( 'WP_MEMORY_LIMIT', '256M' );
+}
+
+if ( ! function_exists( 'wp_convert_hr_to_bytes' ) ) {
+	function wp_convert_hr_to_bytes( $value ) {
+		$value = strtolower( trim( (string) $value ) );
+		$bytes = (int) $value;
+		if ( false !== strpos( $value, 'g' ) ) {
+			$bytes *= 1024 * 1024 * 1024;
+		} elseif ( false !== strpos( $value, 'm' ) ) {
+			$bytes *= 1024 * 1024;
+		} elseif ( false !== strpos( $value, 'k' ) ) {
+			$bytes *= 1024;
+		}
+		return $bytes;
+	}
+}
+
 if ( ! function_exists( 'size_format' ) ) {
 	function size_format( $bytes, $decimals = 0 ) {
 		$bytes = (float) $bytes;
@@ -689,6 +716,7 @@ function sa_reset_state(): void {
 	$GLOBALS['_posts']        = array();
 	$GLOBALS['_post_meta']    = array();
 	$GLOBALS['_cleaned_post_cache'] = array();
+	$GLOBALS['_did_delete_expired'] = false;
 	$GLOBALS['_users']        = array();
 	$GLOBALS['_users_total']  = 0;
 	$GLOBALS['_admin_total']  = 0;
