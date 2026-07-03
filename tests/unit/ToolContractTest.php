@@ -31,13 +31,13 @@ final class ToolContractTest extends TestCase {
 	}
 
 	/**
-	 * One row per SHIPPED tool: [ toolName ]. Keyed by name so a failure names
-	 * the offending tool. Filtered to classes defined under includes/tools/ so a
-	 * fake tool another test registers on the shared registry can't leak in and
-	 * fail the shipped-tool contract.
+	 * Names of the SHIPPED tools only — those whose implementing class lives
+	 * under includes/tools/. A fake tool another test registers on the shared
+	 * registry (SA_Fake_*) is excluded, so neither the contract rows nor the
+	 * health count can be skewed by non-shipped doubles.
 	 */
-	public static function toolProvider(): array {
-		$rows = array();
+	private static function shippedNames(): array {
+		$names = array();
 		foreach ( self::registry()->list_tools() as $meta ) {
 			$tool = self::registry()->get_tool( $meta['name'] );
 			if ( ! $tool instanceof Aura_Tool_Base ) {
@@ -45,8 +45,20 @@ final class ToolContractTest extends TestCase {
 			}
 			$file = ( new ReflectionClass( $tool ) )->getFileName();
 			if ( is_string( $file ) && false !== strpos( $file, '/digitizer-site-worker/includes/tools/' ) ) {
-				$rows[ $meta['name'] ] = array( $meta['name'] );
+				$names[] = $meta['name'];
 			}
+		}
+		return $names;
+	}
+
+	/**
+	 * One row per SHIPPED tool: [ toolName ]. Keyed by name so a failure names
+	 * the offending tool.
+	 */
+	public static function toolProvider(): array {
+		$rows = array();
+		foreach ( self::shippedNames() as $name ) {
+			$rows[ $name ] = array( $name );
 		}
 		return $rows;
 	}
@@ -219,6 +231,8 @@ final class ToolContractTest extends TestCase {
 	}
 
 	public function test_registry_ships_a_healthy_tool_count(): void {
-		$this->assertGreaterThanOrEqual( 18, count( self::registry()->list_tools() ) );
+		// Count SHIPPED tools only — fake doubles other test files register on
+		// the shared registry must not prop this guard up if the real set shrinks.
+		$this->assertGreaterThanOrEqual( 18, count( self::shippedNames() ) );
 	}
 }
