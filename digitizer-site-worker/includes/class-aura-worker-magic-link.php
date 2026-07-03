@@ -141,7 +141,6 @@ class Aura_Worker_Magic_Link {
 						'site_url'       => $site_url,
 						'site_name'      => $site_name,
 						'connect_secret' => $connect_secret,
-						'supports_grant_pubkey' => true,
 					)
 				),
 				'timeout' => 15,
