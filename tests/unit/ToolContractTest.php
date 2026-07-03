@@ -183,6 +183,20 @@ final class ToolContractTest extends TestCase {
 	}
 
 	/** @dataProvider toolProvider */
+	public function test_mutating_tool_requires_approval( string $name ): void {
+		// Governance invariant: a tool that isn't read-only changes site state,
+		// so it must declare requires_approval=true rather than inherit the
+		// neutral default — otherwise a consumer trusting the annotation could
+		// run a write without human sign-off.
+		$a = $this->tool( $name )->get_annotations();
+		if ( ! $a['read_only'] ) {
+			$this->assertTrue( $a['requires_approval'], "Mutating tool '$name' must declare requires_approval=true" );
+		} else {
+			$this->assertTrue( true ); // read-only tools carry no constraint here
+		}
+	}
+
+	/** @dataProvider toolProvider */
 	public function test_preview_capable_tool_overrides_dry_run( string $name ): void {
 		$tool = $this->tool( $name );
 		$a    = $tool->get_annotations();
