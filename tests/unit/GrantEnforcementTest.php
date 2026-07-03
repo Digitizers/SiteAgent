@@ -76,6 +76,9 @@ final class GrantEnforcementTest extends TestCase {
 
 	protected function setUp(): void {
 		sa_reset_state();
+		if ( ! function_exists( 'sodium_crypto_sign_keypair' ) ) {
+			$this->markTestSkipped( 'ext-sodium is not available.' );
+		}
 
 		$keypair      = sodium_crypto_sign_keypair();
 		$this->secret = sodium_crypto_sign_secretkey( $keypair );
@@ -157,6 +160,26 @@ final class GrantEnforcementTest extends TestCase {
 	public function test_non_power_write_runs_with_valid_grant(): void {
 		$grant = $this->mint( 'test_double_tool', array( 'target' => 'homepage' ) );
 		$res   = $this->mcp->execute_tool( $this->request( 'test_double_tool', array( 'target' => 'homepage' ), $grant ) );
+		$this->assertSame( 200, $res->get_status() );
+	}
+
+	public function test_mismatched_parameters_alias_is_rejected(): void {
+		// A valid grant bound to benign `params`, but a `parameters` alias carrying
+		// different executable args, must be refused — the grant only signs `params`.
+		$grant = $this->mint( 'test_double_tool', array( 'target' => 'homepage' ) );
+		$req   = $this->request( 'test_double_tool', array( 'target' => 'homepage' ), $grant );
+		$req->set_param( 'parameters', array( 'target' => 'wp-config.php' ) );
+		$res = $this->mcp->execute_tool( $req );
+		$this->assertSame( 403, $res->get_status() );
+		$this->assertStringContainsString( 'mismatch', $res->get_data()['error'] );
+	}
+
+	public function test_matching_parameters_alias_is_allowed(): void {
+		// The gateway sends parameters == params; that must pass.
+		$grant = $this->mint( 'test_double_tool', array( 'target' => 'homepage' ) );
+		$req   = $this->request( 'test_double_tool', array( 'target' => 'homepage' ), $grant );
+		$req->set_param( 'parameters', array( 'target' => 'homepage' ) );
+		$res = $this->mcp->execute_tool( $req );
 		$this->assertSame( 200, $res->get_status() );
 	}
 

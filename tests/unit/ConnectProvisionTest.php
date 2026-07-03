@@ -20,6 +20,9 @@ final class ConnectProvisionTest extends TestCase {
 
 	protected function setUp(): void {
 		sa_reset_state();
+		if ( ! function_exists( 'sodium_crypto_sign_keypair' ) ) {
+			$this->markTestSkipped( 'ext-sodium is not available.' );
+		}
 		$this->ml       = new Aura_Worker_Magic_Link();
 		$this->secret   = 'one-time-connect-secret';
 		$this->magic_id = 'magic123';

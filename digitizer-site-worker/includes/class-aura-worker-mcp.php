@@ -159,6 +159,24 @@ class Aura_Worker_MCP {
 			// exempt (a leaked token may still read).
 			$needs_grant = empty( $annotations['read_only'] ) || ! empty( $annotations['requires_approval'] );
 			if ( $needs_grant && Aura_Worker_Grant::is_enforced() ) {
+				// The grant is bound to `params`, which is exactly what this handler
+				// executes. The gateway also sends a `parameters` alias (identical to
+				// `params`) for older-plugin compatibility; only `params` is ever run
+				// here. Defense in depth: refuse any request whose `parameters` alias
+				// disagrees with `params`, so nothing can be fed executable arguments
+				// the grant never signed.
+				$alias = $request->get_param( 'parameters' );
+				if ( null !== $alias
+					&& Aura_Worker_Grant::canonical_json( is_array( $alias ) ? $alias : array() )
+						!== Aura_Worker_Grant::canonical_json( $params ) ) {
+					return new WP_REST_Response(
+						array(
+							'success' => false,
+							'error'   => 'Approval grant required or invalid: params/parameters mismatch.',
+						),
+						403
+					);
+				}
 				$grant  = (string) $request->get_header( 'X-Aura-Approval-Grant' );
 				$reason = Aura_Worker_Grant::verify( $grant, $tool_name, $params );
 				if ( true !== $reason ) {

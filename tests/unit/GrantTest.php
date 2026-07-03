@@ -20,6 +20,9 @@ final class GrantTest extends TestCase {
 
 	protected function setUp(): void {
 		sa_reset_state();
+		if ( ! function_exists( 'sodium_crypto_sign_keypair' ) ) {
+			$this->markTestSkipped( 'ext-sodium is not available.' );
+		}
 
 		$keypair      = sodium_crypto_sign_keypair();
 		$this->secret = sodium_crypto_sign_secretkey( $keypair );
