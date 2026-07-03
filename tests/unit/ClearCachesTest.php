@@ -49,8 +49,9 @@ final class ClearCachesTest extends TestCase {
 	}
 
 	public function test_detects_a_present_cache_layer(): void {
-		// Register a LiteSpeed purge action so has_action() reports it present.
-		$GLOBALS['_registered_actions']['litespeed_purge_all'] = true;
+		// Register a LiteSpeed purge action through the real API so has_action()
+		// reports it present (the stub mirrors add_action's store).
+		add_action( 'litespeed_purge_all', static function () {} );
 		$out = $this->tool->execute( array() );
 		$this->assertContains( 'litespeed_cache', $out['cleared'] );
 		$this->assertContains( 'litespeed_purge_all', $this->tags() );

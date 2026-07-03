@@ -285,8 +285,10 @@ if ( ! function_exists( 'do_action' ) ) {
 }
 
 if ( ! function_exists( 'has_action' ) ) {
+	// Mirrors add_action's store ($_filters) so a hook registered through the
+	// normal API is visible here, matching production.
 	function has_action( $tag, $callback = false ) {
-		return isset( $GLOBALS['_registered_actions'][ $tag ] ) ? $GLOBALS['_registered_actions'][ $tag ] : false;
+		return ! empty( $GLOBALS['_filters'][ $tag ] );
 	}
 }
 
@@ -723,7 +725,6 @@ function sa_reset_state(): void {
 	$GLOBALS['_post_meta']    = array();
 	$GLOBALS['_cleaned_post_cache'] = array();
 	$GLOBALS['_did_delete_expired'] = false;
-	$GLOBALS['_registered_actions'] = array();
 	$GLOBALS['_users']        = array();
 	$GLOBALS['_users_total']  = 0;
 	$GLOBALS['_admin_total']  = 0;
