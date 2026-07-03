@@ -186,7 +186,11 @@ class Aura_Worker_Grant {
 			return 'grant already used';
 		}
 		if ( function_exists( 'wp_schedule_single_event' ) ) {
-			wp_schedule_single_event( $exp + self::CLOCK_SKEW, self::NONCE_GC_HOOK, array( $key ) );
+			// Delete strictly AFTER the grant's last acceptable second. A grant is
+			// still valid at exp + CLOCK_SKEW (the expiry check only rejects when
+			// now - skew > exp), so cleaning up any earlier could delete the
+			// reservation while the grant is still verifiable and open a replay.
+			wp_schedule_single_event( $exp + ( 2 * self::CLOCK_SKEW ) + 1, self::NONCE_GC_HOOK, array( $key ) );
 		}
 
 		return true;
