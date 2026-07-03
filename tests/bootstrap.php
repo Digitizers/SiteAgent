@@ -45,6 +45,9 @@ if ( ! defined( 'FS_CHMOD_FILE' ) ) {
 if ( ! defined( 'ARRAY_A' ) ) {
 	define( 'ARRAY_A', 'ARRAY_A' );
 }
+if ( ! defined( 'MINUTE_IN_SECONDS' ) ) {
+	define( 'MINUTE_IN_SECONDS', 60 );
+}
 if ( ! defined( 'OBJECT' ) ) {
 	define( 'OBJECT', 'OBJECT' );
 }
@@ -89,6 +92,12 @@ if ( ! function_exists( 'esc_html__' ) ) {
 if ( ! function_exists( 'sanitize_text_field' ) ) {
 	function sanitize_text_field( $str ): string {
 		return trim( strip_tags( (string) $str ) );
+	}
+}
+
+if ( ! function_exists( 'esc_url_raw' ) ) {
+	function esc_url_raw( $url ): string {
+		return trim( (string) $url );
 	}
 }
 
@@ -254,6 +263,13 @@ if ( ! function_exists( 'wp_register_ability_category' ) ) {
 
 if ( ! function_exists( 'add_filter' ) ) {
 	function add_filter( string $tag, $callback, int $priority = 10, int $accepted_args = 1 ): bool {
+		$GLOBALS['_filters'][ $tag ][] = $callback;
+		return true;
+	}
+}
+
+if ( ! function_exists( 'add_action' ) ) {
+	function add_action( string $tag, $callback, int $priority = 10, int $accepted_args = 1 ): bool {
 		$GLOBALS['_filters'][ $tag ][] = $callback;
 		return true;
 	}
@@ -503,6 +519,7 @@ require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-rollback.php';
 require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-snapshots.php';
 require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-mcp.php';
 require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-grant.php';
+require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-magic-link.php';
 require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-abilities.php';
 
 // Load every shipped tool class so tool-level tests can instantiate them
