@@ -17,7 +17,7 @@
   </a>
   <img src="https://img.shields.io/badge/WordPress-6.2%E2%80%937.0-21759b?logo=wordpress" alt="WordPress" />
   <img src="https://img.shields.io/badge/PHP-7.4%2B-777bb4?logo=php" alt="PHP" />
-  <img src="https://img.shields.io/badge/Stable-2.3.0-green" alt="Stable" />
+  <img src="https://img.shields.io/badge/Stable-2.6.1-green" alt="Stable" />
 </p>
 
 ---
@@ -114,7 +114,7 @@ Onboarding via magic link is **HMAC-signed**: the `/connect` callback carries a 
 | `POST` | `/tools/execute` | Execute a tool with validated parameters |
 | `GET` | `/context` | Full site context for AI decision-making |
 
-**Built-in MCP tools (18):**
+**Built-in MCP tools (21):**
 
 | Tool | Kind | Purpose |
 |------|------|---------|
@@ -126,6 +126,7 @@ Onboarding via magic link is **HMAC-signed**: the `/connect` callback carries a 
 | `perf_check` | read | scored performance posture (object cache, OPcache, page cache, PHP, autoload, plugins, memory) |
 | `scan_broken_links` | read | link triage (empty/anchor, dev/staging hosts, unresolved internal links) — no outbound HTTP |
 | `get_seo_meta` | read | a post/page's SEO title, description, focus keyword (Rank Math / Yoast / SEOPress) |
+| `list_page_blocks` | read | a page's Gutenberg block structure (names, attributes, nesting) |
 | `list_users` | read | users + roles + post counts, admins flagged (never returns secrets) |
 | `check_health` | read | live health gate — HTTP, PHP fatals, white-screen, DB |
 | `scan_error_log` | read | tail + severity-group the error log, surface recent fatals |
@@ -134,14 +135,34 @@ Onboarding via magic link is **HMAC-signed**: the `/connect` callback carries a 
 | `update_plugin_safely` | write | backup → update → health check → auto-rollback |
 | `clear_caches` | write | flush object/opcode caches + detected page-cache plugins |
 | `cleanup_transients` | write | remove expired transients (autoload hygiene) |
-| `cleanup_orphaned_assets` | write | find/remove unused media (dry-run by default) |
+| `cleanup_orphaned_assets` | write | find/remove unused media (dry-run by default; live delete approval-gated) |
 | `backup_plugins` | write | zip-snapshot one or all active plugins (rollback safety net) |
+| `update_page_block` | write | update a Gutenberg block's content/attributes (snapshot-first, reversible) |
+| `create_page_from_blocks` | write | create a new page from a Gutenberg block spec (draft-first) |
 
 These plug straight into **Aura's Fleet MCP Gateway**: read tools run on demand, write tools are gated behind human approval, every call is audited. Tool names are classified by verb so the gateway applies the right risk policy automatically.
 
 ---
 
 ## Changelog
+
+### 2.6.1
+
+- **Tool self-declaration hardening** (no new tools — set stays at **21**): the six mutating tools (`update_plugin_safely`, `cleanup_orphaned_assets`, `backup_plugins`, `cleanup_transients`, `clear_caches`, `set_seo_meta`) now explicitly declare themselves non-read-only and approval-required instead of inheriting neutral defaults, so any consumer that trusts a tool's own annotations gates them correctly. Live behaviour is unchanged — grant enforcement and the gateway's verb policy already treated them as writes.
+- `cleanup_orphaned_assets` now advertises a preview: its dry-run (find orphans, delete nothing) is exposed through the preview API, so the orphaned-media sample can be inspected without approval before the destructive delete.
+
+### 2.6.0
+
+- **Signed approval grants (G-grants):** every mutating MCP tool reached over the Aura gateway (`X-Aura-Token`) path now requires a single-use, Ed25519-signed grant that binds the exact tool, parameters, site, and a short validity window — so a stolen site token can only ever run **read** tools, never a write or a power op. The plugin stores only the gateway's **public** key, so even a fully compromised site can't mint its own grants. The key is provisioned over the HMAC-signed magic-link `/connect` callback, and enforcement activates only once it's present, so existing deployments are unaffected until they reconnect.
+
+### 2.5.0
+
+- **WordPress Abilities API bridge:** SiteAgent tools are dual-registered as WP abilities when the core Abilities API is present, so the official MCP adapter and standard MCP clients can discover them (the `aura/mcp` namespace is unchanged).
+- Hardening (external review) across the abilities registration, snapshot engine (fail-closed writes, uncollidable absent-option sentinel), and Gutenberg update path (refuses `inner_html` on a block with nested children).
+
+### 2.4.0
+
+- **Gutenberg (block editor) tools** — `list_page_blocks` (read), `update_page_block` (approval-gated, snapshot-first, reversible), `create_page_from_blocks` (draft-first), bringing the built-in set to **21**. The snapshot engine gains a "post" kind so block edits are reversible. Ends the Elementor-only gap — Gutenberg is core WP.
 
 ### 2.3.0
 
