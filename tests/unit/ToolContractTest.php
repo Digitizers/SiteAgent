@@ -191,11 +191,31 @@ final class ToolContractTest extends TestCase {
 	// -----------------------------------------------------------------------
 
 	public function test_all_tool_names_are_unique(): void {
-		$names = array_map(
-			static fn( $m ) => $m['name'],
-			self::registry()->list_tools()
-		);
-		$this->assertSame( array_values( array_unique( $names ) ), array_values( $names ), 'Tool names must be unique' );
+		// The registry keys tools by name, so list_tools() has ALREADY collapsed
+		// any duplicate — asserting on it can never catch a collision (one tool
+		// would just silently vanish). Instead enumerate the shipped tool classes
+		// directly (constructing the registry has autoloaded them all) and read
+		// each name pre-dedup, so two classes claiming the same name fail here.
+		self::registry();
+		$names = array();
+		foreach ( get_declared_classes() as $class ) {
+			if ( ! is_subclass_of( $class, Aura_Tool_Base::class ) ) {
+				continue;
+			}
+			$ref = new ReflectionClass( $class );
+			if ( $ref->isAbstract() ) {
+				continue;
+			}
+			$file = $ref->getFileName();
+			if ( ! is_string( $file ) || false === strpos( $file, '/digitizer-site-worker/includes/tools/' ) ) {
+				continue;
+			}
+			$names[] = $ref->newInstance()->get_name();
+		}
+
+		$this->assertNotEmpty( $names, 'Expected to enumerate shipped tool classes' );
+		$dupes = array_values( array_diff_assoc( $names, array_unique( $names ) ) );
+		$this->assertSame( array(), $dupes, 'Duplicate tool names among shipped classes: ' . implode( ', ', $dupes ) );
 	}
 
 	public function test_registry_ships_a_healthy_tool_count(): void {
