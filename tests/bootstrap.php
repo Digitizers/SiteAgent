@@ -683,6 +683,57 @@ if ( ! function_exists( 'count_user_posts' ) ) {
 }
 
 // ---------------------------------------------------------------------------
+// Post-query / URL stubs (broken-links, cleanup-assets, site-context). WP_Query
+// records the args it was built with and returns $_wp_query_posts as ->posts;
+// get_post_field reads $_post_content; url_to_postid maps a URL to a post id (0
+// = unresolved); home_url returns the configured site URL.
+// ---------------------------------------------------------------------------
+
+$GLOBALS['_home_url']        = 'https://example.com';
+$GLOBALS['_wp_query_posts']  = array();
+$GLOBALS['_wp_queries']      = array();
+$GLOBALS['_post_content']    = array();
+$GLOBALS['_url_to_postid']   = array();
+
+if ( ! function_exists( 'home_url' ) ) {
+	function home_url( $path = '', $scheme = null ) {
+		return $GLOBALS['_home_url'] . $path;
+	}
+}
+
+if ( ! class_exists( 'WP_Query' ) ) {
+	class WP_Query {
+		/** @var array */
+		public $posts;
+		/** @var array */
+		public $query_vars;
+
+		public function __construct( $args = array() ) {
+			$this->query_vars       = is_array( $args ) ? $args : array();
+			$GLOBALS['_wp_queries'][] = $this->query_vars;
+			$this->posts            = $GLOBALS['_wp_query_posts'];
+		}
+	}
+}
+
+if ( ! function_exists( 'get_post_field' ) ) {
+	function get_post_field( $field, $post = null, $context = 'display' ) {
+		$id = (int) ( is_object( $post ) ? ( $post->ID ?? 0 ) : $post );
+		if ( 'post_content' === $field ) {
+			return $GLOBALS['_post_content'][ $id ] ?? '';
+		}
+		$obj = $GLOBALS['_posts'][ $id ] ?? null;
+		return ( $obj && isset( $obj->$field ) ) ? $obj->$field : '';
+	}
+}
+
+if ( ! function_exists( 'url_to_postid' ) ) {
+	function url_to_postid( $url ) {
+		return isset( $GLOBALS['_url_to_postid'][ $url ] ) ? (int) $GLOBALS['_url_to_postid'][ $url ] : 0;
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Load the classes under test
 // ---------------------------------------------------------------------------
 
@@ -730,6 +781,11 @@ function sa_reset_state(): void {
 	$GLOBALS['_admin_total']  = 0;
 	$GLOBALS['_user_queries'] = array();
 	$GLOBALS['_post_counts']  = array();
+	$GLOBALS['_home_url']       = 'https://example.com';
+	$GLOBALS['_wp_query_posts'] = array();
+	$GLOBALS['_wp_queries']     = array();
+	$GLOBALS['_post_content']   = array();
+	$GLOBALS['_url_to_postid']  = array();
 	$GLOBALS['_abilities']    = array();
 	$GLOBALS['_ability_categories'] = array();
 	$GLOBALS['_scheduled']    = array();
