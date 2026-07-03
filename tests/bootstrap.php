@@ -733,6 +733,28 @@ if ( ! function_exists( 'url_to_postid' ) ) {
 	}
 }
 
+$GLOBALS['_bloginfo']   = array();
+$GLOBALS['_thumbnails'] = array();
+
+if ( ! function_exists( 'get_bloginfo' ) ) {
+	function get_bloginfo( $show = '', $filter = 'raw' ) {
+		return $GLOBALS['_bloginfo'][ $show ] ?? '';
+	}
+}
+
+if ( ! function_exists( 'wp_strip_all_tags' ) ) {
+	function wp_strip_all_tags( $string, $remove_breaks = false ) {
+		return trim( strip_tags( (string) $string ) );
+	}
+}
+
+if ( ! function_exists( 'has_post_thumbnail' ) ) {
+	function has_post_thumbnail( $post = null ) {
+		$id = (int) ( is_object( $post ) ? ( $post->ID ?? 0 ) : $post );
+		return ! empty( $GLOBALS['_thumbnails'][ $id ] );
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Load the classes under test
 // ---------------------------------------------------------------------------
@@ -786,6 +808,8 @@ function sa_reset_state(): void {
 	$GLOBALS['_wp_queries']     = array();
 	$GLOBALS['_post_content']   = array();
 	$GLOBALS['_url_to_postid']  = array();
+	$GLOBALS['_bloginfo']       = array();
+	$GLOBALS['_thumbnails']     = array();
 	$GLOBALS['_abilities']    = array();
 	$GLOBALS['_ability_categories'] = array();
 	$GLOBALS['_scheduled']    = array();
