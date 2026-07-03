@@ -95,6 +95,35 @@ if ( ! function_exists( 'sanitize_text_field' ) ) {
 	}
 }
 
+if ( ! function_exists( 'sanitize_textarea_field' ) ) {
+	function sanitize_textarea_field( $str ): string {
+		return trim( strip_tags( (string) $str ) );
+	}
+}
+
+// Post-meta store (for the SEO meta tools). Keyed [ postId ][ metaKey ] = value.
+$GLOBALS['_post_meta'] = array();
+
+if ( ! function_exists( 'get_post_meta' ) ) {
+	function get_post_meta( $post_id, $key = '', $single = false ) {
+		$val = $GLOBALS['_post_meta'][ (int) $post_id ][ $key ] ?? '';
+		return $single ? $val : ( '' === $val ? array() : array( $val ) );
+	}
+}
+
+if ( ! function_exists( 'update_post_meta' ) ) {
+	function update_post_meta( $post_id, $key, $value, $prev = '' ) {
+		$GLOBALS['_post_meta'][ (int) $post_id ][ $key ] = $value;
+		return true;
+	}
+}
+
+if ( ! function_exists( 'clean_post_cache' ) ) {
+	function clean_post_cache( $post ) {
+		$GLOBALS['_cleaned_post_cache'][] = (int) ( is_object( $post ) ? ( $post->ID ?? 0 ) : $post );
+	}
+}
+
 if ( ! function_exists( 'esc_url_raw' ) ) {
 	function esc_url_raw( $url ): string {
 		return trim( (string) $url );
@@ -658,6 +687,8 @@ function sa_reset_state(): void {
 	$GLOBALS['_db_prepared']      = array();
 	$GLOBALS['_db_query_result']  = 0;
 	$GLOBALS['_posts']        = array();
+	$GLOBALS['_post_meta']    = array();
+	$GLOBALS['_cleaned_post_cache'] = array();
 	$GLOBALS['_users']        = array();
 	$GLOBALS['_users_total']  = 0;
 	$GLOBALS['_admin_total']  = 0;
