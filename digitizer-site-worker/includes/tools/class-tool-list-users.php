@@ -58,6 +58,18 @@ class Aura_Tool_List_Users extends Aura_Tool_Base {
 		);
 	}
 
+	/**
+	 * This is a read-only tool: it never mutates the site.
+	 */
+	public function get_annotations() {
+		return array(
+			'read_only'         => true,
+			'destructive'       => false,
+			'requires_approval' => false,
+			'supports_preview'  => false,
+		);
+	}
+
 	public function execute( $params ) {
 		$number = isset( $params['number'] ) ? max( 1, min( 200, (int) $params['number'] ) ) : 50;
 		$offset = isset( $params['offset'] ) ? max( 0, (int) $params['offset'] ) : 0;

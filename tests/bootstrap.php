@@ -45,6 +45,9 @@ if ( ! defined( 'FS_CHMOD_FILE' ) ) {
 if ( ! defined( 'ARRAY_A' ) ) {
 	define( 'ARRAY_A', 'ARRAY_A' );
 }
+if ( ! defined( 'MINUTE_IN_SECONDS' ) ) {
+	define( 'MINUTE_IN_SECONDS', 60 );
+}
 if ( ! defined( 'OBJECT' ) ) {
 	define( 'OBJECT', 'OBJECT' );
 }
@@ -89,6 +92,12 @@ if ( ! function_exists( 'esc_html__' ) ) {
 if ( ! function_exists( 'sanitize_text_field' ) ) {
 	function sanitize_text_field( $str ): string {
 		return trim( strip_tags( (string) $str ) );
+	}
+}
+
+if ( ! function_exists( 'esc_url_raw' ) ) {
+	function esc_url_raw( $url ): string {
+		return trim( (string) $url );
 	}
 }
 
@@ -140,6 +149,26 @@ if ( ! function_exists( 'get_option' ) ) {
 if ( ! function_exists( 'update_option' ) ) {
 	function update_option( string $option, $value, $autoload = null ): bool {
 		$GLOBALS['_options'][ $option ] = $value;
+		return true;
+	}
+}
+
+if ( ! function_exists( 'add_option' ) ) {
+	// Atomic in core (INSERT guarded by option_name's unique index): fails when
+	// the option already exists. The verifier relies on this for single-use
+	// nonce reservation, so the stub mirrors that fail-if-exists semantics.
+	function add_option( string $option, $value = '', $deprecated = '', $autoload = 'yes' ): bool {
+		if ( array_key_exists( $option, $GLOBALS['_options'] ) ) {
+			return false;
+		}
+		$GLOBALS['_options'][ $option ] = $value;
+		return true;
+	}
+}
+
+if ( ! function_exists( 'wp_schedule_single_event' ) ) {
+	function wp_schedule_single_event( int $timestamp, string $hook, array $args = array() ) {
+		$GLOBALS['_scheduled'][] = array( 'ts' => $timestamp, 'hook' => $hook, 'args' => $args );
 		return true;
 	}
 }
@@ -234,6 +263,13 @@ if ( ! function_exists( 'wp_register_ability_category' ) ) {
 
 if ( ! function_exists( 'add_filter' ) ) {
 	function add_filter( string $tag, $callback, int $priority = 10, int $accepted_args = 1 ): bool {
+		$GLOBALS['_filters'][ $tag ][] = $callback;
+		return true;
+	}
+}
+
+if ( ! function_exists( 'add_action' ) ) {
+	function add_action( string $tag, $callback, int $priority = 10, int $accepted_args = 1 ): bool {
 		$GLOBALS['_filters'][ $tag ][] = $callback;
 		return true;
 	}
@@ -482,6 +518,8 @@ require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-security.php';
 require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-rollback.php';
 require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-snapshots.php';
 require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-mcp.php';
+require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-grant.php';
+require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-magic-link.php';
 require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-abilities.php';
 
 // Load every shipped tool class so tool-level tests can instantiate them
@@ -506,6 +544,7 @@ function sa_reset_state(): void {
 	$GLOBALS['_posts']        = array();
 	$GLOBALS['_abilities']    = array();
 	$GLOBALS['_ability_categories'] = array();
+	$GLOBALS['_scheduled']    = array();
 	if ( isset( $GLOBALS['wpdb'] ) ) {
 		$GLOBALS['wpdb']->last_error = '';
 		$GLOBALS['wpdb']->last_query = '';

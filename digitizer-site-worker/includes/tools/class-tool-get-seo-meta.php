@@ -78,6 +78,18 @@ class Aura_Tool_Get_Seo_Meta extends Aura_Tool_Base {
 		);
 	}
 
+	/**
+	 * This is a read-only tool: it never mutates the site.
+	 */
+	public function get_annotations() {
+		return array(
+			'read_only'         => true,
+			'destructive'       => false,
+			'requires_approval' => false,
+			'supports_preview'  => false,
+		);
+	}
+
 	public function execute( $params ) {
 		$post_id = isset( $params['post_id'] ) ? (int) $params['post_id'] : 0;
 		if ( $post_id <= 0 || ! get_post( $post_id ) ) {

@@ -44,6 +44,7 @@ class Aura_Worker_MCP {
 		$this->security = $security;
 
 		require_once plugin_dir_path( __FILE__ ) . 'class-aura-worker-tools.php';
+		require_once plugin_dir_path( __FILE__ ) . 'class-aura-worker-grant.php';
 		$this->tools = new Aura_Worker_Tools();
 	}
 
@@ -139,6 +140,55 @@ class Aura_Worker_MCP {
 
 		if ( ! is_array( $params ) ) {
 			$params = array();
+		}
+
+		// Approval-grant enforcement (gateway / X-Aura-Token path only). When the
+		// gateway has provisioned its public key, EVERY mutating (non read-only)
+		// tool must carry a valid single-use signed grant bound to THIS exact call
+		// — so a stolen token alone can only ever run READ tools, never a write or
+		// a power op. The WordPress Abilities / Application-Password path has a
+		// different, capability-based trust model and does not reach this handler.
+		$tool = $this->tools->get_tool( $tool_name );
+		if ( null !== $tool ) {
+			$annotations = $tool->get_annotations();
+			// A grant is required for any mutating (non read-only) tool OR any tool
+			// that declares requires_approval. The second clause matters for a
+			// dangerous READ that still needs approval — e.g. `db_query`, which is
+			// read_only=true but requires_approval=true; without it a stolen token
+			// could dump the database. Read tools that don't require approval are
+			// exempt (a leaked token may still read).
+			$needs_grant = empty( $annotations['read_only'] ) || ! empty( $annotations['requires_approval'] );
+			if ( $needs_grant && Aura_Worker_Grant::is_enforced() ) {
+				// The grant is bound to `params`, which is exactly what this handler
+				// executes. The gateway also sends a `parameters` alias (identical to
+				// `params`) for older-plugin compatibility; only `params` is ever run
+				// here. Defense in depth: refuse any request whose `parameters` alias
+				// disagrees with `params`, so nothing can be fed executable arguments
+				// the grant never signed.
+				$alias = $request->get_param( 'parameters' );
+				if ( null !== $alias
+					&& Aura_Worker_Grant::canonical_json( is_array( $alias ) ? $alias : array() )
+						!== Aura_Worker_Grant::canonical_json( $params ) ) {
+					return new WP_REST_Response(
+						array(
+							'success' => false,
+							'error'   => 'Approval grant required or invalid: params/parameters mismatch.',
+						),
+						403
+					);
+				}
+				$grant  = (string) $request->get_header( 'X-Aura-Approval-Grant' );
+				$reason = Aura_Worker_Grant::verify( $grant, $tool_name, $params );
+				if ( true !== $reason ) {
+					return new WP_REST_Response(
+						array(
+							'success' => false,
+							'error'   => 'Approval grant required or invalid: ' . $reason,
+						),
+						403
+					);
+				}
+			}
 		}
 
 		$result = $this->tools->execute_tool( $tool_name, $params );

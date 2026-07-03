@@ -68,6 +68,11 @@ class Aura_Worker {
 		add_action( 'wp_abilities_api_categories_init', array( $this->abilities, 'register_category' ) );
 		add_action( 'wp_abilities_api_init', array( $this->abilities, 'register' ) );
 
+		// G-grants: delete each spent approval-grant nonce just past its expiry
+		// (scheduled per-nonce by the verifier), so reservations self-clean.
+		require_once plugin_dir_path( __FILE__ ) . 'class-aura-worker-grant.php';
+		add_action( Aura_Worker_Grant::NONCE_GC_HOOK, array( 'Aura_Worker_Grant', 'delete_spent_nonce' ), 10, 1 );
+
 		// Add settings page and privacy policy.
 		if ( is_admin() ) {
 			add_action( 'admin_menu', array( $this, 'add_settings_page' ) );

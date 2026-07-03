@@ -91,6 +91,12 @@ class Aura_Worker_API {
 					'sanitize_callback' => 'sanitize_text_field',
 					'description'       => __( 'HMAC-SHA256 signature of the connect payload.', 'digitizer-site-worker' ),
 				),
+				'grant_pubkey' => array(
+					'required'          => false,
+					'type'              => 'string',
+					'sanitize_callback' => 'sanitize_text_field',
+					'description'       => __( 'Optional base64 Ed25519 gateway public key to provision for approval-grant verification. Covered by the signature.', 'digitizer-site-worker' ),
+				),
 			),
 		) );
 

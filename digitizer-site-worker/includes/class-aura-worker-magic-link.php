@@ -191,6 +191,10 @@ class Aura_Worker_Magic_Link {
 		$dashboard_url = esc_url_raw( $request->get_param( 'dashboard_url' ) );
 		$timestamp     = (int) $request->get_param( 'timestamp' );
 		$signature     = sanitize_text_field( $request->get_param( 'signature' ) );
+		// Optional G-grants provisioning: the gateway's Ed25519 public key. It is
+		// covered by the signature (a 5th line, present only when non-empty), so a
+		// stolen token alone can't provision an attacker-chosen key.
+		$grant_pubkey  = sanitize_text_field( (string) $request->get_param( 'grant_pubkey' ) );
 
 		if ( empty( $magic_id ) || empty( $token ) || empty( $dashboard_url ) || empty( $signature ) || $timestamp <= 0 ) {
 			return new WP_REST_Response( array( 'error' => 'Missing required parameters.' ), 400 );
@@ -207,9 +211,24 @@ class Aura_Worker_Magic_Link {
 		}
 
 		// Verify the HMAC signature using the one-time secret this site issued.
-		$expected = self::sign_connect_payload( $stored['connect_secret'], $magic_id, $token, $dashboard_url, $timestamp );
+		$expected = self::sign_connect_payload( $stored['connect_secret'], $magic_id, $token, $dashboard_url, $timestamp, $grant_pubkey );
 		if ( ! hash_equals( $expected, $signature ) ) {
 			return new WP_REST_Response( array( 'error' => 'Invalid signature.' ), 401 );
+		}
+
+		// Validate a provisioned grant public key before storing anything: this
+		// host must have libsodium (grants can't be verified without it), and the
+		// key must be a base64 32-byte Ed25519 key. Signature already proved
+		// authenticity. Rejecting here avoids provisioning a key that would only
+		// ever fail closed and block every write.
+		if ( '' !== $grant_pubkey ) {
+			if ( ! function_exists( 'sodium_crypto_sign_verify_detached' ) ) {
+				return new WP_REST_Response( array( 'error' => 'This host lacks libsodium; approval grants cannot be enabled.' ), 400 );
+			}
+			$raw = base64_decode( $grant_pubkey, true );
+			if ( false === $raw || 32 !== strlen( $raw ) ) {
+				return new WP_REST_Response( array( 'error' => 'Invalid grant public key.' ), 400 );
+			}
 		}
 
 		// Persist the connecting administrator so token-only requests can run as
@@ -220,6 +239,16 @@ class Aura_Worker_Magic_Link {
 		}
 		update_option( 'aura_worker_site_token', Aura_Worker_Security::hash_token( $token ) );
 		update_option( 'aura_worker_dashboard_url', $dashboard_url );
+		if ( '' !== $grant_pubkey ) {
+			// Provision the gateway key → turns on approval-grant enforcement
+			// (Aura_Worker_Grant::is_enforced()).
+			update_option( 'aura_worker_grant_pubkey', $grant_pubkey );
+		} else {
+			// Keyless (re)connect: clear any previously provisioned key so a fresh
+			// dashboard that doesn't use grants isn't left unable to run writes
+			// against a stale key it can't sign for. Enforcement follows the key.
+			delete_option( 'aura_worker_grant_pubkey' );
+		}
 		delete_transient( 'aura_magic_' . $magic_id );
 
 		return new WP_REST_Response( array( 'success' => true ), 200 );
@@ -237,10 +266,18 @@ class Aura_Worker_Magic_Link {
 	 * @param string $token         Raw site token issued by the dashboard.
 	 * @param string $dashboard_url Dashboard base URL.
 	 * @param int    $timestamp     Unix timestamp of the callback.
+	 * @param string $grant_pubkey  Optional base64 Ed25519 gateway key; appended
+	 *                              as a 5th line only when non-empty.
 	 * @return string Lowercase hex HMAC-SHA256 digest.
 	 */
-	public static function sign_connect_payload( $secret, $magic_id, $token, $dashboard_url, $timestamp ) {
-		$message = implode( "\n", array( $magic_id, $token, $dashboard_url, (string) $timestamp ) );
-		return hash_hmac( 'sha256', $message, $secret );
+	public static function sign_connect_payload( $secret, $magic_id, $token, $dashboard_url, $timestamp, $grant_pubkey = '' ) {
+		$parts = array( $magic_id, $token, $dashboard_url, (string) $timestamp );
+		// Append the grant public key as a 5th line ONLY when provisioning one, so
+		// existing 4-field callbacks keep validating unchanged. The Aura dashboard
+		// MUST follow the same rule (include iff non-empty).
+		if ( '' !== (string) $grant_pubkey ) {
+			$parts[] = (string) $grant_pubkey;
+		}
+		return hash_hmac( 'sha256', implode( "\n", $parts ), $secret );
 	}
 }
