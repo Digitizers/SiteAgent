@@ -13,7 +13,6 @@
  */
 
 use PHPUnit\Framework\TestCase;
-use PHPUnit\Framework\Attributes\DataProvider;
 
 final class ToolContractTest extends TestCase {
 
@@ -45,7 +44,7 @@ final class ToolContractTest extends TestCase {
 				continue;
 			}
 			$file = ( new ReflectionClass( $tool ) )->getFileName();
-			if ( is_string( $file ) && str_contains( $file, '/digitizer-site-worker/includes/tools/' ) ) {
+			if ( is_string( $file ) && false !== strpos( $file, '/digitizer-site-worker/includes/tools/' ) ) {
 				$rows[ $meta['name'] ] = array( $meta['name'] );
 			}
 		}
@@ -62,12 +61,12 @@ final class ToolContractTest extends TestCase {
 	// Name
 	// -----------------------------------------------------------------------
 
-	#[DataProvider( 'toolProvider' )]
+	/** @dataProvider toolProvider */
 	public function test_name_is_nonempty_snake_case( string $name ): void {
 		$this->assertMatchesRegularExpression( '/^[a-z][a-z0-9_]*$/', $name, "Tool name '$name' must be snake_case" );
 	}
 
-	#[DataProvider( 'toolProvider' )]
+	/** @dataProvider toolProvider */
 	public function test_instance_name_matches_registry_name( string $name ): void {
 		$this->assertSame( $name, $this->tool( $name )->get_name() );
 	}
@@ -76,7 +75,7 @@ final class ToolContractTest extends TestCase {
 	// Description
 	// -----------------------------------------------------------------------
 
-	#[DataProvider( 'toolProvider' )]
+	/** @dataProvider toolProvider */
 	public function test_description_is_a_meaningful_string( string $name ): void {
 		$desc = $this->tool( $name )->get_description();
 		$this->assertIsString( $desc );
@@ -87,12 +86,12 @@ final class ToolContractTest extends TestCase {
 	// Parameters
 	// -----------------------------------------------------------------------
 
-	#[DataProvider( 'toolProvider' )]
+	/** @dataProvider toolProvider */
 	public function test_parameters_is_an_array( string $name ): void {
 		$this->assertIsArray( $this->tool( $name )->get_parameters() );
 	}
 
-	#[DataProvider( 'toolProvider' )]
+	/** @dataProvider toolProvider */
 	public function test_each_parameter_declares_a_valid_shape( string $name ): void {
 		foreach ( $this->tool( $name )->get_parameters() as $key => $def ) {
 			$this->assertIsString( $key, "Parameter key on '$name' must be a string" );
@@ -108,7 +107,7 @@ final class ToolContractTest extends TestCase {
 		}
 	}
 
-	#[DataProvider( 'toolProvider' )]
+	/** @dataProvider toolProvider */
 	public function test_optional_params_with_defaults_match_their_type( string $name ): void {
 		foreach ( $this->tool( $name )->get_parameters() as $key => $def ) {
 			if ( ! array_key_exists( 'default', $def ) ) {
@@ -139,7 +138,7 @@ final class ToolContractTest extends TestCase {
 	// Returns
 	// -----------------------------------------------------------------------
 
-	#[DataProvider( 'toolProvider' )]
+	/** @dataProvider toolProvider */
 	public function test_returns_is_a_nonempty_array( string $name ): void {
 		$returns = $this->tool( $name )->get_returns();
 		$this->assertIsArray( $returns );
@@ -150,7 +149,7 @@ final class ToolContractTest extends TestCase {
 	// Annotations — the surface the fleet gateway trusts
 	// -----------------------------------------------------------------------
 
-	#[DataProvider( 'toolProvider' )]
+	/** @dataProvider toolProvider */
 	public function test_annotations_declare_all_four_boolean_flags( string $name ): void {
 		$a = $this->tool( $name )->get_annotations();
 		foreach ( array( 'read_only', 'destructive', 'requires_approval', 'supports_preview' ) as $flag ) {
@@ -159,7 +158,7 @@ final class ToolContractTest extends TestCase {
 		}
 	}
 
-	#[DataProvider( 'toolProvider' )]
+	/** @dataProvider toolProvider */
 	public function test_read_only_tool_is_not_destructive( string $name ): void {
 		$a = $this->tool( $name )->get_annotations();
 		if ( $a['read_only'] ) {
@@ -169,7 +168,7 @@ final class ToolContractTest extends TestCase {
 		}
 	}
 
-	#[DataProvider( 'toolProvider' )]
+	/** @dataProvider toolProvider */
 	public function test_preview_capable_tool_overrides_dry_run( string $name ): void {
 		$tool = $this->tool( $name );
 		$a    = $tool->get_annotations();
