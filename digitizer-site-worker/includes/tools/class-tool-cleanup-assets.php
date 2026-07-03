@@ -50,6 +50,21 @@ class Aura_Tool_Cleanup_Assets extends Aura_Tool_Base {
 		);
 	}
 
+	/**
+	 * Deletes orphaned media on a live run — a destructive, mutating op, so it is
+	 * never read-only and must be approved before it runs. (The tool still
+	 * defaults to dry_run via its own parameter; the approval gate covers the
+	 * live delete.)
+	 */
+	public function get_annotations() {
+		return array(
+			'read_only'         => false,
+			'destructive'       => true,
+			'requires_approval' => true,
+			'supports_preview'  => false,
+		);
+	}
+
 	public function execute( $params ) {
 		$dry_run      = isset( $params['dry_run'] ) ? (bool) $params['dry_run'] : true;
 		$sample_limit = isset( $params['sample_limit'] ) ? (int) $params['sample_limit'] : 20;

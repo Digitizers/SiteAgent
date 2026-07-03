@@ -41,6 +41,19 @@ class Aura_Tool_Backup_Plugins extends Aura_Tool_Base {
 		);
 	}
 
+	/**
+	 * Writes plugin backup archives to disk — a mutating op, so it is never
+	 * read-only and must be approved before it runs.
+	 */
+	public function get_annotations() {
+		return array(
+			'read_only'         => false,
+			'destructive'       => false,
+			'requires_approval' => true,
+			'supports_preview'  => false,
+		);
+	}
+
 	public function execute( $params ) {
 		$file = dirname( __DIR__ ) . '/class-aura-worker-rollback.php';
 		if ( ! class_exists( 'Aura_Worker_Rollback' ) && file_exists( $file ) ) {

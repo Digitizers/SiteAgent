@@ -32,6 +32,20 @@ class Aura_Tool_Clear_Caches extends Aura_Tool_Base {
 		);
 	}
 
+	/**
+	 * Flushes cache layers — a mutating (state-changing) op, so it is never
+	 * read-only and must be approved before it runs. Not destructive: caches
+	 * rebuild on demand.
+	 */
+	public function get_annotations() {
+		return array(
+			'read_only'         => false,
+			'destructive'       => false,
+			'requires_approval' => true,
+			'supports_preview'  => false,
+		);
+	}
+
 	public function execute( $params ) {
 		$cleared = array();
 

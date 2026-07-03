@@ -93,6 +93,19 @@ class Aura_Tool_Set_Seo_Meta extends Aura_Tool_Base {
 		);
 	}
 
+	/**
+	 * Writes post SEO meta — a mutating op, so it is never read-only and must be
+	 * approved before it runs.
+	 */
+	public function get_annotations() {
+		return array(
+			'read_only'         => false,
+			'destructive'       => false,
+			'requires_approval' => true,
+			'supports_preview'  => false,
+		);
+	}
+
 	public function execute( $params ) {
 		$post_id = isset( $params['post_id'] ) ? (int) $params['post_id'] : 0;
 		if ( $post_id <= 0 || ! get_post( $post_id ) ) {

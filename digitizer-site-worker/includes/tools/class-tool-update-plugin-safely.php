@@ -49,6 +49,19 @@ class Aura_Tool_Update_Plugin_Safely extends Aura_Tool_Base {
 		);
 	}
 
+	/**
+	 * Updates a plugin (with rollback + health gate) — a mutating, high-impact
+	 * op, so it is never read-only and must be approved before it runs.
+	 */
+	public function get_annotations() {
+		return array(
+			'read_only'         => false,
+			'destructive'       => false,
+			'requires_approval' => true,
+			'supports_preview'  => false,
+		);
+	}
+
 	public function execute( $params ) {
 		$plugin_slug   = sanitize_text_field( $params['plugin_slug'] );
 		$create_backup = isset( $params['create_backup'] ) ? (bool) $params['create_backup'] : true;

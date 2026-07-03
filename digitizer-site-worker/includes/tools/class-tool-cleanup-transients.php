@@ -33,6 +33,20 @@ class Aura_Tool_Cleanup_Transients extends Aura_Tool_Base {
 		);
 	}
 
+	/**
+	 * Deletes rows from the options table — a mutating op, so it is never
+	 * read-only and must be approved before it runs. (Only already-expired
+	 * transients are removed, so it is not marked destructive.)
+	 */
+	public function get_annotations() {
+		return array(
+			'read_only'         => false,
+			'destructive'       => false,
+			'requires_approval' => true,
+			'supports_preview'  => false,
+		);
+	}
+
 	public function execute( $params ) {
 		global $wpdb;
 
