@@ -113,9 +113,11 @@ final class ToolContractTest extends TestCase {
 			$this->assertArrayHasKey( 'description', $def, "Parameter '$key' on '$name' needs a description" );
 			$this->assertIsString( $def['description'] );
 			$this->assertNotSame( '', trim( $def['description'] ), "Parameter '$key' on '$name' has an empty description" );
-			if ( array_key_exists( 'required', $def ) ) {
-				$this->assertIsBool( $def['required'], "Parameter '$key' on '$name': 'required' must be bool" );
-			}
+			// 'required' must be declared explicitly: the gateway/schema builders
+			// read a MISSING flag as optional (empty($def['required'])), so an
+			// omitted flag would silently turn a required input optional.
+			$this->assertArrayHasKey( 'required', $def, "Parameter '$key' on '$name' must declare 'required'" );
+			$this->assertIsBool( $def['required'], "Parameter '$key' on '$name': 'required' must be bool" );
 		}
 	}
 
