@@ -34,6 +34,18 @@ class Aura_Tool_Check_Health extends Aura_Tool_Base {
 		);
 	}
 
+	/**
+	 * This is a read-only tool: it never mutates the site.
+	 */
+	public function get_annotations() {
+		return array(
+			'read_only'         => true,
+			'destructive'       => false,
+			'requires_approval' => false,
+			'supports_preview'  => false,
+		);
+	}
+
 	public function execute( $params ) {
 		$file = dirname( __DIR__ ) . '/class-aura-worker-health.php';
 		if ( ! class_exists( 'Aura_Worker_Health' ) && file_exists( $file ) ) {

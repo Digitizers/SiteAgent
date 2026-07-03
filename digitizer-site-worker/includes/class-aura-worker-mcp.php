@@ -143,15 +143,16 @@ class Aura_Worker_MCP {
 		}
 
 		// Approval-grant enforcement (gateway / X-Aura-Token path only). When the
-		// gateway has provisioned its public key, an approval-required tool must
-		// carry a valid single-use signed grant bound to THIS exact call — so a
-		// stolen token alone can never run a power tool. The WordPress Abilities /
-		// Application-Password path has a different, capability-based trust model
-		// and does not reach this handler.
+		// gateway has provisioned its public key, EVERY mutating (non read-only)
+		// tool must carry a valid single-use signed grant bound to THIS exact call
+		// — so a stolen token alone can only ever run READ tools, never a write or
+		// a power op. The WordPress Abilities / Application-Password path has a
+		// different, capability-based trust model and does not reach this handler.
 		$tool = $this->tools->get_tool( $tool_name );
 		if ( null !== $tool ) {
 			$annotations = $tool->get_annotations();
-			if ( ! empty( $annotations['requires_approval'] ) && Aura_Worker_Grant::is_enforced() ) {
+			$is_mutating = empty( $annotations['read_only'] );
+			if ( $is_mutating && Aura_Worker_Grant::is_enforced() ) {
 				$grant  = (string) $request->get_header( 'X-Aura-Approval-Grant' );
 				$reason = Aura_Worker_Grant::verify( $grant, $tool_name, $params );
 				if ( true !== $reason ) {

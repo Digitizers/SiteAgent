@@ -44,6 +44,18 @@ class Aura_Tool_Scan_Error_Log extends Aura_Tool_Base {
 		);
 	}
 
+	/**
+	 * This is a read-only tool: it never mutates the site.
+	 */
+	public function get_annotations() {
+		return array(
+			'read_only'         => true,
+			'destructive'       => false,
+			'requires_approval' => false,
+			'supports_preview'  => false,
+		);
+	}
+
 	public function execute( $params ) {
 		$max_lines = isset( $params['lines'] ) ? max( 1, min( 1000, (int) $params['lines'] ) ) : 200;
 

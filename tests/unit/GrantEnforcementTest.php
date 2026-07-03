@@ -1,12 +1,42 @@
 <?php
 /**
- * Integration: the MCP execute handler enforces approval grants for
- * requires_approval tools on the token/gateway path.
+ * Integration: the MCP execute handler enforces approval grants for every
+ * mutating (non read-only) tool on the token/gateway path.
  *
  * @package Aura_Worker\Tests
  */
 
 use PHPUnit\Framework\TestCase;
+
+/**
+ * A trivial read-only tool (read_only=true) that runs cleanly in the stub
+ * environment — used to assert the grant gate leaves reads alone.
+ */
+class SA_Fake_Read_Tool extends Aura_Tool_Base {
+	public function get_name() {
+		return 'test_read_double';
+	}
+	public function get_description() {
+		return 'A fake read-only tool.';
+	}
+	public function get_parameters() {
+		return array();
+	}
+	public function get_returns() {
+		return array( 'ok' => array( 'type' => 'boolean' ) );
+	}
+	public function get_annotations() {
+		return array(
+			'read_only'         => true,
+			'destructive'       => false,
+			'requires_approval' => false,
+			'supports_preview'  => false,
+		);
+	}
+	public function execute( $params ) {
+		return array( 'ok' => true );
+	}
+}
 
 final class GrantEnforcementTest extends TestCase {
 
@@ -80,12 +110,27 @@ final class GrantEnforcementTest extends TestCase {
 	}
 
 	public function test_read_tool_needs_no_grant_even_when_enforced(): void {
-		// A non-approval tool is unaffected by grant enforcement.
-		$res = $this->mcp->execute_tool( $this->request( 'test_double_tool', array( 'target' => 'homepage' ) ) );
+		// A genuinely read-only tool (read_only=true) is unaffected by grant
+		// enforcement — a stolen token can still READ.
+		$res = $this->mcp->execute_tool( $this->request( 'test_read_double', array() ) );
 		$this->assertNotSame( 403, $res->get_status() );
+		$this->assertTrue( $res->get_data()['success'] );
 	}
 
-	public function test_power_tool_runs_without_grant_when_not_provisioned(): void {
+	public function test_non_power_write_also_needs_a_grant(): void {
+		// The broadened scope: ANY mutating tool (not just power) needs a grant.
+		// test_double_tool is a non-power write (read_only=false, no approval).
+		$res = $this->mcp->execute_tool( $this->request( 'test_double_tool', array( 'target' => 'homepage' ) ) );
+		$this->assertSame( 403, $res->get_status() );
+	}
+
+	public function test_non_power_write_runs_with_valid_grant(): void {
+		$grant = $this->mint( 'test_double_tool', array( 'target' => 'homepage' ) );
+		$res   = $this->mcp->execute_tool( $this->request( 'test_double_tool', array( 'target' => 'homepage' ), $grant ) );
+		$this->assertSame( 200, $res->get_status() );
+	}
+
+	public function test_mutating_tool_runs_without_grant_when_not_provisioned(): void {
 		// Back-compat: with no gateway public key, enforcement is off.
 		unset( $GLOBALS['_options']['aura_worker_grant_pubkey'] );
 		$res = $this->mcp->execute_tool( $this->request( 'test_power_double', array( 'target' => 'homepage' ) ) );

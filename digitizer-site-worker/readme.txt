@@ -191,15 +191,17 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 == Changelog ==
 
 = 2.6.0 =
-* Signed approval grants (G-grants): approval-required tools reached over the
-  Aura gateway (X-Aura-Token) path now require a single-use, Ed25519-signed
-  grant that binds the exact tool, parameters, site, and a short validity
-  window. The plugin stores only the gateway's PUBLIC key, so a stolen site
-  token — or even a fully compromised site — can no longer run a power tool
-  without a fresh, human-approved grant the gateway alone can mint. Enforcement
-  activates only once the gateway provisions its public key, so existing
-  deployments are unaffected until then. The WordPress Abilities /
-  Application-Password path (capability-gated) is unchanged.
+* Signed approval grants (G-grants): every mutating (non read-only) MCP tool
+  reached over the Aura gateway (X-Aura-Token) path now requires a single-use,
+  Ed25519-signed grant that binds the exact tool, parameters, site, and a short
+  validity window — so a stolen site token can only ever run READ tools, never a
+  write or a power op. The plugin stores only the gateway's PUBLIC key, so even a
+  fully compromised site can't mint its own grants; only the gateway can, and
+  only for a human-approved action. The gateway public key is provisioned over
+  the HMAC-signed magic-link /connect callback, and enforcement activates only
+  once it is present, so existing deployments are unaffected until they
+  reconnect. The WordPress Abilities / Application-Password path
+  (capability-gated) is unchanged.
 
 = 2.5.0 =
 * WordPress Abilities API bridge: SiteAgent tools are now dual-registered as WP

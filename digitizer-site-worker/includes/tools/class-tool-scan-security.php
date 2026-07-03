@@ -35,6 +35,18 @@ class Aura_Tool_Scan_Security extends Aura_Tool_Base {
 		);
 	}
 
+	/**
+	 * This is a read-only tool: it never mutates the site.
+	 */
+	public function get_annotations() {
+		return array(
+			'read_only'         => true,
+			'destructive'       => false,
+			'requires_approval' => false,
+			'supports_preview'  => false,
+		);
+	}
+
 	public function execute( $params ) {
 		global $wpdb;
 
