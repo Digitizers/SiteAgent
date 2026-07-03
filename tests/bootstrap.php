@@ -509,6 +509,50 @@ if ( ! function_exists( 'serialize_blocks' ) ) {
 }
 
 // ---------------------------------------------------------------------------
+// User-query stubs (for the list_users tool). WP_User_Query records the args it
+// was built with into $GLOBALS['_user_queries'] so tests can assert argument
+// building (clamping, role/search, wildcards), and returns configured results
+// so tests can assert output shape. The admin-count query (role=administrator,
+// fields=ID) reports $GLOBALS['_admin_total']; the main query reports
+// $GLOBALS['_users'] / $GLOBALS['_users_total'].
+// ---------------------------------------------------------------------------
+
+$GLOBALS['_users']        = array();
+$GLOBALS['_users_total']  = 0;
+$GLOBALS['_admin_total']  = 0;
+$GLOBALS['_user_queries'] = array();
+$GLOBALS['_post_counts']  = array();
+
+if ( ! class_exists( 'WP_User_Query' ) ) {
+	class WP_User_Query {
+		/** @var array */
+		public $query_vars;
+
+		public function __construct( $args = array() ) {
+			$this->query_vars           = is_array( $args ) ? $args : array();
+			$GLOBALS['_user_queries'][] = $this->query_vars;
+		}
+
+		public function get_results() {
+			// The admin-count query asks only for IDs — it never reads results.
+			return $GLOBALS['_users'];
+		}
+
+		public function get_total() {
+			$is_admin_count = ( isset( $this->query_vars['role'] ) && 'administrator' === $this->query_vars['role'] )
+				&& ( isset( $this->query_vars['fields'] ) && 'ID' === $this->query_vars['fields'] );
+			return $is_admin_count ? (int) $GLOBALS['_admin_total'] : (int) $GLOBALS['_users_total'];
+		}
+	}
+}
+
+if ( ! function_exists( 'count_user_posts' ) ) {
+	function count_user_posts( $user_id, $post_type = 'post', $public_only = false ) {
+		return isset( $GLOBALS['_post_counts'][ (int) $user_id ] ) ? (int) $GLOBALS['_post_counts'][ (int) $user_id ] : 0;
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Load the classes under test
 // ---------------------------------------------------------------------------
 
@@ -542,6 +586,11 @@ function sa_reset_state(): void {
 	$GLOBALS['_filters']      = array();
 	$GLOBALS['_db_rows']      = array();
 	$GLOBALS['_posts']        = array();
+	$GLOBALS['_users']        = array();
+	$GLOBALS['_users_total']  = 0;
+	$GLOBALS['_admin_total']  = 0;
+	$GLOBALS['_user_queries'] = array();
+	$GLOBALS['_post_counts']  = array();
 	$GLOBALS['_abilities']    = array();
 	$GLOBALS['_ability_categories'] = array();
 	$GLOBALS['_scheduled']    = array();
