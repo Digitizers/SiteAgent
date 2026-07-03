@@ -406,17 +406,83 @@ if ( ! class_exists( 'SA_Test_Wpdb' ) ) {
 	 */
 	class SA_Test_Wpdb {
 		public string $prefix     = 'wp_';
+		public string $options    = 'wp_options';
 		public string $last_error = '';
 		public string $last_query = '';
 
+		/**
+		 * get_results returns the next queued result-set (for tools that run
+		 * several SELECTs), falling back to the single $_db_rows for callers
+		 * that only run one query.
+		 */
 		public function get_results( $query, $output = OBJECT ) {
 			$this->last_query = (string) $query;
+			if ( ! empty( $GLOBALS['_db_results_queue'] ) ) {
+				return array_shift( $GLOBALS['_db_results_queue'] );
+			}
 			return $GLOBALS['_db_rows'];
+		}
+
+		/** get_var returns the next queued scalar, else $_db_var. */
+		public function get_var( $query = null, $x = 0, $y = 0 ) {
+			$this->last_query = (string) $query;
+			if ( ! empty( $GLOBALS['_db_var_queue'] ) ) {
+				return array_shift( $GLOBALS['_db_var_queue'] );
+			}
+			return $GLOBALS['_db_var'];
+		}
+
+		/** get_row returns the configured single row. */
+		public function get_row( $query = null, $output = OBJECT, $y = 0 ) {
+			$this->last_query = (string) $query;
+			return $GLOBALS['_db_row'];
+		}
+
+		/** Records the prepared (query, args) and returns the query verbatim. */
+		public function prepare( $query, ...$args ) {
+			// Some callers pass a single array of args.
+			if ( 1 === count( $args ) && is_array( $args[0] ) ) {
+				$args = $args[0];
+			}
+			$GLOBALS['_db_prepared'][] = array( 'query' => (string) $query, 'args' => $args );
+			return (string) $query;
+		}
+
+		public function esc_like( $text ) {
+			return addcslashes( (string) $text, '_%\\' );
+		}
+
+		public function query( $query ) {
+			$this->last_query = (string) $query;
+			return isset( $GLOBALS['_db_query_result'] ) ? $GLOBALS['_db_query_result'] : 0;
 		}
 	}
 
-	$GLOBALS['_db_rows'] = array();
-	$GLOBALS['wpdb']     = new SA_Test_Wpdb();
+	$GLOBALS['_db_rows']          = array();
+	$GLOBALS['_db_results_queue'] = array();
+	$GLOBALS['_db_var']           = 0;
+	$GLOBALS['_db_var_queue']     = array();
+	$GLOBALS['_db_row']           = null;
+	$GLOBALS['_db_prepared']      = array();
+	$GLOBALS['_db_query_result']  = 0;
+	$GLOBALS['wpdb']              = new SA_Test_Wpdb();
+}
+
+if ( ! defined( 'DB_NAME' ) ) {
+	define( 'DB_NAME', 'testdb' );
+}
+
+if ( ! function_exists( 'size_format' ) ) {
+	function size_format( $bytes, $decimals = 0 ) {
+		$bytes = (float) $bytes;
+		$units = array( 'B', 'KB', 'MB', 'GB', 'TB', 'PB' );
+		$i     = 0;
+		while ( $bytes >= 1024 && $i < count( $units ) - 1 ) {
+			$bytes /= 1024;
+			$i++;
+		}
+		return round( $bytes, $decimals ) . ' ' . $units[ $i ];
+	}
 }
 
 if ( ! class_exists( 'SA_Test_Filesystem' ) ) {
@@ -584,7 +650,13 @@ function sa_reset_state(): void {
 	$GLOBALS['_current_user'] = 0;
 	$GLOBALS['_did_actions']  = array();
 	$GLOBALS['_filters']      = array();
-	$GLOBALS['_db_rows']      = array();
+	$GLOBALS['_db_rows']          = array();
+	$GLOBALS['_db_results_queue'] = array();
+	$GLOBALS['_db_var']           = 0;
+	$GLOBALS['_db_var_queue']     = array();
+	$GLOBALS['_db_row']           = null;
+	$GLOBALS['_db_prepared']      = array();
+	$GLOBALS['_db_query_result']  = 0;
 	$GLOBALS['_posts']        = array();
 	$GLOBALS['_users']        = array();
 	$GLOBALS['_users_total']  = 0;
