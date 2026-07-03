@@ -95,6 +95,43 @@ if ( ! function_exists( 'sanitize_text_field' ) ) {
 	}
 }
 
+if ( ! function_exists( 'sanitize_textarea_field' ) ) {
+	function sanitize_textarea_field( $str ): string {
+		return trim( strip_tags( (string) $str ) );
+	}
+}
+
+// Post-meta store (for the SEO meta tools). Keyed [ postId ][ metaKey ] = value.
+$GLOBALS['_post_meta'] = array();
+
+if ( ! function_exists( 'get_post_meta' ) ) {
+	function get_post_meta( $post_id, $key = '', $single = false ) {
+		$val = $GLOBALS['_post_meta'][ (int) $post_id ][ $key ] ?? '';
+		return $single ? $val : ( '' === $val ? array() : array( $val ) );
+	}
+}
+
+if ( ! function_exists( 'update_post_meta' ) ) {
+	function update_post_meta( $post_id, $key, $value, $prev = '' ) {
+		$GLOBALS['_post_meta'][ (int) $post_id ][ $key ] = $value;
+		return true;
+	}
+}
+
+if ( ! function_exists( 'clean_post_cache' ) ) {
+	function clean_post_cache( $post ) {
+		$GLOBALS['_cleaned_post_cache'][] = (int) ( is_object( $post ) ? ( $post->ID ?? 0 ) : $post );
+	}
+}
+
+$GLOBALS['_did_delete_expired'] = false;
+
+if ( ! function_exists( 'delete_expired_transients' ) ) {
+	function delete_expired_transients( $force_db = false ) {
+		$GLOBALS['_did_delete_expired'] = true;
+	}
+}
+
 if ( ! function_exists( 'esc_url_raw' ) ) {
 	function esc_url_raw( $url ): string {
 		return trim( (string) $url );
@@ -244,6 +281,14 @@ if ( ! function_exists( 'get_users' ) ) {
 if ( ! function_exists( 'do_action' ) ) {
 	function do_action( string $tag, ...$args ): void {
 		$GLOBALS['_did_actions'][] = array( 'tag' => $tag, 'args' => $args );
+	}
+}
+
+if ( ! function_exists( 'has_action' ) ) {
+	// Mirrors add_action's store ($_filters) so a hook registered through the
+	// normal API is visible here, matching production.
+	function has_action( $tag, $callback = false ) {
+		return ! empty( $GLOBALS['_filters'][ $tag ] );
 	}
 }
 
@@ -406,17 +451,102 @@ if ( ! class_exists( 'SA_Test_Wpdb' ) ) {
 	 */
 	class SA_Test_Wpdb {
 		public string $prefix     = 'wp_';
+		public string $options    = 'wp_options';
 		public string $last_error = '';
 		public string $last_query = '';
 
+		/**
+		 * get_results returns the next queued result-set (for tools that run
+		 * several SELECTs), falling back to the single $_db_rows for callers
+		 * that only run one query.
+		 */
 		public function get_results( $query, $output = OBJECT ) {
 			$this->last_query = (string) $query;
+			if ( ! empty( $GLOBALS['_db_results_queue'] ) ) {
+				return array_shift( $GLOBALS['_db_results_queue'] );
+			}
 			return $GLOBALS['_db_rows'];
+		}
+
+		/** get_var returns the next queued scalar, else $_db_var. */
+		public function get_var( $query = null, $x = 0, $y = 0 ) {
+			$this->last_query = (string) $query;
+			if ( ! empty( $GLOBALS['_db_var_queue'] ) ) {
+				return array_shift( $GLOBALS['_db_var_queue'] );
+			}
+			return $GLOBALS['_db_var'];
+		}
+
+		/** get_row returns the configured single row. */
+		public function get_row( $query = null, $output = OBJECT, $y = 0 ) {
+			$this->last_query = (string) $query;
+			return $GLOBALS['_db_row'];
+		}
+
+		/** Records the prepared (query, args) and returns the query verbatim. */
+		public function prepare( $query, ...$args ) {
+			// Some callers pass a single array of args.
+			if ( 1 === count( $args ) && is_array( $args[0] ) ) {
+				$args = $args[0];
+			}
+			$GLOBALS['_db_prepared'][] = array( 'query' => (string) $query, 'args' => $args );
+			return (string) $query;
+		}
+
+		public function esc_like( $text ) {
+			return addcslashes( (string) $text, '_%\\' );
+		}
+
+		public function query( $query ) {
+			$this->last_query = (string) $query;
+			return isset( $GLOBALS['_db_query_result'] ) ? $GLOBALS['_db_query_result'] : 0;
 		}
 	}
 
-	$GLOBALS['_db_rows'] = array();
-	$GLOBALS['wpdb']     = new SA_Test_Wpdb();
+	$GLOBALS['_db_rows']          = array();
+	$GLOBALS['_db_results_queue'] = array();
+	$GLOBALS['_db_var']           = 0;
+	$GLOBALS['_db_var_queue']     = array();
+	$GLOBALS['_db_row']           = null;
+	$GLOBALS['_db_prepared']      = array();
+	$GLOBALS['_db_query_result']  = 0;
+	$GLOBALS['wpdb']              = new SA_Test_Wpdb();
+}
+
+if ( ! defined( 'DB_NAME' ) ) {
+	define( 'DB_NAME', 'testdb' );
+}
+
+if ( ! defined( 'WP_MEMORY_LIMIT' ) ) {
+	define( 'WP_MEMORY_LIMIT', '256M' );
+}
+
+if ( ! function_exists( 'wp_convert_hr_to_bytes' ) ) {
+	function wp_convert_hr_to_bytes( $value ) {
+		$value = strtolower( trim( (string) $value ) );
+		$bytes = (int) $value;
+		if ( false !== strpos( $value, 'g' ) ) {
+			$bytes *= 1024 * 1024 * 1024;
+		} elseif ( false !== strpos( $value, 'm' ) ) {
+			$bytes *= 1024 * 1024;
+		} elseif ( false !== strpos( $value, 'k' ) ) {
+			$bytes *= 1024;
+		}
+		return $bytes;
+	}
+}
+
+if ( ! function_exists( 'size_format' ) ) {
+	function size_format( $bytes, $decimals = 0 ) {
+		$bytes = (float) $bytes;
+		$units = array( 'B', 'KB', 'MB', 'GB', 'TB', 'PB' );
+		$i     = 0;
+		while ( $bytes >= 1024 && $i < count( $units ) - 1 ) {
+			$bytes /= 1024;
+			$i++;
+		}
+		return round( $bytes, $decimals ) . ' ' . $units[ $i ];
+	}
 }
 
 if ( ! class_exists( 'SA_Test_Filesystem' ) ) {
@@ -509,6 +639,123 @@ if ( ! function_exists( 'serialize_blocks' ) ) {
 }
 
 // ---------------------------------------------------------------------------
+// User-query stubs (for the list_users tool). WP_User_Query records the args it
+// was built with into $GLOBALS['_user_queries'] so tests can assert argument
+// building (clamping, role/search, wildcards), and returns configured results
+// so tests can assert output shape. The admin-count query (role=administrator,
+// fields=ID) reports $GLOBALS['_admin_total']; the main query reports
+// $GLOBALS['_users'] / $GLOBALS['_users_total'].
+// ---------------------------------------------------------------------------
+
+$GLOBALS['_users']        = array();
+$GLOBALS['_users_total']  = 0;
+$GLOBALS['_admin_total']  = 0;
+$GLOBALS['_user_queries'] = array();
+$GLOBALS['_post_counts']  = array();
+
+if ( ! class_exists( 'WP_User_Query' ) ) {
+	class WP_User_Query {
+		/** @var array */
+		public $query_vars;
+
+		public function __construct( $args = array() ) {
+			$this->query_vars           = is_array( $args ) ? $args : array();
+			$GLOBALS['_user_queries'][] = $this->query_vars;
+		}
+
+		public function get_results() {
+			// The admin-count query asks only for IDs — it never reads results.
+			return $GLOBALS['_users'];
+		}
+
+		public function get_total() {
+			$is_admin_count = ( isset( $this->query_vars['role'] ) && 'administrator' === $this->query_vars['role'] )
+				&& ( isset( $this->query_vars['fields'] ) && 'ID' === $this->query_vars['fields'] );
+			return $is_admin_count ? (int) $GLOBALS['_admin_total'] : (int) $GLOBALS['_users_total'];
+		}
+	}
+}
+
+if ( ! function_exists( 'count_user_posts' ) ) {
+	function count_user_posts( $user_id, $post_type = 'post', $public_only = false ) {
+		return isset( $GLOBALS['_post_counts'][ (int) $user_id ] ) ? (int) $GLOBALS['_post_counts'][ (int) $user_id ] : 0;
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Post-query / URL stubs (broken-links, cleanup-assets, site-context). WP_Query
+// records the args it was built with and returns $_wp_query_posts as ->posts;
+// get_post_field reads $_post_content; url_to_postid maps a URL to a post id (0
+// = unresolved); home_url returns the configured site URL.
+// ---------------------------------------------------------------------------
+
+$GLOBALS['_home_url']        = 'https://example.com';
+$GLOBALS['_wp_query_posts']  = array();
+$GLOBALS['_wp_queries']      = array();
+$GLOBALS['_post_content']    = array();
+$GLOBALS['_url_to_postid']   = array();
+
+if ( ! function_exists( 'home_url' ) ) {
+	function home_url( $path = '', $scheme = null ) {
+		return $GLOBALS['_home_url'] . $path;
+	}
+}
+
+if ( ! class_exists( 'WP_Query' ) ) {
+	class WP_Query {
+		/** @var array */
+		public $posts;
+		/** @var array */
+		public $query_vars;
+
+		public function __construct( $args = array() ) {
+			$this->query_vars       = is_array( $args ) ? $args : array();
+			$GLOBALS['_wp_queries'][] = $this->query_vars;
+			$this->posts            = $GLOBALS['_wp_query_posts'];
+		}
+	}
+}
+
+if ( ! function_exists( 'get_post_field' ) ) {
+	function get_post_field( $field, $post = null, $context = 'display' ) {
+		$id = (int) ( is_object( $post ) ? ( $post->ID ?? 0 ) : $post );
+		if ( 'post_content' === $field ) {
+			return $GLOBALS['_post_content'][ $id ] ?? '';
+		}
+		$obj = $GLOBALS['_posts'][ $id ] ?? null;
+		return ( $obj && isset( $obj->$field ) ) ? $obj->$field : '';
+	}
+}
+
+if ( ! function_exists( 'url_to_postid' ) ) {
+	function url_to_postid( $url ) {
+		return isset( $GLOBALS['_url_to_postid'][ $url ] ) ? (int) $GLOBALS['_url_to_postid'][ $url ] : 0;
+	}
+}
+
+$GLOBALS['_bloginfo']   = array();
+$GLOBALS['_thumbnails'] = array();
+
+if ( ! function_exists( 'get_bloginfo' ) ) {
+	function get_bloginfo( $show = '', $filter = 'raw' ) {
+		return $GLOBALS['_bloginfo'][ $show ] ?? '';
+	}
+}
+
+if ( ! function_exists( 'wp_strip_all_tags' ) ) {
+	function wp_strip_all_tags( $string, $remove_breaks = false ) {
+		return trim( strip_tags( (string) $string ) );
+	}
+}
+
+if ( ! function_exists( 'has_post_thumbnail' ) ) {
+	function has_post_thumbnail( $post = null ) {
+		$id = (int) ( is_object( $post ) ? ( $post->ID ?? 0 ) : $post );
+		return ! empty( $GLOBALS['_thumbnails'][ $id ] );
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Load the classes under test
 // ---------------------------------------------------------------------------
 
@@ -540,8 +787,29 @@ function sa_reset_state(): void {
 	$GLOBALS['_current_user'] = 0;
 	$GLOBALS['_did_actions']  = array();
 	$GLOBALS['_filters']      = array();
-	$GLOBALS['_db_rows']      = array();
+	$GLOBALS['_db_rows']          = array();
+	$GLOBALS['_db_results_queue'] = array();
+	$GLOBALS['_db_var']           = 0;
+	$GLOBALS['_db_var_queue']     = array();
+	$GLOBALS['_db_row']           = null;
+	$GLOBALS['_db_prepared']      = array();
+	$GLOBALS['_db_query_result']  = 0;
 	$GLOBALS['_posts']        = array();
+	$GLOBALS['_post_meta']    = array();
+	$GLOBALS['_cleaned_post_cache'] = array();
+	$GLOBALS['_did_delete_expired'] = false;
+	$GLOBALS['_users']        = array();
+	$GLOBALS['_users_total']  = 0;
+	$GLOBALS['_admin_total']  = 0;
+	$GLOBALS['_user_queries'] = array();
+	$GLOBALS['_post_counts']  = array();
+	$GLOBALS['_home_url']       = 'https://example.com';
+	$GLOBALS['_wp_query_posts'] = array();
+	$GLOBALS['_wp_queries']     = array();
+	$GLOBALS['_post_content']   = array();
+	$GLOBALS['_url_to_postid']  = array();
+	$GLOBALS['_bloginfo']       = array();
+	$GLOBALS['_thumbnails']     = array();
 	$GLOBALS['_abilities']    = array();
 	$GLOBALS['_ability_categories'] = array();
 	$GLOBALS['_scheduled']    = array();
