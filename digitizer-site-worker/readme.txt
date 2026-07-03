@@ -4,7 +4,7 @@ Tags: wordpress management, remote updates, site monitoring, maintenance, dashbo
 Requires at least: 6.2
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 2.6.0
+Stable tag: 2.6.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -189,6 +189,19 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 3. Remote plugin update in progress from the Aura dashboard — select a plugin and update it with a single click.
 
 == Changelog ==
+
+= 2.6.1 =
+* Tool self-declaration hardening: six mutating tools (update_plugin_safely,
+  cleanup_orphaned_assets, backup_plugins, cleanup_transients, clear_caches,
+  set_seo_meta) now explicitly declare themselves non-read-only and
+  approval-required instead of inheriting neutral defaults, so any consumer that
+  trusts a tool's own annotations gates them correctly. Grant enforcement and
+  the Aura gateway's verb-based policy already treated them as writes, so live
+  behaviour is unchanged.
+* cleanup_orphaned_assets now advertises a preview: its dry-run (find orphans,
+  delete nothing) is exposed through the preview API, so the orphaned-media
+  sample and count can be inspected without approval before the destructive
+  delete — which still requires approval.
 
 = 2.6.0 =
 * Signed approval grants (G-grants): every mutating (non read-only) MCP tool
