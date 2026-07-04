@@ -550,8 +550,16 @@ class Aura_Worker_API {
 		$host = strtolower( (string) wp_parse_url( $url, PHP_URL_HOST ) );
 		$path = (string) wp_parse_url( $url, PHP_URL_PATH );
 
+		// Only ever install a .zip — never an archive tarball or arbitrary asset.
+		if ( '.zip' !== strtolower( substr( $path, -4 ) ) ) {
+			return false;
+		}
+
+		// Default: the official repo's RELEASE-DOWNLOAD path only — not
+		// /archive/… branch/tag tarballs, which would let a grant approve
+		// arbitrary repo contents rather than a published release.
 		$allowed = array(
-			'github.com' => '/Digitizers/SiteAgent/',
+			'github.com' => '/Digitizers/SiteAgent/releases/download/',
 		);
 		$allowed = apply_filters( 'aura_worker_self_update_allowed_hosts', $allowed );
 

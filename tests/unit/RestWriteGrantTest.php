@@ -173,9 +173,14 @@ final class RestWriteGrantTest extends TestCase {
 	public static function self_update_urls(): array {
 		return array(
 			'official release'     => array( 'https://github.com/Digitizers/SiteAgent/releases/download/v2.7.0/digitizer-site-worker.zip', true ),
+			// Non-release repo artifacts must be rejected even for the right repo.
+			'branch archive zip'   => array( 'https://github.com/Digitizers/SiteAgent/archive/refs/heads/main.zip', false ),
+			'tag archive zip'      => array( 'https://github.com/Digitizers/SiteAgent/archive/refs/tags/v2.7.0.zip', false ),
+			// Only .zip installs; never a tarball.
+			'release tarball'      => array( 'https://github.com/Digitizers/SiteAgent/releases/download/v2.7.0/x.tar.gz', false ),
 			// CDN hosts are never a zip_url input (WP follows GitHub's redirect
 			// internally), so they are intentionally NOT allowlisted.
-			'github asset cdn'     => array( 'https://objects.githubusercontent.com/github-production-release-asset/abc', false ),
+			'github asset cdn'     => array( 'https://objects.githubusercontent.com/github-production-release-asset/abc.zip', false ),
 			'codeload'             => array( 'https://codeload.github.com/Digitizers/SiteAgent/zip/refs/tags/v2.7.0', false ),
 			'wrong repo on github' => array( 'https://github.com/attacker/evil/releases/download/v1/evil.zip', false ),
 			'foreign host'         => array( 'https://evil.example.com/digitizer-site-worker.zip', false ),
