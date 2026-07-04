@@ -4,7 +4,7 @@ Tags: wordpress management, remote updates, site monitoring, maintenance, dashbo
 Requires at least: 6.2
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 2.7.0
+Stable tag: 2.7.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -200,6 +200,13 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 3. Remote plugin update in progress from the Aura dashboard — select a plugin and update it with a single click.
 
 == Changelog ==
+
+= 2.7.1 =
+* Self-update integrity: when the Aura gateway supplies the release's SHA-256,
+  SiteAgent now downloads the zip, verifies its bytes against that digest, and
+  refuses to install on a mismatch — so an approved self-update is bound to the
+  exact package, not just the URL. Sites without a supplied digest behave as
+  before.
 
 = 2.7.0 =
 * Approval gate now covers the direct REST write endpoints, not just MCP tools.
