@@ -17,7 +17,7 @@
   </a>
   <img src="https://img.shields.io/badge/WordPress-6.2%E2%80%937.0-21759b?logo=wordpress" alt="WordPress" />
   <img src="https://img.shields.io/badge/PHP-7.4%2B-777bb4?logo=php" alt="PHP" />
-  <img src="https://img.shields.io/badge/Stable-2.7.0-green" alt="Stable" />
+  <img src="https://img.shields.io/badge/Stable-2.7.1-green" alt="Stable" />
 </p>
 
 ---
@@ -145,6 +145,10 @@ These plug straight into **Aura's Fleet MCP Gateway**: read tools run on demand,
 ---
 
 ## Changelog
+
+### 2.7.1
+
+- **Self-update zip integrity (H3 Part C).** When the Aura gateway binds a release SHA-256 into the self-update grant, SiteAgent downloads the zip, verifies its bytes with `hash_file('sha256', …)` against the grant-bound digest, and refuses to install on a mismatch — closing the "grant covers the URL, not the bytes" gap (e.g. a tampered CDN edge). The digest is part of the signed grant, so it can't be swapped. Sites/releases without a digest install as before (back-compat); the gateway binds the digest only for sites already on 2.7.1+, so the rollout that ships 2.7.1 itself is unaffected.
 
 ### 2.7.0
 

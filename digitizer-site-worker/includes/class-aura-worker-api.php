@@ -507,15 +507,23 @@ class Aura_Worker_API {
 	 */
 	public function self_update( $request ) {
 		$zip_url = $request->get_param( 'zip_url' );
+		$sha256  = (string) $request->get_param( 'sha256' );
 
-		$guard = Aura_Worker_Grant::require_for( $request, 'wp.self_update', array( 'zip_url' => $zip_url ) );
+		// Bind sha256 into the grant when the gateway supplied it, so the Ed25519
+		// signature covers the expected bytes too — the grant then can't be spent
+		// against a different digest. Absent → { zip_url } only (back-compat with
+		// gateways/releases that provide no digest).
+		$grant_params = ( '' !== $sha256 )
+			? array( 'zip_url' => $zip_url, 'sha256' => $sha256 )
+			: array( 'zip_url' => $zip_url );
+		$guard = Aura_Worker_Grant::require_for( $request, 'wp.self_update', $grant_params );
 		if ( is_wp_error( $guard ) ) {
 			return $guard;
 		}
 
-		// Source allowlist: only install self-update zips from the official repo
-		// (or GitHub's asset CDNs). Bounds a signed grant to a trusted source, so
-		// even an approved self-update can't be pointed at attacker-hosted code.
+		// Source allowlist: only install self-update zips from the official repo.
+		// Bounds a signed grant to a trusted source, so even an approved
+		// self-update can't be pointed at attacker-hosted code.
 		if ( ! $this->is_allowed_self_update_url( $zip_url ) ) {
 			return new WP_REST_Response( array(
 				'success' => false,
@@ -523,7 +531,7 @@ class Aura_Worker_API {
 			), 400 );
 		}
 
-		$result = $this->updater->self_update( $zip_url );
+		$result = $this->updater->self_update( $zip_url, $sha256 );
 		$status = $result['success'] ? 200 : 500;
 		return new WP_REST_Response( $result, $status );
 	}
@@ -767,7 +775,7 @@ class Aura_Worker_API {
 	 * Capture a file or option before a power write, so it can be reversed.
 	 *
 	 * @param WP_REST_Request $request The request object.
-	 * @return WP_REST_Response
+	 * @return WP_REST_Response|WP_Error Result, or WP_Error(403) if a grant is required.
 	 */
 	public function create_snapshot( $request ) {
 		$kind   = $request->get_param( 'kind' );
@@ -812,7 +820,7 @@ class Aura_Worker_API {
 	 * Restore state captured by a prior snapshot (undo a power write).
 	 *
 	 * @param WP_REST_Request $request The request object.
-	 * @return WP_REST_Response
+	 * @return WP_REST_Response|WP_Error Result, or WP_Error(403) if a grant is required.
 	 */
 	public function restore_snapshot( $request ) {
 		$id = $request->get_param( 'id' );

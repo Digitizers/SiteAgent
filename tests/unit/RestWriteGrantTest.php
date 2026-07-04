@@ -127,6 +127,19 @@ final class RestWriteGrantTest extends TestCase {
 		);
 	}
 
+	public function test_self_update_binds_sha256(): void {
+		// A self-update grant for one digest must not be spendable against another
+		// package — the sha256 is part of the signed params.
+		$grant = $this->mint( 'wp.self_update', array( 'zip_url' => 'https://x/a.zip', 'sha256' => str_repeat( 'a', 64 ) ) );
+		$this->assertDenied(
+			Aura_Worker_Grant::require_for( $this->req( $grant ), 'wp.self_update', array( 'zip_url' => 'https://x/a.zip', 'sha256' => str_repeat( 'b', 64 ) ) )
+		);
+		$grant2 = $this->mint( 'wp.self_update', array( 'zip_url' => 'https://x/a.zip', 'sha256' => str_repeat( 'a', 64 ) ) );
+		$this->assertTrue(
+			Aura_Worker_Grant::require_for( $this->req( $grant2 ), 'wp.self_update', array( 'zip_url' => 'https://x/a.zip', 'sha256' => str_repeat( 'a', 64 ) ) )
+		);
+	}
+
 	public function test_single_use_grant_cannot_be_replayed(): void {
 		$grant = $this->mint( 'wp.rollback', array( 'plugin' => 'akismet' ) );
 		$this->assertTrue(

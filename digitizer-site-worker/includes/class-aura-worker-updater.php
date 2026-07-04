@@ -156,10 +156,12 @@ class Aura_Worker_Updater {
 	 *
 	 * Downloads the zip, overwrites the current plugin files, and reactivates.
 	 *
-	 * @param string $zip_url URL to the plugin zip file.
+	 * @param string $zip_url         URL to the plugin zip file.
+	 * @param string $expected_sha256 Optional hex SHA-256 the downloaded zip must
+	 *                                match before install (gateway-bound digest).
 	 * @return array Result with success status, message, and version info.
 	 */
-	public function self_update( $zip_url ) {
+	public function self_update( $zip_url, $expected_sha256 = '' ) {
 		$this->load_upgrade_dependencies();
 
 		$old_version = AURA_WORKER_VERSION;
@@ -168,8 +170,42 @@ class Aura_Worker_Updater {
 		$skin     = new Automatic_Upgrader_Skin();
 		$upgrader = new Plugin_Upgrader( $skin );
 
-		// Override the upgrader to install from URL, overwriting existing.
-		$result = $upgrader->install( $zip_url, array( 'overwrite_package' => true ) );
+		// Integrity: when the gateway bound an expected sha256, download the zip
+		// first, verify its bytes, then install from the LOCAL file. The grant
+		// covers the URL; this covers the bytes — a tampered download (e.g. a
+		// compromised CDN edge) is refused before install. No digest → install
+		// straight from the URL (back-compat).
+		$install_source  = $zip_url;
+		$tmp             = '';
+		$expected_sha256 = strtolower( trim( (string) $expected_sha256 ) );
+		if ( '' !== $expected_sha256 ) {
+			if ( ! function_exists( 'download_url' ) ) {
+				require_once ABSPATH . 'wp-admin/includes/file.php';
+			}
+			$tmp = download_url( $zip_url );
+			if ( is_wp_error( $tmp ) ) {
+				return array(
+					'success' => false,
+					'error'   => $tmp->get_error_message(),
+				);
+			}
+			$verified = $this->verify_zip_integrity( $tmp, $expected_sha256 );
+			if ( is_wp_error( $verified ) ) {
+				@unlink( $tmp ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+				return array(
+					'success' => false,
+					'error'   => $verified->get_error_message(),
+				);
+			}
+			$install_source = $tmp;
+		}
+
+		// Install from the verified local file (or the URL when no digest given).
+		$result = $upgrader->install( $install_source, array( 'overwrite_package' => true ) );
+
+		if ( '' !== $tmp && file_exists( $tmp ) ) {
+			@unlink( $tmp ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+		}
 
 		if ( is_wp_error( $result ) ) {
 			return array(
@@ -214,6 +250,31 @@ class Aura_Worker_Updater {
 			'old_version'  => $old_version,
 			'new_version'  => $new_version,
 		);
+	}
+
+	/**
+	 * Verify a downloaded zip's bytes against the gateway-bound SHA-256.
+	 *
+	 * @param string $file            Path to the downloaded zip.
+	 * @param string $expected_sha256 Expected lower-case hex SHA-256.
+	 * @return true|WP_Error True when the file matches; WP_Error otherwise.
+	 */
+	private function verify_zip_integrity( $file, $expected_sha256 ) {
+		$expected = strtolower( trim( (string) $expected_sha256 ) );
+		if ( ! preg_match( '/^[0-9a-f]{64}$/', $expected ) ) {
+			return new WP_Error(
+				'aura_self_update_bad_digest',
+				__( 'Self-update integrity check failed: malformed expected digest.', 'digitizer-site-worker' )
+			);
+		}
+		$actual = hash_file( 'sha256', $file );
+		if ( ! is_string( $actual ) || ! hash_equals( $expected, strtolower( $actual ) ) ) {
+			return new WP_Error(
+				'aura_self_update_integrity',
+				__( 'Self-update integrity check failed: downloaded package does not match the expected SHA-256.', 'digitizer-site-worker' )
+			);
+		}
+		return true;
 	}
 
 	/**
