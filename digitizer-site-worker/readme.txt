@@ -145,6 +145,12 @@ Yes, you need an Aura account to connect your WordPress sites. Aura offers a fre
 
 Yes. The plugin uses defence-in-depth: WordPress Application Passwords (the same standard mechanism used by the block editor), a per-site token stored only as a SHA-256 hash and verified timing-safely, per-IP brute-force throttling, an HMAC-signed onboarding handshake, and an optional IP/domain allowlist. No data is transmitted unless a request is made by your Aura instance.
 
+= How do I enable the approval gate for write actions? =
+
+SiteAgent can require a per-action, cryptographically signed approval before it runs any state-changing tool (updates, cleanups, cache flushes, SEO writes). Once enabled, a leaked Site Token alone can only ever read — never write — because each write must carry a single-use signature that only the Aura dashboard can mint, after a human approves the action.
+
+This gate turns on automatically once the site holds Aura's approval key, which is provisioned securely during connection. **If you installed or updated the plugin but have not reconnected the site since, the gate is dormant** and the site runs in the standard token-only mode. To activate it, simply **reconnect the site from your Aura dashboard** — no reinstall is needed. Reads are unaffected either way.
+
 = Does it slow down my site? =
 
 No. The plugin registers only REST API endpoints. It does not load any code, scripts, or database queries on frontend page loads. Your visitors experience zero impact.
