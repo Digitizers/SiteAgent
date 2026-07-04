@@ -182,8 +182,11 @@ class Aura_Worker_API {
 					'type'              => 'string',
 					'sanitize_callback' => 'esc_url_raw',
 					'validate_callback' => function( $value ) {
-						return filter_var( $value, FILTER_VALIDATE_URL )
-							&& preg_match( '#^https://github\.com/Digitizers/SiteAgent/releases/download/.+\.zip$#', $value );
+						// Single source of truth: defer to the same allowlist the
+							// handler enforces, so the aura_worker_self_update_allowed_hosts
+							// filter can actually extend the permitted sources instead of
+							// being shadowed by a hard-coded pattern here.
+							return is_string( $value ) && $this->is_allowed_self_update_url( $value );
 					},
 					'description'       => __( 'GitHub release zip URL for SiteAgent.', 'digitizer-site-worker' ),
 				),
