@@ -52,6 +52,17 @@ jobs:
 
           RM=()
           for t in $TAGS; do
+            # Only bare tag names — no path separators, no traversal, no funny
+            # chars — so a crafted input like "2.7.1/readme.txt" can't slip past
+            # the protected-name check and target a FILE inside a protected tag
+            # (a URL `svn rm` commits immediately and would corrupt that tag).
+            case "$t" in
+              */*|*..*|"")
+                echo "::error::invalid tag name '$t' (must be a single tag component)"; exit 1;;
+            esac
+            if ! printf '%s' "$t" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$'; then
+              echo "::error::invalid tag name '$t'"; exit 1
+            fi
             case "$t" in
               trunk|assets|"$STABLE")
                 echo "::error::refusing to remove protected ref '$t'"; exit 1;;
