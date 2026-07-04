@@ -204,7 +204,8 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 = 2.7.0 =
 * Approval gate now covers the direct REST write endpoints, not just MCP tools.
   When a site has provisioned Aura's approval key, plugin/theme/core/translation
-  updates, batch updates, database migrations, rollbacks, and self-update each
+  updates, batch updates, database migrations, rollbacks, self-update, and
+  snapshot create/restore each
   require a fresh single-use signed grant bound to the exact action and
   parameters — so a leaked Site Token can no longer trigger a code update on its
   own. Sites without the key keep working as before (token-only) until they

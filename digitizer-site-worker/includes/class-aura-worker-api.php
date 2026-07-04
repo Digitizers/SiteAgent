@@ -624,23 +624,6 @@ class Aura_Worker_API {
 		$chunk_size    = $request->get_param( 'chunk_size' ) ?? 5;
 		$create_backup = $request->get_param( 'create_backup' ) ?? true;
 
-		// Bind the WHOLE effective payload — including the safety options — so an
-		// approved batch can't be replayed with create_backup flipped off. Bound
-		// to the received list (pre-sanitize) to match what the gateway signed;
-		// sanitize below only ever narrows it to a subset of approved plugins.
-		$guard = Aura_Worker_Grant::require_for(
-			$request,
-			'wp.update.batch',
-			array(
-				'plugins'       => is_array( $plugins ) ? array_values( $plugins ) : $plugins,
-				'chunk_size'    => (int) $chunk_size,
-				'create_backup' => (bool) $create_backup,
-			)
-		);
-		if ( is_wp_error( $guard ) ) {
-			return $guard;
-		}
-
 		if ( empty( $plugins ) || ! is_array( $plugins ) ) {
 			return new WP_REST_Response( array(
 				'success' => false,
@@ -648,10 +631,14 @@ class Aura_Worker_API {
 			), 400 );
 		}
 
-		// Sanitize plugin file paths.
-		$plugins = array_filter( array_map( 'sanitize_text_field', $plugins ), function( $p ) {
+		// Sanitize + validate the plugin file paths FIRST, then bind the grant over
+		// the EXACT list that will be executed. Binding post-sanitize matters: a
+		// value that normalizes into a different valid path must not be able to
+		// slip past the exact-parameter grant. The gateway sends already-valid
+		// paths, so sanitize is a no-op there and the bound hash still matches.
+		$plugins = array_values( array_filter( array_map( 'sanitize_text_field', $plugins ), function( $p ) {
 			return preg_match( '/^[a-zA-Z0-9_\-]+\/[a-zA-Z0-9_\-]+\.php$/', $p );
-		} );
+		} ) );
 
 		if ( empty( $plugins ) ) {
 			return new WP_REST_Response( array(
@@ -660,7 +647,22 @@ class Aura_Worker_API {
 			), 400 );
 		}
 
-		$result = $this->updater->batch_update_plugins( array_values( $plugins ), (int) $chunk_size, (bool) $create_backup );
+		// Bind the whole effective payload — including the safety options — so an
+		// approved batch can't be replayed with create_backup flipped off.
+		$guard = Aura_Worker_Grant::require_for(
+			$request,
+			'wp.update.batch',
+			array(
+				'plugins'       => $plugins,
+				'chunk_size'    => (int) $chunk_size,
+				'create_backup' => (bool) $create_backup,
+			)
+		);
+		if ( is_wp_error( $guard ) ) {
+			return $guard;
+		}
+
+		$result = $this->updater->batch_update_plugins( $plugins, (int) $chunk_size, (bool) $create_backup );
 		return new WP_REST_Response( array_merge( array( 'success' => true ), $result ), 200 );
 	}
 
@@ -771,6 +773,15 @@ class Aura_Worker_API {
 		$kind   = $request->get_param( 'kind' );
 		$target = $request->get_param( 'target' );
 
+		$guard = Aura_Worker_Grant::require_for(
+			$request,
+			'wp.snapshot.create',
+			array( 'kind' => $kind, 'target' => $target )
+		);
+		if ( is_wp_error( $guard ) ) {
+			return $guard;
+		}
+
 		$snapshots = new Aura_Worker_Snapshots();
 
 		if ( 'file' === $kind ) {
@@ -805,6 +816,11 @@ class Aura_Worker_API {
 	 */
 	public function restore_snapshot( $request ) {
 		$id = $request->get_param( 'id' );
+
+		$guard = Aura_Worker_Grant::require_for( $request, 'wp.snapshot.restore', array( 'id' => $id ) );
+		if ( is_wp_error( $guard ) ) {
+			return $guard;
+		}
 
 		$snapshots = new Aura_Worker_Snapshots();
 		$result    = $snapshots->restore( $id );

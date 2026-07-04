@@ -150,6 +150,21 @@ final class RestWriteGrantTest extends TestCase {
 		);
 	}
 
+	public function test_snapshot_actions_need_a_grant(): void {
+		// Snapshot create/restore are destructive writes reachable by a stolen
+		// token via a direct POST, so they are gated plugin-side too.
+		$this->assertDenied(
+			Aura_Worker_Grant::require_for( $this->req(), 'wp.snapshot.restore', array( 'id' => 'snap-1' ) )
+		);
+		$grant = $this->mint( 'wp.snapshot.restore', array( 'id' => 'snap-1' ) );
+		$this->assertTrue(
+			Aura_Worker_Grant::require_for( $this->req( $grant ), 'wp.snapshot.restore', array( 'id' => 'snap-1' ) )
+		);
+		$this->assertDenied(
+			Aura_Worker_Grant::require_for( $this->req(), 'wp.snapshot.create', array( 'kind' => 'file', 'target' => 'wp-content/x' ) )
+		);
+	}
+
 	public function test_no_pubkey_is_a_bypass(): void {
 		// Back-compat: a site with no provisioned key runs token-only (no grant).
 		unset( $GLOBALS['_options']['aura_worker_grant_pubkey'] );
