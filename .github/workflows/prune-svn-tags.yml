@@ -1,0 +1,97 @@
+name: Prune wp.org SVN tags
+
+# Manual-only. Removes old / pre-release tags from the plugin's wp.org SVN so
+# they stop cluttering the "Previous Versions" dropdown and can't be installed
+# fresh. Uses the same SVN_USERNAME/SVN_PASSWORD secrets as the deploy workflow,
+# so no local SVN setup is needed — Actions → "Prune wp.org SVN tags" → Run.
+on:
+  workflow_dispatch:
+    inputs:
+      tags:
+        description: "Space-separated tags to remove (e.g. '2.0.0-beta.1 2.0.0-beta.2 1.3.5')"
+        required: true
+        default: "2.0.0-beta.1 2.0.0-beta.2 1.3.3 1.3.4 1.3.5"
+      dry_run:
+        description: "Dry run — list what WOULD be removed, commit nothing"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  prune:
+    name: svn rm tags
+    runs-on: ubuntu-latest
+    steps:
+      # Subversion was removed from the ubuntu-latest (24.04) runner image, so
+      # install it explicitly — otherwise `svn` is missing and the probe below
+      # would silently treat every tag as absent.
+      - name: Install Subversion
+        run: sudo apt-get update && sudo apt-get install -y subversion
+
+      - name: Remove tags from wp.org SVN
+        env:
+          SVN_USERNAME: ${{ secrets.SVN_USERNAME }}
+          SVN_PASSWORD: ${{ secrets.SVN_PASSWORD }}
+          SLUG: digitizer-site-worker
+          # Passed via env (never interpolated into the script) to avoid shell injection.
+          TAGS: ${{ github.event.inputs.tags }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          # Fail loudly if svn is missing, so a probe never silently reads as
+          # "tag absent" and the job never no-ops without pruning.
+          command -v svn >/dev/null 2>&1 || { echo "::error::svn not found on runner"; exit 1; }
+          SVN_URL="https://plugins.svn.wordpress.org/${SLUG}"
+
+          # Never remove trunk, the assets dir, or whatever readme currently ships
+          # as the Stable tag — those are load-bearing. Fail CLOSED: if we can't
+          # read a valid Stable tag, abort rather than run with an empty guard
+          # (an empty $STABLE would let an operator delete the live stable).
+          STABLE="$(svn cat "${SVN_URL}/trunk/readme.txt" | grep -i '^Stable tag:' | awk '{print $3}' | tr -d '\r')"
+          if ! printf '%s' "$STABLE" | grep -Eq '^[0-9]+\.[0-9]+(\.[0-9]+)?([.-][0-9A-Za-z.]+)?$'; then
+            echo "::error::could not read a valid Stable tag from trunk/readme.txt (got '${STABLE}'); aborting"
+            exit 1
+          fi
+          echo "Current Stable tag: ${STABLE}"
+
+          RM=()
+          for t in $TAGS; do
+            # Only bare tag names — no path separators, no traversal, no funny
+            # chars — so a crafted input like "2.7.1/readme.txt" can't slip past
+            # the protected-name check and target a FILE inside a protected tag
+            # (a URL `svn rm` commits immediately and would corrupt that tag).
+            case "$t" in
+              */*|*..*|"")
+                echo "::error::invalid tag name '$t' (must be a single tag component)"; exit 1;;
+            esac
+            if ! printf '%s' "$t" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$'; then
+              echo "::error::invalid tag name '$t'"; exit 1
+            fi
+            case "$t" in
+              trunk|assets|"$STABLE")
+                echo "::error::refusing to remove protected ref '$t'"; exit 1;;
+            esac
+            if svn info "${SVN_URL}/tags/${t}" >/dev/null 2>&1; then
+              RM+=("${SVN_URL}/tags/${t}")
+              echo "will remove: tags/${t}"
+            else
+              echo "skip (absent): tags/${t}"
+            fi
+          done
+
+          if [ "${#RM[@]}" -eq 0 ]; then
+            echo "Nothing to remove."; exit 0
+          fi
+
+          if [ "${DRY_RUN}" = "true" ]; then
+            echo "DRY RUN — would remove ${#RM[@]} tag(s); committing nothing."
+            exit 0
+          fi
+
+          svn rm --username "$SVN_USERNAME" --password "$SVN_PASSWORD" \
+            --non-interactive --no-auth-cache --trust-server-cert \
+            -m "Prune old / pre-release tags from the wp.org dropdown" \
+            "${RM[@]}"
+          echo "Removed ${#RM[@]} tag(s)."
