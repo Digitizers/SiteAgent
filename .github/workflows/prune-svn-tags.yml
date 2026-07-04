@@ -46,9 +46,15 @@ jobs:
           SVN_URL="https://plugins.svn.wordpress.org/${SLUG}"
 
           # Never remove trunk, the assets dir, or whatever readme currently ships
-          # as the Stable tag — those are load-bearing.
-          STABLE="$(svn cat "${SVN_URL}/trunk/readme.txt" 2>/dev/null | grep -i '^Stable tag:' | awk '{print $3}' | tr -d '\r' || true)"
-          echo "Current Stable tag: ${STABLE:-<unknown>}"
+          # as the Stable tag — those are load-bearing. Fail CLOSED: if we can't
+          # read a valid Stable tag, abort rather than run with an empty guard
+          # (an empty $STABLE would let an operator delete the live stable).
+          STABLE="$(svn cat "${SVN_URL}/trunk/readme.txt" | grep -i '^Stable tag:' | awk '{print $3}' | tr -d '\r')"
+          if ! printf '%s' "$STABLE" | grep -Eq '^[0-9]+\.[0-9]+(\.[0-9]+)?([.-][0-9A-Za-z.]+)?$'; then
+            echo "::error::could not read a valid Stable tag from trunk/readme.txt (got '${STABLE}'); aborting"
+            exit 1
+          fi
+          echo "Current Stable tag: ${STABLE}"
 
           RM=()
           for t in $TAGS; do
