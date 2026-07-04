@@ -182,8 +182,11 @@ class Aura_Worker_API {
 					'type'              => 'string',
 					'sanitize_callback' => 'esc_url_raw',
 					'validate_callback' => function( $value ) {
-						return filter_var( $value, FILTER_VALIDATE_URL )
-							&& preg_match( '#^https://github\.com/Digitizers/SiteAgent/releases/download/.+\.zip$#', $value );
+						// Single source of truth: defer to the same allowlist the
+							// handler enforces, so the aura_worker_self_update_allowed_hosts
+							// filter can actually extend the permitted sources instead of
+							// being shadowed by a hard-coded pattern here.
+							return is_string( $value ) && $this->is_allowed_self_update_url( $value );
 					},
 					'description'       => __( 'GitHub release zip URL for SiteAgent.', 'digitizer-site-worker' ),
 				),
@@ -393,9 +396,13 @@ class Aura_Worker_API {
 	 * POST /aura/v1/update/core
 	 *
 	 * @param WP_REST_Request $request The request object.
-	 * @return WP_REST_Response Update result.
+	 * @return WP_REST_Response|WP_Error Update result, or WP_Error(403) if a grant is required.
 	 */
 	public function update_core( $request ) {
+		$guard = Aura_Worker_Grant::require_for( $request, 'wp.update.core', array() );
+		if ( is_wp_error( $guard ) ) {
+			return $guard;
+		}
 		$result = $this->updater->update_core();
 		$status = $result['success'] ? 200 : 500;
 		return new WP_REST_Response( $result, $status );
@@ -405,10 +412,15 @@ class Aura_Worker_API {
 	 * POST /aura/v1/update/plugin
 	 *
 	 * @param WP_REST_Request $request The request object.
-	 * @return WP_REST_Response Update result.
+	 * @return WP_REST_Response|WP_Error Update result, or WP_Error(403) if a grant is required.
 	 */
 	public function update_plugin( $request ) {
 		$plugin_file = $request->get_param( 'plugin' );
+
+		$guard = Aura_Worker_Grant::require_for( $request, 'wp.update.plugin', array( 'plugin' => $plugin_file ) );
+		if ( is_wp_error( $guard ) ) {
+			return $guard;
+		}
 
 		// Validate plugin exists.
 		if ( ! function_exists( 'get_plugins' ) ) {
@@ -432,10 +444,15 @@ class Aura_Worker_API {
 	 * POST /aura/v1/update/theme
 	 *
 	 * @param WP_REST_Request $request The request object.
-	 * @return WP_REST_Response Update result.
+	 * @return WP_REST_Response|WP_Error Update result, or WP_Error(403) if a grant is required.
 	 */
 	public function update_theme( $request ) {
 		$theme_slug = $request->get_param( 'theme' );
+
+		$guard = Aura_Worker_Grant::require_for( $request, 'wp.update.theme', array( 'theme' => $theme_slug ) );
+		if ( is_wp_error( $guard ) ) {
+			return $guard;
+		}
 
 		// Validate theme exists.
 		$theme = wp_get_theme( $theme_slug );
@@ -455,9 +472,13 @@ class Aura_Worker_API {
 	 * POST /aura/v1/update/translations
 	 *
 	 * @param WP_REST_Request $request The request object.
-	 * @return WP_REST_Response Update result.
+	 * @return WP_REST_Response|WP_Error Update result, or WP_Error(403) if a grant is required.
 	 */
 	public function update_translations( $request ) {
+		$guard = Aura_Worker_Grant::require_for( $request, 'wp.update.translations', array() );
+		if ( is_wp_error( $guard ) ) {
+			return $guard;
+		}
 		$result = $this->updater->update_translations();
 		$status = $result['success'] ? 200 : 500;
 		return new WP_REST_Response( $result, $status );
@@ -482,13 +503,87 @@ class Aura_Worker_API {
 	 * Updates the SiteAgent plugin from a GitHub release zip URL.
 	 *
 	 * @param WP_REST_Request $request The request object.
-	 * @return WP_REST_Response Update result with version info.
+	 * @return WP_REST_Response|WP_Error Update result with version info, or WP_Error(403) if a grant is required.
 	 */
 	public function self_update( $request ) {
 		$zip_url = $request->get_param( 'zip_url' );
-		$result  = $this->updater->self_update( $zip_url );
-		$status  = $result['success'] ? 200 : 500;
+
+		$guard = Aura_Worker_Grant::require_for( $request, 'wp.self_update', array( 'zip_url' => $zip_url ) );
+		if ( is_wp_error( $guard ) ) {
+			return $guard;
+		}
+
+		// Source allowlist: only install self-update zips from the official repo
+		// (or GitHub's asset CDNs). Bounds a signed grant to a trusted source, so
+		// even an approved self-update can't be pointed at attacker-hosted code.
+		if ( ! $this->is_allowed_self_update_url( $zip_url ) ) {
+			return new WP_REST_Response( array(
+				'success' => false,
+				'error'   => __( 'Self-update source not allowed.', 'digitizer-site-worker' ),
+			), 400 );
+		}
+
+		$result = $this->updater->self_update( $zip_url );
+		$status = $result['success'] ? 200 : 500;
 		return new WP_REST_Response( $result, $status );
+	}
+
+	/**
+	 * Whether a self-update zip URL is from an allowlisted source.
+	 *
+	 * Defaults to the official GitHub repo release-download path
+	 * (`github.com/Digitizers/SiteAgent/`) over HTTPS — the exact form the Aura
+	 * gateway sends (a GitHub release `browser_download_url`). GitHub 302-redirects
+	 * that URL to its asset CDN, but WordPress's HTTP layer follows the redirect
+	 * internally, so the CDN host is never itself a `zip_url` input and does not
+	 * need allowlisting. Override via the `aura_worker_self_update_allowed_hosts`
+	 * filter (host => required path prefix, '' means any path on that host).
+	 *
+	 * @param string $url Candidate zip URL.
+	 * @return bool
+	 */
+	private function is_allowed_self_update_url( $url ) {
+		$url = (string) $url;
+		if ( 'https' !== strtolower( (string) wp_parse_url( $url, PHP_URL_SCHEME ) ) ) {
+			return false;
+		}
+		$host = strtolower( (string) wp_parse_url( $url, PHP_URL_HOST ) );
+		$path = (string) wp_parse_url( $url, PHP_URL_PATH );
+
+		// Reject dot-segment traversal (raw OR percent-encoded). An HTTP transport
+		// may normalize `..` before fetching, so a URL like
+		// `/Digitizers/SiteAgent/releases/download/../../attacker/evil/x.zip` would
+		// otherwise pass the prefix check but be fetched from another repo.
+		$lower_path = strtolower( $path );
+		if ( false !== strpos( $path, '..' )
+			|| false !== strpos( rawurldecode( $path ), '..' )
+			|| false !== strpos( $lower_path, '%2e' )
+			|| false !== strpos( $lower_path, '%2f' )
+			|| false !== strpos( $lower_path, '%5c' ) ) {
+			return false;
+		}
+
+		// Only ever install a .zip — never an archive tarball or arbitrary asset.
+		if ( '.zip' !== strtolower( substr( $path, -4 ) ) ) {
+			return false;
+		}
+
+		// Default: the official repo's RELEASE-DOWNLOAD path only — not
+		// /archive/… branch/tag tarballs, which would let a grant approve
+		// arbitrary repo contents rather than a published release.
+		$allowed = array(
+			'github.com' => '/Digitizers/SiteAgent/releases/download/',
+		);
+		$allowed = apply_filters( 'aura_worker_self_update_allowed_hosts', $allowed );
+
+		if ( ! isset( $allowed[ $host ] ) ) {
+			return false;
+		}
+		$prefix = (string) $allowed[ $host ];
+		if ( '' !== $prefix && 0 !== strpos( $path, $prefix ) ) {
+			return false;
+		}
+		return true;
 	}
 
 	/**
@@ -497,10 +592,19 @@ class Aura_Worker_API {
 	 * Runs core wp_upgrade or a plugin-specific database migration.
 	 *
 	 * @param WP_REST_Request $request The request object.
-	 * @return WP_REST_Response Update result.
+	 * @return WP_REST_Response|WP_Error Update result, or WP_Error(403) if a grant is required.
 	 */
 	public function update_database( $request ) {
 		$plugin = $request->get_param( 'plugin' );
+
+		// Core DB optimization sends no target (binds {}); a specific plugin
+		// migration binds { plugin }. Both must be individually approvable.
+		$grant_params = ( null === $plugin || '' === $plugin ) ? array() : array( 'plugin' => $plugin );
+		$guard        = Aura_Worker_Grant::require_for( $request, 'wp.update.database', $grant_params );
+		if ( is_wp_error( $guard ) ) {
+			return $guard;
+		}
+
 		$result = $this->updater->update_database( $plugin );
 		$status = $result['success'] ? 200 : 500;
 		return new WP_REST_Response( $result, $status );
@@ -513,7 +617,7 @@ class Aura_Worker_API {
 	 * Automatically rolls back if the health check fails after an update.
 	 *
 	 * @param WP_REST_Request $request The request object.
-	 * @return WP_REST_Response Batch update summary and per-plugin results.
+	 * @return WP_REST_Response|WP_Error Batch update summary and per-plugin results, or WP_Error(403) if a grant is required.
 	 */
 	public function batch_update_plugins( $request ) {
 		$plugins       = $request->get_param( 'plugins' );
@@ -527,10 +631,14 @@ class Aura_Worker_API {
 			), 400 );
 		}
 
-		// Sanitize plugin file paths.
-		$plugins = array_filter( array_map( 'sanitize_text_field', $plugins ), function( $p ) {
+		// Sanitize + validate the plugin file paths FIRST, then bind the grant over
+		// the EXACT list that will be executed. Binding post-sanitize matters: a
+		// value that normalizes into a different valid path must not be able to
+		// slip past the exact-parameter grant. The gateway sends already-valid
+		// paths, so sanitize is a no-op there and the bound hash still matches.
+		$plugins = array_values( array_filter( array_map( 'sanitize_text_field', $plugins ), function( $p ) {
 			return preg_match( '/^[a-zA-Z0-9_\-]+\/[a-zA-Z0-9_\-]+\.php$/', $p );
-		} );
+		} ) );
 
 		if ( empty( $plugins ) ) {
 			return new WP_REST_Response( array(
@@ -539,7 +647,22 @@ class Aura_Worker_API {
 			), 400 );
 		}
 
-		$result = $this->updater->batch_update_plugins( array_values( $plugins ), (int) $chunk_size, (bool) $create_backup );
+		// Bind the whole effective payload — including the safety options — so an
+		// approved batch can't be replayed with create_backup flipped off.
+		$guard = Aura_Worker_Grant::require_for(
+			$request,
+			'wp.update.batch',
+			array(
+				'plugins'       => $plugins,
+				'chunk_size'    => (int) $chunk_size,
+				'create_backup' => (bool) $create_backup,
+			)
+		);
+		if ( is_wp_error( $guard ) ) {
+			return $guard;
+		}
+
+		$result = $this->updater->batch_update_plugins( $plugins, (int) $chunk_size, (bool) $create_backup );
 		return new WP_REST_Response( array_merge( array( 'success' => true ), $result ), 200 );
 	}
 
@@ -564,11 +687,28 @@ class Aura_Worker_API {
 	 * If no backup_path is supplied, the most recent backup for the plugin is used.
 	 *
 	 * @param WP_REST_Request $request The request object.
-	 * @return WP_REST_Response Rollback result.
+	 * @return WP_REST_Response|WP_Error Rollback result, or WP_Error(403) if a grant is required.
 	 */
 	public function rollback_plugin( $request ) {
 		$plugin_slug = $request->get_param( 'plugin' );
 		$backup_path = $request->get_param( 'backup_path' );
+
+		// Bind BOTH the plugin and the caller-supplied backup_path: the handler
+		// passes a request-provided backup_path straight to restore_plugin(), so
+		// a grant approved for one backup must not be spent to restore a
+		// different zip. An empty backup_path (server picks the most recent) binds
+		// as '' and must be signed the same way by the gateway.
+		$guard = Aura_Worker_Grant::require_for(
+			$request,
+			'wp.rollback',
+			array(
+				'plugin'      => $plugin_slug,
+				'backup_path' => (string) $backup_path,
+			)
+		);
+		if ( is_wp_error( $guard ) ) {
+			return $guard;
+		}
 
 		$rollback = new Aura_Worker_Rollback();
 
@@ -633,6 +773,15 @@ class Aura_Worker_API {
 		$kind   = $request->get_param( 'kind' );
 		$target = $request->get_param( 'target' );
 
+		$guard = Aura_Worker_Grant::require_for(
+			$request,
+			'wp.snapshot.create',
+			array( 'kind' => $kind, 'target' => $target )
+		);
+		if ( is_wp_error( $guard ) ) {
+			return $guard;
+		}
+
 		$snapshots = new Aura_Worker_Snapshots();
 
 		if ( 'file' === $kind ) {
@@ -667,6 +816,11 @@ class Aura_Worker_API {
 	 */
 	public function restore_snapshot( $request ) {
 		$id = $request->get_param( 'id' );
+
+		$guard = Aura_Worker_Grant::require_for( $request, 'wp.snapshot.restore', array( 'id' => $id ) );
+		if ( is_wp_error( $guard ) ) {
+			return $guard;
+		}
 
 		$snapshots = new Aura_Worker_Snapshots();
 		$result    = $snapshots->restore( $id );

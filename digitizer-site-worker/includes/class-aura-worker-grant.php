@@ -197,6 +197,48 @@ class Aura_Worker_Grant {
 	}
 
 	/**
+	 * Guard a non-MCP REST write endpoint with the same grant policy.
+	 *
+	 * The MCP `tools/execute` handler enforces grants for mutating tools; the
+	 * direct REST write endpoints (updates, batch, self-update, rollback) run as
+	 * admin off a valid `X-Aura-Token` and were previously ungated. This lets each
+	 * write handler require the same fresh, single-use, gateway-signed grant when
+	 * enforcement is on — so a stolen token can no longer trigger a code update or
+	 * rollback. A no-op when no pubkey is provisioned (legacy token-only sites keep
+	 * working until they reconnect).
+	 *
+	 * The caller passes the EXACT params the handler will act on, with defaults
+	 * already resolved, so the bound hash matches what the handler executes (and
+	 * what the gateway signed) byte-for-byte.
+	 *
+	 * @param WP_REST_Request $request Incoming request.
+	 * @param string          $action  Stable action name the grant must bind (e.g. "wp.update.plugin").
+	 * @param array           $params  Exact params the handler will act on (defaults resolved).
+	 * @return true|WP_Error  True when allowed; WP_Error(403) when a grant is required and missing/invalid.
+	 */
+	public static function require_for( $request, $action, $params ) {
+		if ( ! self::is_enforced() ) {
+			return true;
+		}
+		if ( ! is_array( $params ) ) {
+			$params = array();
+		}
+		$grant  = (string) $request->get_header( 'X-Aura-Approval-Grant' );
+		$reason = self::verify( $grant, (string) $action, $params );
+		if ( true !== $reason ) {
+			// Distinct forensic signal for a refused write (kept separate from the
+			// power-execute hook, which means a tool actually ran).
+			do_action( 'aura_worker_grant_denied', (string) $action, $params, $reason );
+			return new WP_Error(
+				'aura_grant_required',
+				'Approval grant required or invalid: ' . $reason,
+				array( 'status' => 403 )
+			);
+		}
+		return true;
+	}
+
+	/**
 	 * Delete a spent-nonce reservation. Fired by the single event scheduled when
 	 * the nonce was reserved; also runs as a sweep in case an event was missed.
 	 *
