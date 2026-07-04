@@ -24,6 +24,12 @@ jobs:
     name: svn rm tags
     runs-on: ubuntu-latest
     steps:
+      # Subversion was removed from the ubuntu-latest (24.04) runner image, so
+      # install it explicitly — otherwise `svn` is missing and the probe below
+      # would silently treat every tag as absent.
+      - name: Install Subversion
+        run: sudo apt-get update && sudo apt-get install -y subversion
+
       - name: Remove tags from wp.org SVN
         env:
           SVN_USERNAME: ${{ secrets.SVN_USERNAME }}
@@ -34,6 +40,9 @@ jobs:
           DRY_RUN: ${{ github.event.inputs.dry_run }}
         run: |
           set -euo pipefail
+          # Fail loudly if svn is missing, so a probe never silently reads as
+          # "tag absent" and the job never no-ops without pruning.
+          command -v svn >/dev/null 2>&1 || { echo "::error::svn not found on runner"; exit 1; }
           SVN_URL="https://plugins.svn.wordpress.org/${SLUG}"
 
           # Never remove trunk, the assets dir, or whatever readme currently ships
