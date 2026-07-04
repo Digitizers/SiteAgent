@@ -137,6 +137,19 @@ final class RestWriteGrantTest extends TestCase {
 		);
 	}
 
+	public function test_rollback_binds_the_backup_path(): void {
+		// A rollback grant approved for one backup must not be spent to restore a
+		// different one (the handler passes a caller-supplied backup_path through).
+		$grant = $this->mint( 'wp.rollback', array( 'plugin' => 'akismet', 'backup_path' => '/backups/akismet-1.zip' ) );
+		$this->assertDenied(
+			Aura_Worker_Grant::require_for( $this->req( $grant ), 'wp.rollback', array( 'plugin' => 'akismet', 'backup_path' => '/backups/akismet-2.zip' ) )
+		);
+		$grant2 = $this->mint( 'wp.rollback', array( 'plugin' => 'akismet', 'backup_path' => '/backups/akismet-1.zip' ) );
+		$this->assertTrue(
+			Aura_Worker_Grant::require_for( $this->req( $grant2 ), 'wp.rollback', array( 'plugin' => 'akismet', 'backup_path' => '/backups/akismet-1.zip' ) )
+		);
+	}
+
 	public function test_no_pubkey_is_a_bypass(): void {
 		// Back-compat: a site with no provisioned key runs token-only (no grant).
 		unset( $GLOBALS['_options']['aura_worker_grant_pubkey'] );
@@ -160,8 +173,10 @@ final class RestWriteGrantTest extends TestCase {
 	public static function self_update_urls(): array {
 		return array(
 			'official release'     => array( 'https://github.com/Digitizers/SiteAgent/releases/download/v2.7.0/digitizer-site-worker.zip', true ),
-			'official codeload'    => array( 'https://codeload.github.com/Digitizers/SiteAgent/zip/refs/tags/v2.7.0', true ),
-			'github asset cdn'     => array( 'https://objects.githubusercontent.com/github-production-release-asset/abc', true ),
+			// CDN hosts are never a zip_url input (WP follows GitHub's redirect
+			// internally), so they are intentionally NOT allowlisted.
+			'github asset cdn'     => array( 'https://objects.githubusercontent.com/github-production-release-asset/abc', false ),
+			'codeload'             => array( 'https://codeload.github.com/Digitizers/SiteAgent/zip/refs/tags/v2.7.0', false ),
 			'wrong repo on github' => array( 'https://github.com/attacker/evil/releases/download/v1/evil.zip', false ),
 			'foreign host'         => array( 'https://evil.example.com/digitizer-site-worker.zip', false ),
 			'http not https'       => array( 'http://github.com/Digitizers/SiteAgent/releases/download/v2.7.0/x.zip', false ),

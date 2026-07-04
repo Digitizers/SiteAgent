@@ -528,10 +528,13 @@ class Aura_Worker_API {
 	/**
 	 * Whether a self-update zip URL is from an allowlisted source.
 	 *
-	 * Defaults to the official GitHub repo (`Digitizers/SiteAgent`) and GitHub's
-	 * release-asset CDNs. HTTPS is required. Override via the
-	 * `aura_worker_self_update_allowed_hosts` filter (host => required path
-	 * prefix, '' means any path on that host).
+	 * Defaults to the official GitHub repo release-download path
+	 * (`github.com/Digitizers/SiteAgent/`) over HTTPS — the exact form the Aura
+	 * gateway sends (a GitHub release `browser_download_url`). GitHub 302-redirects
+	 * that URL to its asset CDN, but WordPress's HTTP layer follows the redirect
+	 * internally, so the CDN host is never itself a `zip_url` input and does not
+	 * need allowlisting. Override via the `aura_worker_self_update_allowed_hosts`
+	 * filter (host => required path prefix, '' means any path on that host).
 	 *
 	 * @param string $url Candidate zip URL.
 	 * @return bool
@@ -545,10 +548,7 @@ class Aura_Worker_API {
 		$path = (string) wp_parse_url( $url, PHP_URL_PATH );
 
 		$allowed = array(
-			'github.com'                           => '/Digitizers/SiteAgent/',
-			'codeload.github.com'                  => '/Digitizers/SiteAgent/',
-			'objects.githubusercontent.com'        => '',
-			'release-assets.githubusercontent.com' => '',
+			'github.com' => '/Digitizers/SiteAgent/',
 		);
 		$allowed = apply_filters( 'aura_worker_self_update_allowed_hosts', $allowed );
 
@@ -667,9 +667,19 @@ class Aura_Worker_API {
 		$plugin_slug = $request->get_param( 'plugin' );
 		$backup_path = $request->get_param( 'backup_path' );
 
-		// Bind the target plugin. backup_path is server-resolved (most-recent
-		// backup) and not attacker-controllable, so it is not part of the grant.
-		$guard = Aura_Worker_Grant::require_for( $request, 'wp.rollback', array( 'plugin' => $plugin_slug ) );
+		// Bind BOTH the plugin and the caller-supplied backup_path: the handler
+		// passes a request-provided backup_path straight to restore_plugin(), so
+		// a grant approved for one backup must not be spent to restore a
+		// different zip. An empty backup_path (server picks the most recent) binds
+		// as '' and must be signed the same way by the gateway.
+		$guard = Aura_Worker_Grant::require_for(
+			$request,
+			'wp.rollback',
+			array(
+				'plugin'      => $plugin_slug,
+				'backup_path' => (string) $backup_path,
+			)
+		);
 		if ( is_wp_error( $guard ) ) {
 			return $guard;
 		}

@@ -210,9 +210,8 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
   own. Sites without the key keep working as before (token-only) until they
   reconnect.
 * Self-update source allowlist: SiteAgent will only install a self-update zip
-  from the official GitHub repository (Digitizers/SiteAgent) or GitHub's
-  release-asset CDNs, over HTTPS. Overridable via the
-  aura_worker_self_update_allowed_hosts filter.
+  from the official GitHub repository (Digitizers/SiteAgent release downloads),
+  over HTTPS. Overridable via the aura_worker_self_update_allowed_hosts filter.
 
 = 2.6.1 =
 * Tool self-declaration hardening: six mutating tools (update_plugin_safely,
