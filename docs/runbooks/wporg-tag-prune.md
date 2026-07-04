@@ -26,10 +26,25 @@ As of 2.7.0 the wp.org tag list includes:
 2. **Legacy 1.3.x — optional**, to keep only the last ~5 stable minors + trunk:
    - `tags/1.3.3`, `tags/1.3.4`, `tags/1.3.5`
 
-Keep `trunk`, the current stable `2.7.0`, and a reasonable tail of recent
+Keep `trunk`, the current stable `2.7.1`, and a reasonable tail of recent
 stables for rollback.
 
-## Steps
+## Preferred: the "Prune wp.org SVN tags" Action
+
+No local SVN needed — the workflow uses the same `SVN_USERNAME` / `SVN_PASSWORD`
+secrets as the deploy:
+
+1. **Actions → "Prune wp.org SVN tags" → Run workflow.**
+2. `tags` defaults to `2.0.0-beta.1 2.0.0-beta.2 1.3.3 1.3.4 1.3.5`; edit as needed.
+3. Leave **`dry_run` = true** first — it lists what *would* be removed and commits
+   nothing. Review the log.
+4. Re-run with **`dry_run` = false** to actually `svn rm` + commit.
+
+The workflow refuses to remove `trunk`, `assets`, or the current `Stable tag`,
+and skips tags that don't exist — so a fat-fingered input can't drop a
+load-bearing ref.
+
+## Manual fallback (local SVN)
 
 ```bash
 # 1. Checkout the plugin's wp.org SVN (not this git repo).
