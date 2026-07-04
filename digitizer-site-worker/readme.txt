@@ -147,9 +147,11 @@ Yes. The plugin uses defence-in-depth: WordPress Application Passwords (the same
 
 = How do I enable the approval gate for write actions? =
 
-SiteAgent can require a per-action, cryptographically signed approval before it runs any state-changing tool (updates, cleanups, cache flushes, SEO writes). Once enabled, a leaked Site Token alone can only ever read — never write — because each write must carry a single-use signature that only the Aura dashboard can mint, after a human approves the action.
+SiteAgent can require a per-action, cryptographically signed approval before it runs a state-changing **MCP tool** (cleanups, cache flushes, SEO writes, safe plugin updates run through the tool interface). Once enabled, each such write must carry a single-use signature that only the Aura dashboard can mint, after a human approves the action — so a leaked Site Token cannot run those tools on its own.
 
-This gate turns on automatically once the site holds Aura's approval key, which is provisioned securely during connection. **If you installed or updated the plugin but have not reconnected the site since, the gate is dormant** and the site runs in the standard token-only mode. To activate it, simply **reconnect the site from your Aura dashboard** — no reinstall is needed. Reads are unaffected either way.
+This gate turns on automatically once the site holds Aura's approval key, which is provisioned securely during connection. **If you installed or updated the plugin but have not reconnected the site since, the gate is dormant** and the site runs in the standard token-only mode. To activate it, simply **reconnect the site from your Aura dashboard** — no reinstall is needed.
+
+Note: the approval gate currently covers the MCP tool path. Core, plugin, and theme updates performed over the plugin's direct REST update endpoints are still authorized by the Site Token alone (the standard site-management model), so treat the Site Token as a sensitive credential regardless. Grant coverage for those update endpoints is on the roadmap.
 
 = Does it slow down my site? =
 
