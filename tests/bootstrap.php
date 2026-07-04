@@ -766,6 +766,8 @@ require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-rollback.php';
 require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-snapshots.php';
 require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-mcp.php';
 require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-grant.php';
+require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-updater.php';
+require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-api.php';
 require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-magic-link.php';
 require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-abilities.php';
 

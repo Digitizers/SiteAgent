@@ -17,7 +17,7 @@
   </a>
   <img src="https://img.shields.io/badge/WordPress-6.2%E2%80%937.0-21759b?logo=wordpress" alt="WordPress" />
   <img src="https://img.shields.io/badge/PHP-7.4%2B-777bb4?logo=php" alt="PHP" />
-  <img src="https://img.shields.io/badge/Stable-2.6.1-green" alt="Stable" />
+  <img src="https://img.shields.io/badge/Stable-2.7.0-green" alt="Stable" />
 </p>
 
 ---
@@ -145,6 +145,12 @@ These plug straight into **Aura's Fleet MCP Gateway**: read tools run on demand,
 ---
 
 ## Changelog
+
+### 2.7.0
+
+- **Approval gate extended to the REST write endpoints (H3).** G-grants previously covered only the MCP `tools/execute` path; the direct REST writes Aura uses for updates (`/v1/update/{core,plugin,theme,translations,database}`, `/v1/self-update`, `/v2/update/batch`, `/v2/rollback/{slug}`) ran as admin off a valid `X-Aura-Token` with no grant check. Each now calls `Aura_Worker_Grant::require_for()` — when a gateway pubkey is provisioned, the write requires a fresh single-use Ed25519 grant bound to the exact action name and parameters (batch binds `chunk_size` + `create_backup` too, so an approved batch can't be replayed with backups off). A leaked Site Token can no longer trigger a code update or rollback. Sites without a provisioned key keep working token-only until they reconnect.
+- **Self-update source allowlist.** `self-update` now installs only from the official `Digitizers/SiteAgent` GitHub repo or GitHub's release-asset CDNs, over HTTPS — bounding even an approved self-update to a trusted source. Overridable via the `aura_worker_self_update_allowed_hosts` filter.
+- Requires the Aura gateway to mint grants for these endpoints (Aura H3 P2); until that ships, publish only to sites whose gateway attaches update grants.
 
 ### 2.6.1
 

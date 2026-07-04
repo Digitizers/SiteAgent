@@ -396,6 +396,10 @@ class Aura_Worker_API {
 	 * @return WP_REST_Response Update result.
 	 */
 	public function update_core( $request ) {
+		$guard = Aura_Worker_Grant::require_for( $request, 'wp.update.core', array() );
+		if ( is_wp_error( $guard ) ) {
+			return $guard;
+		}
 		$result = $this->updater->update_core();
 		$status = $result['success'] ? 200 : 500;
 		return new WP_REST_Response( $result, $status );
@@ -409,6 +413,11 @@ class Aura_Worker_API {
 	 */
 	public function update_plugin( $request ) {
 		$plugin_file = $request->get_param( 'plugin' );
+
+		$guard = Aura_Worker_Grant::require_for( $request, 'wp.update.plugin', array( 'plugin' => $plugin_file ) );
+		if ( is_wp_error( $guard ) ) {
+			return $guard;
+		}
 
 		// Validate plugin exists.
 		if ( ! function_exists( 'get_plugins' ) ) {
@@ -437,6 +446,11 @@ class Aura_Worker_API {
 	public function update_theme( $request ) {
 		$theme_slug = $request->get_param( 'theme' );
 
+		$guard = Aura_Worker_Grant::require_for( $request, 'wp.update.theme', array( 'theme' => $theme_slug ) );
+		if ( is_wp_error( $guard ) ) {
+			return $guard;
+		}
+
 		// Validate theme exists.
 		$theme = wp_get_theme( $theme_slug );
 		if ( ! $theme->exists() ) {
@@ -458,6 +472,10 @@ class Aura_Worker_API {
 	 * @return WP_REST_Response Update result.
 	 */
 	public function update_translations( $request ) {
+		$guard = Aura_Worker_Grant::require_for( $request, 'wp.update.translations', array() );
+		if ( is_wp_error( $guard ) ) {
+			return $guard;
+		}
 		$result = $this->updater->update_translations();
 		$status = $result['success'] ? 200 : 500;
 		return new WP_REST_Response( $result, $status );
@@ -486,9 +504,62 @@ class Aura_Worker_API {
 	 */
 	public function self_update( $request ) {
 		$zip_url = $request->get_param( 'zip_url' );
-		$result  = $this->updater->self_update( $zip_url );
-		$status  = $result['success'] ? 200 : 500;
+
+		$guard = Aura_Worker_Grant::require_for( $request, 'wp.self_update', array( 'zip_url' => $zip_url ) );
+		if ( is_wp_error( $guard ) ) {
+			return $guard;
+		}
+
+		// Source allowlist: only install self-update zips from the official repo
+		// (or GitHub's asset CDNs). Bounds a signed grant to a trusted source, so
+		// even an approved self-update can't be pointed at attacker-hosted code.
+		if ( ! $this->is_allowed_self_update_url( $zip_url ) ) {
+			return new WP_REST_Response( array(
+				'success' => false,
+				'error'   => __( 'Self-update source not allowed.', 'digitizer-site-worker' ),
+			), 400 );
+		}
+
+		$result = $this->updater->self_update( $zip_url );
+		$status = $result['success'] ? 200 : 500;
 		return new WP_REST_Response( $result, $status );
+	}
+
+	/**
+	 * Whether a self-update zip URL is from an allowlisted source.
+	 *
+	 * Defaults to the official GitHub repo (`Digitizers/SiteAgent`) and GitHub's
+	 * release-asset CDNs. HTTPS is required. Override via the
+	 * `aura_worker_self_update_allowed_hosts` filter (host => required path
+	 * prefix, '' means any path on that host).
+	 *
+	 * @param string $url Candidate zip URL.
+	 * @return bool
+	 */
+	private function is_allowed_self_update_url( $url ) {
+		$url = (string) $url;
+		if ( 'https' !== strtolower( (string) wp_parse_url( $url, PHP_URL_SCHEME ) ) ) {
+			return false;
+		}
+		$host = strtolower( (string) wp_parse_url( $url, PHP_URL_HOST ) );
+		$path = (string) wp_parse_url( $url, PHP_URL_PATH );
+
+		$allowed = array(
+			'github.com'                           => '/Digitizers/SiteAgent/',
+			'codeload.github.com'                  => '/Digitizers/SiteAgent/',
+			'objects.githubusercontent.com'        => '',
+			'release-assets.githubusercontent.com' => '',
+		);
+		$allowed = apply_filters( 'aura_worker_self_update_allowed_hosts', $allowed );
+
+		if ( ! isset( $allowed[ $host ] ) ) {
+			return false;
+		}
+		$prefix = (string) $allowed[ $host ];
+		if ( '' !== $prefix && 0 !== strpos( $path, $prefix ) ) {
+			return false;
+		}
+		return true;
 	}
 
 	/**
@@ -501,6 +572,15 @@ class Aura_Worker_API {
 	 */
 	public function update_database( $request ) {
 		$plugin = $request->get_param( 'plugin' );
+
+		// Core DB optimization sends no target (binds {}); a specific plugin
+		// migration binds { plugin }. Both must be individually approvable.
+		$grant_params = ( null === $plugin || '' === $plugin ) ? array() : array( 'plugin' => $plugin );
+		$guard        = Aura_Worker_Grant::require_for( $request, 'wp.update.database', $grant_params );
+		if ( is_wp_error( $guard ) ) {
+			return $guard;
+		}
+
 		$result = $this->updater->update_database( $plugin );
 		$status = $result['success'] ? 200 : 500;
 		return new WP_REST_Response( $result, $status );
@@ -519,6 +599,23 @@ class Aura_Worker_API {
 		$plugins       = $request->get_param( 'plugins' );
 		$chunk_size    = $request->get_param( 'chunk_size' ) ?? 5;
 		$create_backup = $request->get_param( 'create_backup' ) ?? true;
+
+		// Bind the WHOLE effective payload — including the safety options — so an
+		// approved batch can't be replayed with create_backup flipped off. Bound
+		// to the received list (pre-sanitize) to match what the gateway signed;
+		// sanitize below only ever narrows it to a subset of approved plugins.
+		$guard = Aura_Worker_Grant::require_for(
+			$request,
+			'wp.update.batch',
+			array(
+				'plugins'       => is_array( $plugins ) ? array_values( $plugins ) : $plugins,
+				'chunk_size'    => (int) $chunk_size,
+				'create_backup' => (bool) $create_backup,
+			)
+		);
+		if ( is_wp_error( $guard ) ) {
+			return $guard;
+		}
 
 		if ( empty( $plugins ) || ! is_array( $plugins ) ) {
 			return new WP_REST_Response( array(
@@ -569,6 +666,13 @@ class Aura_Worker_API {
 	public function rollback_plugin( $request ) {
 		$plugin_slug = $request->get_param( 'plugin' );
 		$backup_path = $request->get_param( 'backup_path' );
+
+		// Bind the target plugin. backup_path is server-resolved (most-recent
+		// backup) and not attacker-controllable, so it is not part of the grant.
+		$guard = Aura_Worker_Grant::require_for( $request, 'wp.rollback', array( 'plugin' => $plugin_slug ) );
+		if ( is_wp_error( $guard ) ) {
+			return $guard;
+		}
 
 		$rollback = new Aura_Worker_Rollback();
 
