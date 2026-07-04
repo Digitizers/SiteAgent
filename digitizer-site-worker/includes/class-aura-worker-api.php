@@ -396,7 +396,7 @@ class Aura_Worker_API {
 	 * POST /aura/v1/update/core
 	 *
 	 * @param WP_REST_Request $request The request object.
-	 * @return WP_REST_Response Update result.
+	 * @return WP_REST_Response|WP_Error Update result, or WP_Error(403) if a grant is required.
 	 */
 	public function update_core( $request ) {
 		$guard = Aura_Worker_Grant::require_for( $request, 'wp.update.core', array() );
@@ -412,7 +412,7 @@ class Aura_Worker_API {
 	 * POST /aura/v1/update/plugin
 	 *
 	 * @param WP_REST_Request $request The request object.
-	 * @return WP_REST_Response Update result.
+	 * @return WP_REST_Response|WP_Error Update result, or WP_Error(403) if a grant is required.
 	 */
 	public function update_plugin( $request ) {
 		$plugin_file = $request->get_param( 'plugin' );
@@ -444,7 +444,7 @@ class Aura_Worker_API {
 	 * POST /aura/v1/update/theme
 	 *
 	 * @param WP_REST_Request $request The request object.
-	 * @return WP_REST_Response Update result.
+	 * @return WP_REST_Response|WP_Error Update result, or WP_Error(403) if a grant is required.
 	 */
 	public function update_theme( $request ) {
 		$theme_slug = $request->get_param( 'theme' );
@@ -472,7 +472,7 @@ class Aura_Worker_API {
 	 * POST /aura/v1/update/translations
 	 *
 	 * @param WP_REST_Request $request The request object.
-	 * @return WP_REST_Response Update result.
+	 * @return WP_REST_Response|WP_Error Update result, or WP_Error(403) if a grant is required.
 	 */
 	public function update_translations( $request ) {
 		$guard = Aura_Worker_Grant::require_for( $request, 'wp.update.translations', array() );
@@ -503,7 +503,7 @@ class Aura_Worker_API {
 	 * Updates the SiteAgent plugin from a GitHub release zip URL.
 	 *
 	 * @param WP_REST_Request $request The request object.
-	 * @return WP_REST_Response Update result with version info.
+	 * @return WP_REST_Response|WP_Error Update result with version info, or WP_Error(403) if a grant is required.
 	 */
 	public function self_update( $request ) {
 		$zip_url = $request->get_param( 'zip_url' );
@@ -550,6 +550,19 @@ class Aura_Worker_API {
 		$host = strtolower( (string) wp_parse_url( $url, PHP_URL_HOST ) );
 		$path = (string) wp_parse_url( $url, PHP_URL_PATH );
 
+		// Reject dot-segment traversal (raw OR percent-encoded). An HTTP transport
+		// may normalize `..` before fetching, so a URL like
+		// `/Digitizers/SiteAgent/releases/download/../../attacker/evil/x.zip` would
+		// otherwise pass the prefix check but be fetched from another repo.
+		$lower_path = strtolower( $path );
+		if ( false !== strpos( $path, '..' )
+			|| false !== strpos( rawurldecode( $path ), '..' )
+			|| false !== strpos( $lower_path, '%2e' )
+			|| false !== strpos( $lower_path, '%2f' )
+			|| false !== strpos( $lower_path, '%5c' ) ) {
+			return false;
+		}
+
 		// Only ever install a .zip — never an archive tarball or arbitrary asset.
 		if ( '.zip' !== strtolower( substr( $path, -4 ) ) ) {
 			return false;
@@ -579,7 +592,7 @@ class Aura_Worker_API {
 	 * Runs core wp_upgrade or a plugin-specific database migration.
 	 *
 	 * @param WP_REST_Request $request The request object.
-	 * @return WP_REST_Response Update result.
+	 * @return WP_REST_Response|WP_Error Update result, or WP_Error(403) if a grant is required.
 	 */
 	public function update_database( $request ) {
 		$plugin = $request->get_param( 'plugin' );
@@ -604,7 +617,7 @@ class Aura_Worker_API {
 	 * Automatically rolls back if the health check fails after an update.
 	 *
 	 * @param WP_REST_Request $request The request object.
-	 * @return WP_REST_Response Batch update summary and per-plugin results.
+	 * @return WP_REST_Response|WP_Error Batch update summary and per-plugin results, or WP_Error(403) if a grant is required.
 	 */
 	public function batch_update_plugins( $request ) {
 		$plugins       = $request->get_param( 'plugins' );
@@ -672,7 +685,7 @@ class Aura_Worker_API {
 	 * If no backup_path is supplied, the most recent backup for the plugin is used.
 	 *
 	 * @param WP_REST_Request $request The request object.
-	 * @return WP_REST_Response Rollback result.
+	 * @return WP_REST_Response|WP_Error Rollback result, or WP_Error(403) if a grant is required.
 	 */
 	public function rollback_plugin( $request ) {
 		$plugin_slug = $request->get_param( 'plugin' );

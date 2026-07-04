@@ -175,6 +175,8 @@ final class RestWriteGrantTest extends TestCase {
 			'official release'     => array( 'https://github.com/Digitizers/SiteAgent/releases/download/v2.7.0/digitizer-site-worker.zip', true ),
 			// Non-release repo artifacts must be rejected even for the right repo.
 			'branch archive zip'   => array( 'https://github.com/Digitizers/SiteAgent/archive/refs/heads/main.zip', false ),
+			'dot-dot traversal'    => array( 'https://github.com/Digitizers/SiteAgent/releases/download/../../../../attacker/evil/releases/download/v1/evil.zip', false ),
+			'encoded traversal'    => array( 'https://github.com/Digitizers/SiteAgent/releases/download/%2e%2e/%2e%2e/attacker/evil/v1/evil.zip', false ),
 			'tag archive zip'      => array( 'https://github.com/Digitizers/SiteAgent/archive/refs/tags/v2.7.0.zip', false ),
 			// Only .zip installs; never a tarball.
 			'release tarball'      => array( 'https://github.com/Digitizers/SiteAgent/releases/download/v2.7.0/x.tar.gz', false ),
