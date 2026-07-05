@@ -119,6 +119,12 @@ class Aura_Tool_Set_Seo_Meta extends Aura_Tool_Base {
 
 		$updated = array();
 
+		// Whether the caller actually asked to set any field. Used to tell
+		// "nothing was requested" apart from "a field was requested but the write
+		// failed" — otherwise a genuine write failure is misreported as if the
+		// caller supplied no fields at all.
+		$provided = isset( $params['title'] ) || isset( $params['description'] ) || isset( $params['focus_keyword'] );
+
 		// update_post_meta() returns false BOTH on failure AND when the value is
 		// unchanged (idempotent). Treat "already equals the desired value" as a
 		// successful write so re-running the tool still flushes a stale SEO cache;
@@ -146,6 +152,12 @@ class Aura_Tool_Set_Seo_Meta extends Aura_Tool_Base {
 		}
 
 		if ( empty( $updated ) ) {
+			if ( $provided ) {
+				// Fields were supplied but none took — a real write failure, not a
+				// missing-input error. Don't tell the caller to "provide" fields
+				// they already provided.
+				return array( 'error' => 'Failed to write SEO meta — the update did not take. Please try again.' );
+			}
 			return array( 'error' => 'Nothing to update — provide title, description, and/or focus_keyword.' );
 		}
 

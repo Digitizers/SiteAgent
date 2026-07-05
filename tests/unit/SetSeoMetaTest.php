@@ -97,7 +97,12 @@ final class SetSeoMetaTest extends TestCase {
 	public function test_no_cache_flush_when_write_fails(): void {
 		$this->seedPost( 16 );
 		$GLOBALS['_sa_state']['update_post_meta_return'][16]['rank_math_title'] = false;
-		$this->tool->execute( array( 'post_id' => 16, 'title' => 'Will Fail' ) );
+		$out = $this->tool->execute( array( 'post_id' => 16, 'title' => 'Will Fail' ) );
+		// A supplied-but-failed write reports a write failure — NOT the
+		// "Nothing to update — provide…" message (the caller did provide a title).
+		$this->assertArrayHasKey( 'error', $out );
+		$this->assertStringContainsString( 'Failed to write SEO meta', $out['error'] );
+		$this->assertNotSame( 'Nothing to update — provide title, description, and/or focus_keyword.', $out['error'] );
 		$this->assertNotContains( 16, $GLOBALS['_cleaned_post_cache'] );
 	}
 
