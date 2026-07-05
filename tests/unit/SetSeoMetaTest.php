@@ -94,6 +94,13 @@ final class SetSeoMetaTest extends TestCase {
 		$this->assertContains( 14, $GLOBALS['_cleaned_post_cache'] );
 	}
 
+	public function test_no_cache_flush_when_write_fails(): void {
+		$this->seedPost( 16 );
+		$GLOBALS['_sa_state']['update_post_meta_return'][16]['rank_math_title'] = false;
+		$this->tool->execute( array( 'post_id' => 16, 'title' => 'Will Fail' ) );
+		$this->assertNotContains( 16, $GLOBALS['_cleaned_post_cache'] );
+	}
+
 	public function test_no_cache_flush_when_nothing_written(): void {
 		$this->seedPost( 15 );
 		$this->tool->execute( array( 'post_id' => 15 ) );

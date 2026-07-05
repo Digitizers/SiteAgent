@@ -140,6 +140,44 @@ final class RestWriteGrantTest extends TestCase {
 		);
 	}
 
+	public function test_update_translations_binds_empty_params(): void {
+		$grant = $this->mint( 'wp.update.translations', array() );
+		$this->assertTrue(
+			Aura_Worker_Grant::require_for( $this->req( $grant ), 'wp.update.translations', array() )
+		);
+
+		$wrong = $this->mint( 'wp.update.core', array() );
+		$this->assertDenied(
+			Aura_Worker_Grant::require_for( $this->req( $wrong ), 'wp.update.translations', array() )
+		);
+	}
+
+	public function test_expired_grant_is_denied(): void {
+		$claims = array(
+			'act'  => 'wp.update.plugin',
+			'args' => array( 'plugin' => 'akismet/akismet.php' ),
+			'iat'  => time() - 60,
+			'exp'  => time() - 1,
+			'jti'  => 'expired-grant-jti',
+			'sh'   => $this->site_hash,
+		);
+
+		$body = wp_json_encode( $claims );
+		$this->assertNotFalse( $body );
+
+		$sig   = sodium_crypto_sign_detached( $body, $this->secret );
+		$grant = rtrim( strtr( base64_encode( $body ), '+/', '-_' ), '=' ) . '.' .
+			rtrim( strtr( base64_encode( $sig ), '+/', '-_' ), '=' );
+
+		$this->assertDenied(
+			Aura_Worker_Grant::require_for(
+				$this->req( $grant ),
+				'wp.update.plugin',
+				array( 'plugin' => 'akismet/akismet.php' )
+			)
+		);
+	}
+
 	public function test_single_use_grant_cannot_be_replayed(): void {
 		$grant = $this->mint( 'wp.rollback', array( 'plugin' => 'akismet' ) );
 		$this->assertTrue(

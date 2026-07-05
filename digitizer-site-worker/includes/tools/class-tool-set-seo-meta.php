@@ -120,16 +120,19 @@ class Aura_Tool_Set_Seo_Meta extends Aura_Tool_Base {
 		$updated = array();
 
 		if ( isset( $params['title'] ) ) {
-			update_post_meta( $post_id, $fields['title'], sanitize_text_field( (string) $params['title'] ) );
-			$updated[] = 'title';
+			if ( false !== update_post_meta( $post_id, $fields['title'], sanitize_text_field( (string) $params['title'] ) ) ) {
+				$updated[] = 'title';
+			}
 		}
 		if ( isset( $params['description'] ) ) {
-			update_post_meta( $post_id, $fields['description'], sanitize_textarea_field( (string) $params['description'] ) );
-			$updated[] = 'description';
+			if ( false !== update_post_meta( $post_id, $fields['description'], sanitize_textarea_field( (string) $params['description'] ) ) ) {
+				$updated[] = 'description';
+			}
 		}
 		if ( isset( $params['focus_keyword'] ) ) {
-			update_post_meta( $post_id, $fields['focus_keyword'], sanitize_text_field( (string) $params['focus_keyword'] ) );
-			$updated[] = 'focus_keyword';
+			if ( false !== update_post_meta( $post_id, $fields['focus_keyword'], sanitize_text_field( (string) $params['focus_keyword'] ) ) ) {
+				$updated[] = 'focus_keyword';
+			}
 		}
 
 		if ( empty( $updated ) ) {
