@@ -101,6 +101,17 @@ final class SetSeoMetaTest extends TestCase {
 		$this->assertNotContains( 16, $GLOBALS['_cleaned_post_cache'] );
 	}
 
+	public function test_cache_flush_on_idempotent_rewrite(): void {
+		// Postmeta already holds the desired value, so update_post_meta() reports
+		// "unchanged" (false) — but the SEO cache may be stale, so re-running the
+		// tool must still flush it rather than skipping as if nothing was written.
+		$this->seedPost( 17 );
+		$GLOBALS['_post_meta'][17]['rank_math_title'] = 'Same Title';
+		$GLOBALS['_sa_state']['update_post_meta_return'][17]['rank_math_title'] = false;
+		$this->tool->execute( array( 'post_id' => 17, 'title' => 'Same Title' ) );
+		$this->assertContains( 17, $GLOBALS['_cleaned_post_cache'] );
+	}
+
 	public function test_no_cache_flush_when_nothing_written(): void {
 		$this->seedPost( 15 );
 		$this->tool->execute( array( 'post_id' => 15 ) );

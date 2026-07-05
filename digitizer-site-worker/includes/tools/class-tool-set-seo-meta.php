@@ -119,18 +119,28 @@ class Aura_Tool_Set_Seo_Meta extends Aura_Tool_Base {
 
 		$updated = array();
 
+		// update_post_meta() returns false BOTH on failure AND when the value is
+		// unchanged (idempotent). Treat "already equals the desired value" as a
+		// successful write so re-running the tool still flushes a stale SEO cache;
+		// only a genuine failure (value differs and the write didn't take) is skipped.
 		if ( isset( $params['title'] ) ) {
-			if ( false !== update_post_meta( $post_id, $fields['title'], sanitize_text_field( (string) $params['title'] ) ) ) {
+			$val = sanitize_text_field( (string) $params['title'] );
+			if ( false !== update_post_meta( $post_id, $fields['title'], $val )
+				|| (string) get_post_meta( $post_id, $fields['title'], true ) === $val ) {
 				$updated[] = 'title';
 			}
 		}
 		if ( isset( $params['description'] ) ) {
-			if ( false !== update_post_meta( $post_id, $fields['description'], sanitize_textarea_field( (string) $params['description'] ) ) ) {
+			$val = sanitize_textarea_field( (string) $params['description'] );
+			if ( false !== update_post_meta( $post_id, $fields['description'], $val )
+				|| (string) get_post_meta( $post_id, $fields['description'], true ) === $val ) {
 				$updated[] = 'description';
 			}
 		}
 		if ( isset( $params['focus_keyword'] ) ) {
-			if ( false !== update_post_meta( $post_id, $fields['focus_keyword'], sanitize_text_field( (string) $params['focus_keyword'] ) ) ) {
+			$val = sanitize_text_field( (string) $params['focus_keyword'] );
+			if ( false !== update_post_meta( $post_id, $fields['focus_keyword'], $val )
+				|| (string) get_post_meta( $post_id, $fields['focus_keyword'], true ) === $val ) {
 				$updated[] = 'focus_keyword';
 			}
 		}

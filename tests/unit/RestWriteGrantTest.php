@@ -35,15 +35,16 @@ final class RestWriteGrantTest extends TestCase {
 		return $r;
 	}
 
-	private function mint( string $action, array $params ): string {
+	private function mint( string $action, array $params, ?int $iat = null, ?int $exp = null ): string {
+		$now     = time();
 		$payload = array(
 			'v'             => 1,
 			'tool'          => $action,
 			'params_sha256' => hash( 'sha256', Aura_Worker_Grant::canonical_json( $params ) ),
 			'site'          => $this->site_hash,
 			'nonce'         => bin2hex( random_bytes( 16 ) ),
-			'iat'           => time(),
-			'exp'           => time() + 300,
+			'iat'           => $iat ?? $now,
+			'exp'           => $exp ?? $now + 300,
 		);
 		$json = wp_json_encode( $payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE );
 		$sig  = sodium_crypto_sign_detached( $json, $this->secret );
@@ -153,28 +154,18 @@ final class RestWriteGrantTest extends TestCase {
 	}
 
 	public function test_expired_grant_is_denied(): void {
-		$claims = array(
-			'act'  => 'wp.update.plugin',
-			'args' => array( 'plugin' => 'akismet/akismet.php' ),
-			'iat'  => time() - 60,
-			'exp'  => time() - 1,
-			'jti'  => 'expired-grant-jti',
-			'sh'   => $this->site_hash,
-		);
-
-		$body = wp_json_encode( $claims );
-		$this->assertNotFalse( $body );
-
-		$sig   = sodium_crypto_sign_detached( $body, $this->secret );
-		$grant = rtrim( strtr( base64_encode( $body ), '+/', '-_' ), '=' ) . '.' .
-			rtrim( strtr( base64_encode( $sig ), '+/', '-_' ), '=' );
+		// A properly-signed grant with the correct tool/site/params, but already
+		// expired — so the denial is reached at the EXPIRY check, not at
+		// tool/site/params validation. (Using mint() guarantees the claim schema
+		// verify() actually reads: tool / params_sha256 / site / nonce / iat / exp.)
+		// exp is 300s in the past — well beyond the 60s CLOCK_SKEW tolerance — while
+		// the 300s lifetime (iat→exp) stays within MAX_TTL (900s), so the grant is
+		// rejected specifically for being expired, not for a bad lifetime.
+		$params = array( 'plugin' => 'akismet/akismet.php' );
+		$grant  = $this->mint( 'wp.update.plugin', $params, time() - 600, time() - 300 );
 
 		$this->assertDenied(
-			Aura_Worker_Grant::require_for(
-				$this->req( $grant ),
-				'wp.update.plugin',
-				array( 'plugin' => 'akismet/akismet.php' )
-			)
+			Aura_Worker_Grant::require_for( $this->req( $grant ), 'wp.update.plugin', $params )
 		);
 	}
 
