@@ -157,13 +157,30 @@ class Aura_Tool_Cleanup_Assets extends Aura_Tool_Base {
 	 * @return int[]
 	 */
 	private function get_all_attachments() {
-		$query = new WP_Query( array(
-			'post_type'      => 'attachment',
-			'post_status'    => 'inherit',
-			'posts_per_page' => -1,
-			'fields'         => 'ids',
-		) );
-		return array_map( 'intval', $query->posts );
+		$all_ids    = array();
+		$batch_size = 500;
+		$page       = 1;
+
+		do {
+			$query = new WP_Query( array(
+				'post_type'      => 'attachment',
+				'post_status'    => 'inherit',
+				'posts_per_page' => $batch_size,
+				'paged'          => $page,
+				'fields'         => 'ids',
+				'no_found_rows'  => true,
+			) );
+
+			$batch_ids = array_map( 'intval', $query->posts );
+			if ( empty( $batch_ids ) ) {
+				break;
+			}
+
+			$all_ids = array_merge( $all_ids, $batch_ids );
+			$page++;
+		} while ( count( $batch_ids ) === $batch_size );
+
+		return $all_ids;
 	}
 
 	/**

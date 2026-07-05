@@ -13,7 +13,7 @@ final class SnapshotsTest extends TestCase {
 	protected function setUp(): void {
 		sa_reset_state();
 		$this->rrmdir( WP_CONTENT_DIR );
-		mkdir( WP_CONTENT_DIR, 0777, true );
+		mkdir( WP_CONTENT_DIR, 0755, true );
 	}
 
 	protected function tearDown(): void {

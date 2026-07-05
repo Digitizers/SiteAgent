@@ -35,15 +35,16 @@ final class RestWriteGrantTest extends TestCase {
 		return $r;
 	}
 
-	private function mint( string $action, array $params ): string {
+	private function mint( string $action, array $params, ?int $iat = null, ?int $exp = null ): string {
+		$now     = time();
 		$payload = array(
 			'v'             => 1,
 			'tool'          => $action,
 			'params_sha256' => hash( 'sha256', Aura_Worker_Grant::canonical_json( $params ) ),
 			'site'          => $this->site_hash,
 			'nonce'         => bin2hex( random_bytes( 16 ) ),
-			'iat'           => time(),
-			'exp'           => time() + 300,
+			'iat'           => $iat ?? $now,
+			'exp'           => $exp ?? $now + 300,
 		);
 		$json = wp_json_encode( $payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE );
 		$sig  = sodium_crypto_sign_detached( $json, $this->secret );
@@ -137,6 +138,34 @@ final class RestWriteGrantTest extends TestCase {
 		$grant2 = $this->mint( 'wp.self_update', array( 'zip_url' => 'https://x/a.zip', 'sha256' => str_repeat( 'a', 64 ) ) );
 		$this->assertTrue(
 			Aura_Worker_Grant::require_for( $this->req( $grant2 ), 'wp.self_update', array( 'zip_url' => 'https://x/a.zip', 'sha256' => str_repeat( 'a', 64 ) ) )
+		);
+	}
+
+	public function test_update_translations_binds_empty_params(): void {
+		$grant = $this->mint( 'wp.update.translations', array() );
+		$this->assertTrue(
+			Aura_Worker_Grant::require_for( $this->req( $grant ), 'wp.update.translations', array() )
+		);
+
+		$wrong = $this->mint( 'wp.update.core', array() );
+		$this->assertDenied(
+			Aura_Worker_Grant::require_for( $this->req( $wrong ), 'wp.update.translations', array() )
+		);
+	}
+
+	public function test_expired_grant_is_denied(): void {
+		// A properly-signed grant with the correct tool/site/params, but already
+		// expired — so the denial is reached at the EXPIRY check, not at
+		// tool/site/params validation. (Using mint() guarantees the claim schema
+		// verify() actually reads: tool / params_sha256 / site / nonce / iat / exp.)
+		// exp is 300s in the past — well beyond the 60s CLOCK_SKEW tolerance — while
+		// the 300s lifetime (iat→exp) stays within MAX_TTL (900s), so the grant is
+		// rejected specifically for being expired, not for a bad lifetime.
+		$params = array( 'plugin' => 'akismet/akismet.php' );
+		$grant  = $this->mint( 'wp.update.plugin', $params, time() - 600, time() - 300 );
+
+		$this->assertDenied(
+			Aura_Worker_Grant::require_for( $this->req( $grant ), 'wp.update.plugin', $params )
 		);
 	}
 

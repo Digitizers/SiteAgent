@@ -64,6 +64,15 @@ final class GrantTest extends TestCase {
 		return rtrim( strtr( base64_encode( $s ), '+/', '-_' ), '=' );
 	}
 
+	private function b64urldec( string $s ): string {
+		$s = strtr( $s, '-_', '+/' );
+		$pad = strlen( $s ) % 4;
+		if ( $pad ) {
+			$s .= str_repeat( '=', 4 - $pad );
+		}
+		return (string) base64_decode( $s, true );
+	}
+
 	// --- enforcement toggle ---------------------------------------------------
 
 	public function test_not_enforced_without_pubkey(): void {
@@ -85,6 +94,11 @@ final class GrantTest extends TestCase {
 	public function test_valid_grant_with_empty_params(): void {
 		$grant = $this->mint( array( 'params' => array() ) );
 		$this->assertTrue( Aura_Worker_Grant::verify( $grant, 'execute_php', array() ) );
+	}
+
+	public function test_empty_params_grant_rejected_with_non_empty_params(): void {
+		$grant = $this->mint( array( 'params' => array() ) );
+		$this->assertIsString( Aura_Worker_Grant::verify( $grant, 'execute_php', array( 'code' => '1+1' ) ) );
 	}
 
 	// --- rejections -----------------------------------------------------------
@@ -124,23 +138,14 @@ final class GrantTest extends TestCase {
 	}
 
 	public function test_tampered_payload_rejected(): void {
-		// Change a real field (tool) in the signed payload → the original
-		// signature no longer matches, so verification must fail.
-		$grant         = $this->mint();
-		list( , $s )   = explode( '.', $grant );
-		$payload       = wp_json_encode(
-			array(
-				'v'             => 1,
-				'tool'          => 'db_query', // was execute_php
-				'params_sha256' => hash( 'sha256', Aura_Worker_Grant::canonical_json( array( 'code' => '1+1' ) ) ),
-				'site'          => $this->site_hash,
-				'nonce'         => bin2hex( random_bytes( 16 ) ),
-				'iat'           => time(),
-				'exp'           => time() + 300,
-			),
-			JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
-		);
-		$tampered = $this->b64url( $payload ) . '.' . $s;
+		// Change only one signed field (tool) while preserving all original claims
+		// so this test specifically validates signature mismatch due to tampering.
+		$grant       = $this->mint();
+		list( $p, $s ) = explode( '.', $grant );
+		$claims      = json_decode( $this->b64urldec( $p ), true );
+		$claims['tool'] = 'db_query'; // was execute_php
+		$payload     = wp_json_encode( $claims, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE );
+		$tampered    = $this->b64url( $payload ) . '.' . $s;
 		$this->assertSame( 'signature verification failed', Aura_Worker_Grant::verify( $tampered, 'db_query', array( 'code' => '1+1' ) ) );
 	}
 

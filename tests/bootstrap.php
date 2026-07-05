@@ -113,6 +113,10 @@ if ( ! function_exists( 'get_post_meta' ) ) {
 
 if ( ! function_exists( 'update_post_meta' ) ) {
 	function update_post_meta( $post_id, $key, $value, $prev = '' ) {
+		$override = $GLOBALS['_sa_state']['update_post_meta_return'][ (int) $post_id ][ $key ] ?? true;
+		if ( false === $override ) {
+			return false;
+		}
 		$GLOBALS['_post_meta'][ (int) $post_id ][ $key ] = $value;
 		return true;
 	}
@@ -815,6 +819,7 @@ function sa_reset_state(): void {
 	$GLOBALS['_abilities']    = array();
 	$GLOBALS['_ability_categories'] = array();
 	$GLOBALS['_scheduled']    = array();
+	$GLOBALS['_sa_state']     = array();
 	if ( isset( $GLOBALS['wpdb'] ) ) {
 		$GLOBALS['wpdb']->last_error = '';
 		$GLOBALS['wpdb']->last_query = '';
