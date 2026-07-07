@@ -145,6 +145,17 @@ if ( ! function_exists( 'wp_slash' ) ) {
 	}
 }
 
+if ( ! function_exists( 'wp_is_post_revision' ) ) {
+	function wp_is_post_revision( $post ) {
+		$id = (int) ( is_object( $post ) ? ( $post->ID ?? 0 ) : $post );
+		$p  = $GLOBALS['_posts'][ $id ] ?? null;
+		if ( $p && ( $p->post_type ?? '' ) === 'revision' ) {
+			return (int) ( $p->post_parent ?? 0 ) ?: true; // real WP returns parent id
+		}
+		return false;
+	}
+}
+
 if ( ! function_exists( 'clean_post_cache' ) ) {
 	function clean_post_cache( $post ) {
 		$GLOBALS['_cleaned_post_cache'][] = (int) ( is_object( $post ) ? ( $post->ID ?? 0 ) : $post );

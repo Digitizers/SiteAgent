@@ -218,6 +218,14 @@ class Aura_Worker_Snapshots {
 		if ( ! get_post( $post_id ) ) {
 			return array( 'success' => false, 'error' => 'Post not found: ' . $post_id );
 		}
+		// Reject revision/autosave IDs. get_post_meta reads the revision's own
+		// meta, but update_post_meta/delete_post_meta on a revision can affect the
+		// parent — so a snapshot taken against a revision could later clobber or
+		// wipe the parent page's Elementor data. Elementor data lives on the
+		// parent post, so callers must pass the parent id.
+		if ( wp_is_post_revision( $post_id ) ) {
+			return array( 'success' => false, 'error' => 'Refusing to snapshot a revision/autosave; pass the parent post id.' );
+		}
 
 		if ( is_string( $keys ) ) {
 			$keys = array( $keys );
@@ -332,6 +340,12 @@ class Aura_Worker_Snapshots {
 					return array( 'success' => false, 'error' => 'Snapshot payload corrupt.' );
 				}
 				$post_id = (int) $record['target'];
+				// If the page/kit was deleted after the snapshot was taken, writing
+				// meta would add orphaned wp_postmeta rows for a non-existent object
+				// and falsely report a successful restore. Fail closed.
+				if ( ! get_post( $post_id ) ) {
+					return array( 'success' => false, 'error' => 'Target post no longer exists; cannot restore.' );
+				}
 				foreach ( $captured as $key => $info ) {
 					$key = (string) $key;
 					if ( empty( $info['existed'] ) ) {

@@ -208,6 +208,36 @@ final class SnapshotsTest extends TestCase {
 		$this->assertStringContainsString( 'Failed to remove meta key', $restore['error'] );
 	}
 
+	public function test_meta_snapshot_rejects_revision_ids(): void {
+		// Snapshotting a revision id is unsafe: get_post_meta reads the revision's
+		// own meta but update/delete can hit the parent, so restore could clobber
+		// the parent page (Codex R3 P2). Reject up front.
+		$GLOBALS['_posts'][ 200 ] = (object) array(
+			'ID'          => 200,
+			'post_type'   => 'revision',
+			'post_parent' => 100,
+		);
+		$snaps  = new Aura_Worker_Snapshots();
+		$result = $snaps->snapshot_meta( 200, '_elementor_data' );
+		$this->assertFalse( $result['success'] );
+		$this->assertStringContainsString( 'revision', $result['error'] );
+	}
+
+	public function test_meta_restore_fails_when_target_post_deleted(): void {
+		// Page deleted after the snapshot: restoring meta would create orphaned
+		// wp_postmeta rows and falsely report success (Codex R3 P2). Fail closed.
+		$this->seedPost( 21 );
+		update_post_meta( 21, '_elementor_data', 'original' );
+		$snaps = new Aura_Worker_Snapshots();
+		$snap  = $snaps->snapshot_meta( 21, '_elementor_data' );
+
+		unset( $GLOBALS['_posts'][ 21 ] ); // page deleted
+		$restore = $snaps->restore( $snap['snapshot']['id'] );
+
+		$this->assertFalse( $restore['success'] );
+		$this->assertStringContainsString( 'no longer exists', $restore['error'] );
+	}
+
 	public function test_meta_snapshot_of_missing_post_fails(): void {
 		$snaps  = new Aura_Worker_Snapshots();
 		$result = $snaps->snapshot_meta( 0, '_elementor_data' );
