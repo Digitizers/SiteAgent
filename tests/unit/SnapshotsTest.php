@@ -20,6 +20,11 @@ final class SnapshotsTest extends TestCase {
 		$this->rrmdir( WP_CONTENT_DIR );
 	}
 
+	/** Register a post so the get_post() existence check in snapshot_meta passes. */
+	private function seedPost( int $id ): void {
+		$GLOBALS['_posts'][ $id ] = (object) array( 'ID' => $id, 'post_content' => '' );
+	}
+
 	private function rrmdir( string $dir ): void {
 		if ( ! is_dir( $dir ) ) {
 			return;
@@ -101,6 +106,71 @@ final class SnapshotsTest extends TestCase {
 		$snaps->restore( $snap['snapshot']['id'] );
 		// Restored to the original value, NOT deleted.
 		$this->assertSame( '__aura_absent__', get_option( 'edge_opt' ) );
+	}
+
+	public function test_meta_snapshot_and_restore_roundtrip(): void {
+		// Simulates _elementor_data: a single serialized value under one key.
+		$this->seedPost( 42 );
+		update_post_meta( 42, '_elementor_data', '[{"id":"a","elType":"container"}]' );
+		$snaps = new Aura_Worker_Snapshots();
+
+		$snap = $snaps->snapshot_meta( 42, '_elementor_data' );
+		$this->assertTrue( $snap['success'] );
+		$this->assertSame( 'meta', $snap['snapshot']['kind'] );
+		$this->assertSame( array( '_elementor_data' ), $snap['snapshot']['keys'] );
+
+		update_post_meta( 42, '_elementor_data', '[{"id":"b","elType":"widget"}]' );
+		$restore = $snaps->restore( $snap['snapshot']['id'] );
+
+		$this->assertTrue( $restore['success'] );
+		$this->assertSame( '[{"id":"a","elType":"container"}]', get_post_meta( 42, '_elementor_data', true ) );
+	}
+
+	public function test_meta_snapshot_of_absent_key_restores_to_absent(): void {
+		// Key does not exist when snapshotted (a page never built with Elementor).
+		$this->seedPost( 7 );
+		$snaps = new Aura_Worker_Snapshots();
+		$snap  = $snaps->snapshot_meta( 7, '_elementor_data' );
+		$this->assertTrue( $snap['success'] );
+		$this->assertSame( array( '_elementor_data' ), $snap['snapshot']['keys'] );
+
+		// A later write adds the key; restoring must remove it again, not leave ''.
+		update_post_meta( 7, '_elementor_data', 'built-later' );
+		$snaps->restore( $snap['snapshot']['id'] );
+
+		$this->assertFalse( metadata_exists( 'post', 7, '_elementor_data' ) );
+	}
+
+	public function test_meta_snapshot_captures_multiple_keys(): void {
+		$this->seedPost( 9 );
+		update_post_meta( 9, '_elementor_data', 'tree' );
+		update_post_meta( 9, '_elementor_page_settings', 'settings' );
+		$snaps = new Aura_Worker_Snapshots();
+
+		$snap = $snaps->snapshot_meta( 9, array( '_elementor_data', '_elementor_page_settings' ) );
+		$this->assertTrue( $snap['success'] );
+
+		update_post_meta( 9, '_elementor_data', 'clobbered' );
+		delete_post_meta( 9, '_elementor_page_settings' );
+		$snaps->restore( $snap['snapshot']['id'] );
+
+		$this->assertSame( 'tree', get_post_meta( 9, '_elementor_data', true ) );
+		$this->assertSame( 'settings', get_post_meta( 9, '_elementor_page_settings', true ) );
+	}
+
+	public function test_meta_snapshot_of_missing_post_fails(): void {
+		$snaps  = new Aura_Worker_Snapshots();
+		$result = $snaps->snapshot_meta( 0, '_elementor_data' );
+		$this->assertFalse( $result['success'] );
+		$this->assertStringContainsString( 'Invalid post id', $result['error'] );
+	}
+
+	public function test_meta_snapshot_requires_at_least_one_key(): void {
+		$this->seedPost( 5 );
+		$snaps  = new Aura_Worker_Snapshots();
+		$result = $snaps->snapshot_meta( 5, array() );
+		$this->assertFalse( $result['success'] );
+		$this->assertStringContainsString( 'No meta keys', $result['error'] );
 	}
 
 	public function test_restore_unknown_snapshot_fails(): void {

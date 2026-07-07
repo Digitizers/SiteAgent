@@ -122,6 +122,25 @@ if ( ! function_exists( 'update_post_meta' ) ) {
 	}
 }
 
+if ( ! function_exists( 'metadata_exists' ) ) {
+	function metadata_exists( $meta_type, $object_id, $meta_key ) {
+		return isset( $GLOBALS['_post_meta'][ (int) $object_id ][ $meta_key ] );
+	}
+}
+
+if ( ! function_exists( 'delete_post_meta' ) ) {
+	function delete_post_meta( $post_id, $key, $value = '' ) {
+		unset( $GLOBALS['_post_meta'][ (int) $post_id ][ $key ] );
+		return true;
+	}
+}
+
+if ( ! function_exists( 'wp_slash' ) ) {
+	function wp_slash( $value ) {
+		return $value;
+	}
+}
+
 if ( ! function_exists( 'clean_post_cache' ) ) {
 	function clean_post_cache( $post ) {
 		$GLOBALS['_cleaned_post_cache'][] = (int) ( is_object( $post ) ? ( $post->ID ?? 0 ) : $post );

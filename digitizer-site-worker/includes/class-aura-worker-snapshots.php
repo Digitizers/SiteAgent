@@ -4,10 +4,12 @@
  *
  * Generalizes the plugin-zip rollback (class-aura-worker-rollback.php) into
  * capture-before-write snapshots for the surfaces the Governed Power Tools
- * touch: individual files and WordPress options. Each snapshot is a small JSON
- * record (plus, for files, a payload copy) under wp-content/aura-backups/
- * snapshots/, so the Aura gateway can preview and reverse a power action the
- * same way it already reverses page/resource snapshots.
+ * touch: individual files, WordPress options, and post-meta keys (the shape
+ * Elementor page/kit data lives in — `_elementor_data`, `_elementor_page_settings`,
+ * kit-scoped globals). Each snapshot is a small JSON record (plus a payload copy
+ * for non-trivial kinds) under wp-content/aura-backups/snapshots/, so the Aura
+ * gateway can preview and reverse a power action the same way it already reverses
+ * page/resource snapshots.
  *
  * Table snapshots are intentionally deferred (they need $wpdb + row-cap policy);
  * the record shape reserves the 'db_table' kind for that later work.
@@ -194,6 +196,66 @@ class Aura_Worker_Snapshots {
 	}
 
 	/**
+	 * Capture one or more post-meta keys before they are rewritten.
+	 *
+	 * This is the surface Elementor page/kit data lives in — `_elementor_data`,
+	 * `_elementor_page_settings`, and the kit-scoped globals repositories all
+	 * store a single serialized value under one meta key. Each requested key is
+	 * captured with its existence flag (so restore can re-delete a key that was
+	 * absent at capture time rather than resurrecting an empty one) and its
+	 * primary value. It targets single-valued meta keys — the shape every
+	 * Elementor storage key uses — not multi-row meta.
+	 *
+	 * @param int          $post_id Post ID.
+	 * @param string|array $keys    Meta key, or list of meta keys, to capture.
+	 * @return array { success: bool, snapshot?: array, error?: string }
+	 */
+	public function snapshot_meta( $post_id, $keys ) {
+		$post_id = (int) $post_id;
+		if ( $post_id <= 0 ) {
+			return array( 'success' => false, 'error' => 'Invalid post id.' );
+		}
+		if ( ! get_post( $post_id ) ) {
+			return array( 'success' => false, 'error' => 'Post not found: ' . $post_id );
+		}
+
+		if ( is_string( $keys ) ) {
+			$keys = array( $keys );
+		}
+		if ( ! is_array( $keys ) || empty( $keys ) ) {
+			return array( 'success' => false, 'error' => 'No meta keys given to snapshot.' );
+		}
+
+		$captured = array();
+		foreach ( $keys as $key ) {
+			if ( ! is_string( $key ) || '' === $key ) {
+				return array( 'success' => false, 'error' => 'Invalid meta key.' );
+			}
+			$existed          = metadata_exists( 'post', $post_id, $key );
+			$captured[ $key ] = array(
+				'existed' => $existed,
+				// get_post_meta returns the stored (unslashed) value; restore
+				// re-slashes before writing so the value round-trips exactly.
+				'value'   => $existed ? get_post_meta( $post_id, $key, true ) : '',
+			);
+		}
+
+		$record = $this->persist(
+			array(
+				'kind'   => 'meta',
+				'target' => $post_id,
+				'keys'   => array_map( 'strval', array_keys( $captured ) ),
+			),
+			serialize( $captured )
+		);
+
+		if ( false === $record ) {
+			return array( 'success' => false, 'error' => 'Failed to persist snapshot (disk full or unwritable).' );
+		}
+		return array( 'success' => true, 'snapshot' => $record );
+	}
+
+	/**
 	 * Load a snapshot record by id.
 	 *
 	 * @param string $id Snapshot id.
@@ -259,6 +321,30 @@ class Aura_Worker_Snapshots {
 				return is_wp_error( $result )
 					? array( 'success' => false, 'error' => $result->get_error_message() )
 					: array( 'success' => true );
+
+			case 'meta':
+				$payload_path = $record['payload_path'] ?? '';
+				if ( ! $payload_path || ! file_exists( $payload_path ) ) {
+					return array( 'success' => false, 'error' => 'Snapshot payload missing.' );
+				}
+				$captured = unserialize( file_get_contents( $payload_path ) );
+				if ( ! is_array( $captured ) ) {
+					return array( 'success' => false, 'error' => 'Snapshot payload corrupt.' );
+				}
+				$post_id = (int) $record['target'];
+				foreach ( $captured as $key => $info ) {
+					$key = (string) $key;
+					if ( empty( $info['existed'] ) ) {
+						// The key was absent when captured — remove it, don't
+						// resurrect an empty value.
+						delete_post_meta( $post_id, $key );
+						continue;
+					}
+					// Meta writers expect slashed input (WP unslashes before
+					// storing); get_post_meta returned unslashed, so re-slash.
+					update_post_meta( $post_id, $key, wp_slash( $info['value'] ) );
+				}
+				return array( 'success' => true );
 
 			default:
 				return array( 'success' => false, 'error' => 'Unsupported snapshot kind: ' . $record['kind'] );
