@@ -158,6 +158,40 @@ final class SnapshotsTest extends TestCase {
 		$this->assertSame( 'settings', get_post_meta( 9, '_elementor_page_settings', true ) );
 	}
 
+	public function test_meta_restore_reports_failure_when_write_fails(): void {
+		// A failed meta write must NOT report a successful rollback (Codex R1 P2):
+		// governance would record a restore that never happened while the value
+		// stays clobbered.
+		$this->seedPost( 11 );
+		update_post_meta( 11, '_elementor_data', 'original' );
+		$snaps = new Aura_Worker_Snapshots();
+		$snap  = $snaps->snapshot_meta( 11, '_elementor_data' );
+
+		// Clobber, then force the restore write to fail with the value NOT matching.
+		update_post_meta( 11, '_elementor_data', 'clobbered' );
+		$GLOBALS['_sa_state']['update_post_meta_return'][11]['_elementor_data'] = false;
+
+		$restore = $snaps->restore( $snap['snapshot']['id'] );
+		$this->assertFalse( $restore['success'] );
+		$this->assertStringContainsString( 'Failed to restore meta key', $restore['error'] );
+	}
+
+	public function test_meta_restore_succeeds_when_value_already_matches(): void {
+		// update_post_meta also returns false when the stored value already equals
+		// the target (a no-op) — that is NOT a failure and must report success.
+		$this->seedPost( 12 );
+		update_post_meta( 12, '_elementor_data', 'original' );
+		$snaps = new Aura_Worker_Snapshots();
+		$snap  = $snaps->snapshot_meta( 12, '_elementor_data' );
+
+		// Value is already 'original'; force the falsey (no-op) return.
+		$GLOBALS['_sa_state']['update_post_meta_return'][12]['_elementor_data'] = false;
+
+		$restore = $snaps->restore( $snap['snapshot']['id'] );
+		$this->assertTrue( $restore['success'] );
+		$this->assertSame( 'original', get_post_meta( 12, '_elementor_data', true ) );
+	}
+
 	public function test_meta_snapshot_of_missing_post_fails(): void {
 		$snaps  = new Aura_Worker_Snapshots();
 		$result = $snaps->snapshot_meta( 0, '_elementor_data' );

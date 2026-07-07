@@ -342,7 +342,21 @@ class Aura_Worker_Snapshots {
 					}
 					// Meta writers expect slashed input (WP unslashes before
 					// storing); get_post_meta returned unslashed, so re-slash.
-					update_post_meta( $post_id, $key, wp_slash( $info['value'] ) );
+					$ok = update_post_meta( $post_id, $key, wp_slash( $info['value'] ) );
+					if ( false === $ok ) {
+						// update_post_meta returns false both on a real failure
+						// (DB error, filter veto) AND when the stored value already
+						// equals the target (a no-op). Only the former is a failed
+						// rollback — disambiguate by reading the value back. If it
+						// does not match, the value stays clobbered, so we must NOT
+						// report a successful restore.
+						if ( get_post_meta( $post_id, $key, true ) !== $info['value'] ) {
+							return array(
+								'success' => false,
+								'error'   => 'Failed to restore meta key: ' . $key,
+							);
+						}
+					}
 				}
 				return array( 'success' => true );
 
