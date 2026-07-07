@@ -338,6 +338,17 @@ class Aura_Worker_Snapshots {
 						// The key was absent when captured — remove it, don't
 						// resurrect an empty value.
 						delete_post_meta( $post_id, $key );
+						// delete_post_meta returns false both on failure (filter
+						// veto, DB error) AND when there was nothing to delete
+						// (already absent = goal met), so verify by existence
+						// rather than the return value. A key still present means
+						// the delete failed and the rollback is a lie.
+						if ( metadata_exists( 'post', $post_id, $key ) ) {
+							return array(
+								'success' => false,
+								'error'   => 'Failed to remove meta key: ' . $key,
+							);
+						}
 						continue;
 					}
 					// Meta writers expect slashed input (WP unslashes before

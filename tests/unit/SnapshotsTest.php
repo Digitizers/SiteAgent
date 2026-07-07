@@ -192,6 +192,22 @@ final class SnapshotsTest extends TestCase {
 		$this->assertSame( 'original', get_post_meta( 12, '_elementor_data', true ) );
 	}
 
+	public function test_meta_restore_reports_failure_when_delete_fails(): void {
+		// Absent-at-capture key that was added later: if the rollback delete is
+		// vetoed/fails, the added meta stays and we must NOT report success
+		// (Codex R2 P2 — sibling of the update read-back check).
+		$this->seedPost( 13 );
+		$snaps = new Aura_Worker_Snapshots();
+		$snap  = $snaps->snapshot_meta( 13, '_elementor_data' ); // absent at capture
+
+		update_post_meta( 13, '_elementor_data', 'added-later' );
+		$GLOBALS['_sa_state']['delete_post_meta_return'][13]['_elementor_data'] = false;
+
+		$restore = $snaps->restore( $snap['snapshot']['id'] );
+		$this->assertFalse( $restore['success'] );
+		$this->assertStringContainsString( 'Failed to remove meta key', $restore['error'] );
+	}
+
 	public function test_meta_snapshot_of_missing_post_fails(): void {
 		$snaps  = new Aura_Worker_Snapshots();
 		$result = $snaps->snapshot_meta( 0, '_elementor_data' );

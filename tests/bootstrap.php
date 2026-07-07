@@ -130,6 +130,10 @@ if ( ! function_exists( 'metadata_exists' ) ) {
 
 if ( ! function_exists( 'delete_post_meta' ) ) {
 	function delete_post_meta( $post_id, $key, $value = '' ) {
+		$override = $GLOBALS['_sa_state']['delete_post_meta_return'][ (int) $post_id ][ $key ] ?? true;
+		if ( false === $override ) {
+			return false; // simulate a filter veto / DB failure: leave meta in place
+		}
 		unset( $GLOBALS['_post_meta'][ (int) $post_id ][ $key ] );
 		return true;
 	}
