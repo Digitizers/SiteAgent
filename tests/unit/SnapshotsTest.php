@@ -384,6 +384,22 @@ final class SnapshotsTest extends TestCase {
 		$this->assertSame( 'class-520', $post->post_title );
 	}
 
+	public function test_posts_snapshot_reports_a_failed_delete_of_a_created_post(): void {
+		// A pre_delete_post short-circuit returns truthy without deleting → restore
+		// must detect the post is still there (verify by existence) and report failure
+		// rather than lie about a clean rollback.
+		$snaps = new Aura_Worker_Snapshots();
+		$snap  = $snaps->snapshot_posts( array( 530 ), '_elementor_global_class_data' ); // 530 absent at capture
+		$this->assertTrue( $snap['success'] );
+
+		$this->seedClassPost( 530, '{"created":true}' );          // the "write" creates it
+		$GLOBALS['_sa_state']['wp_delete_post_noop'][530] = true;  // deletion short-circuited
+
+		$res = $snaps->restore( $snap['snapshot']['id'] );
+		$this->assertFalse( $res['success'], 'A created post that could not be deleted fails the rollback.' );
+		$this->assertNotNull( get_post( 530 ) );
+	}
+
 	public function test_posts_snapshot_rejects_empty_ids(): void {
 		$snaps = new Aura_Worker_Snapshots();
 		$this->assertFalse( $snaps->snapshot_posts( array(), '_x' )['success'] );

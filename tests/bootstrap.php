@@ -669,6 +669,11 @@ if ( ! function_exists( 'wp_delete_post' ) ) {
 			return false;
 		}
 		$post = $GLOBALS['_posts'][ $id ];
+		// Simulate a pre_delete_post short-circuit: return a truthy value WITHOUT
+		// deleting, so the caller must verify removal by existence, not the return.
+		if ( ! empty( $GLOBALS['_sa_state']['wp_delete_post_noop'][ $id ] ) ) {
+			return $post;
+		}
 		unset( $GLOBALS['_posts'][ $id ], $GLOBALS['_post_meta'][ $id ] );
 		return $post;
 	}

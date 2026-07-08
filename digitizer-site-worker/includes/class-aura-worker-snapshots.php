@@ -483,9 +483,15 @@ class Aura_Worker_Snapshots {
 
 					if ( ! $was ) {
 						// Absent at capture. If the write CREATED it, delete to roll
-						// back; if still absent, nothing to do.
-						if ( $exists && ! wp_delete_post( $pid, true ) ) {
-							return array( 'success' => false, 'error' => 'Failed to delete created post: ' . $pid );
+						// back; if still absent, nothing to do. Verify by existence —
+						// wp_delete_post's return is unreliable (a pre_delete_post
+						// filter can short-circuit it to a truthy value without
+						// deleting), so a truthy return doesn't prove removal.
+						if ( $exists ) {
+							wp_delete_post( $pid, true );
+							if ( get_post( $pid ) ) {
+								return array( 'success' => false, 'error' => 'Failed to delete created post: ' . $pid );
+							}
 						}
 						continue;
 					}
