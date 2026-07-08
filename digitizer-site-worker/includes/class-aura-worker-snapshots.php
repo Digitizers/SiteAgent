@@ -483,17 +483,29 @@ class Aura_Worker_Snapshots {
 						continue;
 					}
 
+					$fields = is_array( $info['fields'] ?? null ) ? $info['fields'] : array();
+
 					if ( ! $exists ) {
 						// Present at capture, deleted by the write — recreate it with
 						// its ORIGINAL id (import_id) so id references stay valid.
-						$fields              = is_array( $info['fields'] ?? null ) ? $info['fields'] : array();
-						$fields['import_id'] = $pid;
-						$new                 = wp_insert_post( wp_slash( $fields ), true );
+						$insert              = $fields;
+						$insert['import_id'] = $pid;
+						$new                 = wp_insert_post( wp_slash( $insert ), true );
 						if ( is_wp_error( $new ) ) {
 							return array( 'success' => false, 'error' => 'Failed to recreate post ' . $pid . ': ' . $new->get_error_message() );
 						}
 						if ( (int) $new !== $pid ) {
 							return array( 'success' => false, 'error' => 'Recreated post got id ' . (int) $new . ', expected ' . $pid . ' (id already taken).' );
+						}
+					} elseif ( ! empty( $fields ) ) {
+						// Present at capture AND still present — but the write may have
+						// changed its fields (e.g. a "delete" that trashed it: status →
+						// 'trash', row kept). Revert the captured fields, not just meta.
+						$update       = $fields;
+						$update['ID'] = $pid;
+						$upd          = wp_update_post( wp_slash( $update ), true );
+						if ( is_wp_error( $upd ) ) {
+							return array( 'success' => false, 'error' => 'Failed to restore fields of post ' . $pid . ': ' . $upd->get_error_message() );
 						}
 					}
 

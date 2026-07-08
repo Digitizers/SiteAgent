@@ -360,6 +360,23 @@ final class SnapshotsTest extends TestCase {
 		$this->assertSame( '{"c":1}', get_post_meta( 512, '_elementor_global_class_data', true ), '512 meta restored' );
 	}
 
+	public function test_posts_snapshot_reverts_field_change_on_surviving_post(): void {
+		// A "delete" that TRASHES (status change, row kept) or any field edit must be
+		// reverted — not just meta.
+		$this->seedClassPost( 520, '{"v":1}' );
+		$snaps = new Aura_Worker_Snapshots();
+		$snap  = $snaps->snapshot_posts( array( 520 ), '_elementor_global_class_data' );
+		$this->assertTrue( $snap['success'] );
+
+		wp_update_post( array( 'ID' => 520, 'post_status' => 'trash', 'post_title' => 'renamed' ) );
+		$this->assertSame( 'trash', get_post( 520 )->post_status );
+
+		$this->assertTrue( $snaps->restore( $snap['snapshot']['id'] )['success'] );
+		$post = get_post( 520 );
+		$this->assertSame( 'publish', $post->post_status, 'A trashed/field-changed surviving post has its fields reverted.' );
+		$this->assertSame( 'class-520', $post->post_title );
+	}
+
 	public function test_posts_snapshot_rejects_empty_ids(): void {
 		$snaps = new Aura_Worker_Snapshots();
 		$this->assertFalse( $snaps->snapshot_posts( array(), '_x' )['success'] );
