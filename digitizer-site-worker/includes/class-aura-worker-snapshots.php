@@ -319,14 +319,21 @@ class Aura_Worker_Snapshots {
 			$captured[ $pid ] = array(
 				'existed' => true,
 				'fields'  => array(
-					'post_type'    => $post->post_type,
-					'post_status'  => $post->post_status,
-					'post_title'   => $post->post_title,
-					'post_name'    => $post->post_name,
-					'post_parent'  => (int) $post->post_parent,
-					'post_content' => $post->post_content,
-					'post_excerpt' => $post->post_excerpt,
-					'menu_order'   => (int) $post->menu_order,
+					'post_type'      => $post->post_type,
+					'post_status'    => $post->post_status,
+					'post_title'     => $post->post_title,
+					'post_name'      => $post->post_name,
+					'post_parent'    => (int) $post->post_parent,
+					'post_content'   => $post->post_content,
+					'post_excerpt'   => $post->post_excerpt,
+					'menu_order'     => (int) $post->menu_order,
+					// Preserve identity/scheduling so a recreate is faithful (a fresh
+					// wp_insert_post would otherwise stamp "now" + the current user).
+					'post_author'    => $post->post_author,
+					'post_date'      => $post->post_date,
+					'post_date_gmt'  => $post->post_date_gmt,
+					'comment_status' => $post->comment_status,
+					'ping_status'    => $post->ping_status,
 				),
 				'meta'    => $meta,
 			);

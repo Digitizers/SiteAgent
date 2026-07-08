@@ -276,15 +276,20 @@ final class SnapshotsTest extends TestCase {
 
 	private function seedClassPost( int $id, string $data ): void {
 		$GLOBALS['_posts'][ $id ] = (object) array(
-			'ID'          => $id,
-			'post_type'   => 'e-global-class',
-			'post_status' => 'publish',
-			'post_title'  => 'class-' . $id,
-			'post_name'   => 'class-' . $id,
-			'post_parent' => 0,
-			'post_content' => '',
-			'post_excerpt' => '',
-			'menu_order'  => 0,
+			'ID'             => $id,
+			'post_type'      => 'e-global-class',
+			'post_status'    => 'publish',
+			'post_title'     => 'class-' . $id,
+			'post_name'      => 'class-' . $id,
+			'post_parent'    => 0,
+			'post_content'   => '',
+			'post_excerpt'   => '',
+			'menu_order'     => 0,
+			'post_author'    => 7,
+			'post_date'      => '2026-01-02 03:04:05',
+			'post_date_gmt'  => '2026-01-02 03:04:05',
+			'comment_status' => 'closed',
+			'ping_status'    => 'closed',
 		);
 		update_post_meta( $id, '_elementor_global_class_data', $data );
 	}
@@ -329,6 +334,8 @@ final class SnapshotsTest extends TestCase {
 		$this->assertNotNull( $restored, 'A deleted post is recreated on rollback.' );
 		$this->assertSame( 503, (int) $restored->ID, 'Recreated with its ORIGINAL id (so id references stay valid).' );
 		$this->assertSame( 'e-global-class', $restored->post_type );
+		$this->assertSame( '2026-01-02 03:04:05', $restored->post_date, 'Recreate preserves the original date, not "now".' );
+		$this->assertSame( 7, (int) $restored->post_author, 'Recreate preserves the original author.' );
 		$this->assertSame( '{"orig":true}', get_post_meta( 503, '_elementor_global_class_data', true ) );
 	}
 

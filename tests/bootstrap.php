@@ -643,15 +643,20 @@ if ( ! function_exists( 'wp_insert_post' ) ) {
 			$id = ++$next;
 		}
 		$GLOBALS['_posts'][ $id ] = (object) array(
-			'ID'           => $id,
-			'post_title'   => $args['post_title'] ?? '',
-			'post_name'    => $args['post_name'] ?? '',
-			'post_content' => $args['post_content'] ?? '',
-			'post_excerpt' => $args['post_excerpt'] ?? '',
-			'post_status'  => $args['post_status'] ?? 'draft',
-			'post_type'    => $args['post_type'] ?? 'page',
-			'post_parent'  => (int) ( $args['post_parent'] ?? 0 ),
-			'menu_order'   => (int) ( $args['menu_order'] ?? 0 ),
+			'ID'             => $id,
+			'post_title'     => $args['post_title'] ?? '',
+			'post_name'      => $args['post_name'] ?? '',
+			'post_content'   => $args['post_content'] ?? '',
+			'post_excerpt'   => $args['post_excerpt'] ?? '',
+			'post_status'    => $args['post_status'] ?? 'draft',
+			'post_type'      => $args['post_type'] ?? 'page',
+			'post_parent'    => (int) ( $args['post_parent'] ?? 0 ),
+			'menu_order'     => (int) ( $args['menu_order'] ?? 0 ),
+			'post_author'    => $args['post_author'] ?? 0,
+			'post_date'      => $args['post_date'] ?? '',
+			'post_date_gmt'  => $args['post_date_gmt'] ?? '',
+			'comment_status' => $args['comment_status'] ?? 'open',
+			'ping_status'    => $args['ping_status'] ?? 'open',
 		);
 		return $id;
 	}
