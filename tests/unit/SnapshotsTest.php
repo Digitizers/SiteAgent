@@ -271,4 +271,137 @@ final class SnapshotsTest extends TestCase {
 		$this->assertTrue( $snaps->delete( $id ) );
 		$this->assertCount( 0, $snaps->list_snapshots() );
 	}
+
+	// --- snapshot_posts (multi-post collection: existence + meta) -----------
+
+	private function seedClassPost( int $id, string $data ): void {
+		$GLOBALS['_posts'][ $id ] = (object) array(
+			'ID'             => $id,
+			'post_type'      => 'e-global-class',
+			'post_status'    => 'publish',
+			'post_title'     => 'class-' . $id,
+			'post_name'      => 'class-' . $id,
+			'post_parent'    => 0,
+			'post_content'   => '',
+			'post_excerpt'   => '',
+			'menu_order'     => 0,
+			'post_author'    => 7,
+			'post_date'      => '2026-01-02 03:04:05',
+			'post_date_gmt'  => '2026-01-02 03:04:05',
+			'comment_status' => 'closed',
+			'ping_status'    => 'closed',
+		);
+		update_post_meta( $id, '_elementor_global_class_data', $data );
+	}
+
+	public function test_posts_snapshot_reverts_meta_on_surviving_post(): void {
+		$this->seedClassPost( 501, '{"v":1}' );
+		$snaps = new Aura_Worker_Snapshots();
+
+		$snap = $snaps->snapshot_posts( array( 501 ), '_elementor_global_class_data' );
+		$this->assertTrue( $snap['success'] );
+		$this->assertSame( 'posts', $snap['snapshot']['kind'] );
+
+		update_post_meta( 501, '_elementor_global_class_data', '{"v":2}' );
+		$this->assertTrue( $snaps->restore( $snap['snapshot']['id'] )['success'] );
+		$this->assertSame( '{"v":1}', get_post_meta( 501, '_elementor_global_class_data', true ) );
+	}
+
+	public function test_posts_snapshot_deletes_a_created_post_on_restore(): void {
+		// 502 does NOT exist at capture; the "write" creates it → restore deletes it.
+		$snaps = new Aura_Worker_Snapshots();
+		$snap  = $snaps->snapshot_posts( array( 502 ), '_elementor_global_class_data' );
+		$this->assertTrue( $snap['success'] );
+
+		$this->seedClassPost( 502, '{"created":true}' );
+		$this->assertNotNull( get_post( 502 ) );
+
+		$this->assertTrue( $snaps->restore( $snap['snapshot']['id'] )['success'] );
+		$this->assertNull( get_post( 502 ), 'A post created after the snapshot is deleted on rollback.' );
+	}
+
+	public function test_posts_snapshot_recreates_a_deleted_post_with_same_id(): void {
+		$this->seedClassPost( 503, '{"orig":true}' );
+		$snaps = new Aura_Worker_Snapshots();
+		$snap  = $snaps->snapshot_posts( array( 503 ), '_elementor_global_class_data' );
+		$this->assertTrue( $snap['success'] );
+
+		wp_delete_post( 503, true );
+		$this->assertNull( get_post( 503 ) );
+
+		$this->assertTrue( $snaps->restore( $snap['snapshot']['id'] )['success'] );
+		$restored = get_post( 503 );
+		$this->assertNotNull( $restored, 'A deleted post is recreated on rollback.' );
+		$this->assertSame( 503, (int) $restored->ID, 'Recreated with its ORIGINAL id (so id references stay valid).' );
+		$this->assertSame( 'e-global-class', $restored->post_type );
+		$this->assertSame( '2026-01-02 03:04:05', $restored->post_date, 'Recreate preserves the original date, not "now".' );
+		$this->assertSame( 7, (int) $restored->post_author, 'Recreate preserves the original author.' );
+		$this->assertSame( '{"orig":true}', get_post_meta( 503, '_elementor_global_class_data', true ) );
+	}
+
+	public function test_posts_snapshot_absent_then_absent_is_noop(): void {
+		$snaps = new Aura_Worker_Snapshots();
+		$snap  = $snaps->snapshot_posts( array( 504 ), '_elementor_global_class_data' );
+		$this->assertTrue( $snap['success'] );
+		$this->assertTrue( $snaps->restore( $snap['snapshot']['id'] )['success'] );
+		$this->assertNull( get_post( 504 ) );
+	}
+
+	public function test_posts_snapshot_mixed_set_roundtrip(): void {
+		// 510 exists (meta will change), 511 absent (will be created), 512 exists
+		// (will be deleted). One snapshot, one restore reverts all three.
+		$this->seedClassPost( 510, '{"a":1}' );
+		$this->seedClassPost( 512, '{"c":1}' );
+		$snaps = new Aura_Worker_Snapshots();
+		$snap  = $snaps->snapshot_posts( array( 510, 511, 512 ), '_elementor_global_class_data' );
+		$this->assertTrue( $snap['success'] );
+
+		update_post_meta( 510, '_elementor_global_class_data', '{"a":2}' ); // modified
+		$this->seedClassPost( 511, '{"b":1}' );                            // created
+		wp_delete_post( 512, true );                                        // deleted
+
+		$this->assertTrue( $snaps->restore( $snap['snapshot']['id'] )['success'] );
+		$this->assertSame( '{"a":1}', get_post_meta( 510, '_elementor_global_class_data', true ), '510 meta reverted' );
+		$this->assertNull( get_post( 511 ), '511 (created) deleted' );
+		$this->assertNotNull( get_post( 512 ), '512 (deleted) recreated' );
+		$this->assertSame( '{"c":1}', get_post_meta( 512, '_elementor_global_class_data', true ), '512 meta restored' );
+	}
+
+	public function test_posts_snapshot_reverts_field_change_on_surviving_post(): void {
+		// A "delete" that TRASHES (status change, row kept) or any field edit must be
+		// reverted — not just meta.
+		$this->seedClassPost( 520, '{"v":1}' );
+		$snaps = new Aura_Worker_Snapshots();
+		$snap  = $snaps->snapshot_posts( array( 520 ), '_elementor_global_class_data' );
+		$this->assertTrue( $snap['success'] );
+
+		wp_update_post( array( 'ID' => 520, 'post_status' => 'trash', 'post_title' => 'renamed' ) );
+		$this->assertSame( 'trash', get_post( 520 )->post_status );
+
+		$this->assertTrue( $snaps->restore( $snap['snapshot']['id'] )['success'] );
+		$post = get_post( 520 );
+		$this->assertSame( 'publish', $post->post_status, 'A trashed/field-changed surviving post has its fields reverted.' );
+		$this->assertSame( 'class-520', $post->post_title );
+	}
+
+	public function test_posts_snapshot_reports_a_failed_delete_of_a_created_post(): void {
+		// A pre_delete_post short-circuit returns truthy without deleting → restore
+		// must detect the post is still there (verify by existence) and report failure
+		// rather than lie about a clean rollback.
+		$snaps = new Aura_Worker_Snapshots();
+		$snap  = $snaps->snapshot_posts( array( 530 ), '_elementor_global_class_data' ); // 530 absent at capture
+		$this->assertTrue( $snap['success'] );
+
+		$this->seedClassPost( 530, '{"created":true}' );          // the "write" creates it
+		$GLOBALS['_sa_state']['wp_delete_post_noop'][530] = true;  // deletion short-circuited
+
+		$res = $snaps->restore( $snap['snapshot']['id'] );
+		$this->assertFalse( $res['success'], 'A created post that could not be deleted fails the rollback.' );
+		$this->assertNotNull( get_post( 530 ) );
+	}
+
+	public function test_posts_snapshot_rejects_empty_ids(): void {
+		$snaps = new Aura_Worker_Snapshots();
+		$this->assertFalse( $snaps->snapshot_posts( array(), '_x' )['success'] );
+	}
 }

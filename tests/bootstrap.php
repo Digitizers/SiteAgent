@@ -634,15 +634,48 @@ if ( ! function_exists( 'get_post' ) ) {
 if ( ! function_exists( 'wp_insert_post' ) ) {
 	function wp_insert_post( array $args, bool $wp_error = false ) {
 		static $next = 1000;
-		$id = ++$next;
+		// Honor import_id (as real WP does) when the id is free — used to recreate a
+		// deleted post with its original id.
+		$import = (int) ( $args['import_id'] ?? 0 );
+		if ( $import > 0 && ! isset( $GLOBALS['_posts'][ $import ] ) ) {
+			$id = $import;
+		} else {
+			$id = ++$next;
+		}
 		$GLOBALS['_posts'][ $id ] = (object) array(
-			'ID'           => $id,
-			'post_title'   => $args['post_title'] ?? '',
-			'post_content' => $args['post_content'] ?? '',
-			'post_status'  => $args['post_status'] ?? 'draft',
-			'post_type'    => $args['post_type'] ?? 'page',
+			'ID'             => $id,
+			'post_title'     => $args['post_title'] ?? '',
+			'post_name'      => $args['post_name'] ?? '',
+			'post_content'   => $args['post_content'] ?? '',
+			'post_excerpt'   => $args['post_excerpt'] ?? '',
+			'post_status'    => $args['post_status'] ?? 'draft',
+			'post_type'      => $args['post_type'] ?? 'page',
+			'post_parent'    => (int) ( $args['post_parent'] ?? 0 ),
+			'menu_order'     => (int) ( $args['menu_order'] ?? 0 ),
+			'post_author'    => $args['post_author'] ?? 0,
+			'post_date'      => $args['post_date'] ?? '',
+			'post_date_gmt'  => $args['post_date_gmt'] ?? '',
+			'comment_status' => $args['comment_status'] ?? 'open',
+			'ping_status'    => $args['ping_status'] ?? 'open',
 		);
 		return $id;
+	}
+}
+
+if ( ! function_exists( 'wp_delete_post' ) ) {
+	function wp_delete_post( $post_id, $force_delete = false ) {
+		$id = (int) $post_id;
+		if ( ! isset( $GLOBALS['_posts'][ $id ] ) ) {
+			return false;
+		}
+		$post = $GLOBALS['_posts'][ $id ];
+		// Simulate a pre_delete_post short-circuit: return a truthy value WITHOUT
+		// deleting, so the caller must verify removal by existence, not the return.
+		if ( ! empty( $GLOBALS['_sa_state']['wp_delete_post_noop'][ $id ] ) ) {
+			return $post;
+		}
+		unset( $GLOBALS['_posts'][ $id ], $GLOBALS['_post_meta'][ $id ] );
+		return $post;
 	}
 }
 

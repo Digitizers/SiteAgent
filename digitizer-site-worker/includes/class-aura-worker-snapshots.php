@@ -264,6 +264,123 @@ class Aura_Worker_Snapshots {
 	}
 
 	/**
+	 * Capture a SET of posts (existence + selected meta) so a multi-post write can
+	 * be fully rolled back. On restore this recreates a post the write DELETED —
+	 * with its ORIGINAL id, via `import_id`, so id references elsewhere (e.g. an
+	 * Elementor class_id → post_id map) stay valid — DELETES a post the write
+	 * CREATED, and restores the captured meta on a surviving/recreated post.
+	 *
+	 * Built for Elementor v4 global classes (per-class CPT posts: a create adds a
+	 * post, a delete removes one). The cascade — the affected pages' `_elementor_data`
+	 * that a class delete rewrites — is snapshotted separately by the caller via
+	 * snapshot_meta(); this primitive owns only the class posts themselves.
+	 *
+	 * @param int[]        $post_ids  Post IDs to capture (each may or may not exist).
+	 * @param string|array $meta_keys Meta key(s) to capture per existing post.
+	 * @return array { success: bool, snapshot?: array, error?: string }
+	 */
+	public function snapshot_posts( $post_ids, $meta_keys ) {
+		if ( ! is_array( $post_ids ) || empty( $post_ids ) ) {
+			return array( 'success' => false, 'error' => 'No post ids given to snapshot.' );
+		}
+		if ( is_string( $meta_keys ) ) {
+			$meta_keys = array( $meta_keys );
+		}
+		if ( ! is_array( $meta_keys ) ) {
+			$meta_keys = array();
+		}
+		foreach ( $meta_keys as $k ) {
+			if ( ! is_string( $k ) || '' === $k ) {
+				return array( 'success' => false, 'error' => 'Invalid meta key.' );
+			}
+		}
+
+		$captured = array();
+		foreach ( array_unique( array_map( 'intval', $post_ids ) ) as $pid ) {
+			if ( $pid <= 0 ) {
+				return array( 'success' => false, 'error' => 'Invalid post id.' );
+			}
+			if ( wp_is_post_revision( $pid ) ) {
+				return array( 'success' => false, 'error' => 'Refusing to snapshot a revision/autosave id: ' . $pid );
+			}
+			$post = get_post( $pid );
+			if ( ! $post ) {
+				$captured[ $pid ] = array( 'existed' => false );
+				continue;
+			}
+			$meta = array();
+			foreach ( $meta_keys as $key ) {
+				$existed      = metadata_exists( 'post', $pid, $key );
+				$meta[ $key ] = array(
+					'existed' => $existed,
+					'value'   => $existed ? get_post_meta( $pid, $key, true ) : '',
+				);
+			}
+			$captured[ $pid ] = array(
+				'existed' => true,
+				'fields'  => array(
+					'post_type'      => $post->post_type,
+					'post_status'    => $post->post_status,
+					'post_title'     => $post->post_title,
+					'post_name'      => $post->post_name,
+					'post_parent'    => (int) $post->post_parent,
+					'post_content'   => $post->post_content,
+					'post_excerpt'   => $post->post_excerpt,
+					'menu_order'     => (int) $post->menu_order,
+					// Preserve identity/scheduling so a recreate is faithful (a fresh
+					// wp_insert_post would otherwise stamp "now" + the current user).
+					'post_author'    => $post->post_author,
+					'post_date'      => $post->post_date,
+					'post_date_gmt'  => $post->post_date_gmt,
+					'comment_status' => $post->comment_status,
+					'ping_status'    => $post->ping_status,
+				),
+				'meta'    => $meta,
+			);
+		}
+
+		$record = $this->persist(
+			array(
+				'kind'    => 'posts',
+				'targets' => array_map( 'intval', array_keys( $captured ) ),
+			),
+			serialize( $captured )
+		);
+		if ( false === $record ) {
+			return array( 'success' => false, 'error' => 'Failed to persist snapshot (disk full or unwritable).' );
+		}
+		return array( 'success' => true, 'snapshot' => $record );
+	}
+
+	/**
+	 * Restore a captured `{ key => { existed, value } }` meta map onto a post —
+	 * deleting keys absent at capture, re-slashing and writing the rest, verifying
+	 * each (both delete_post_meta and update_post_meta return false ambiguously).
+	 * Shared by the `meta` and `posts` restore kinds.
+	 *
+	 * @param int   $post_id  Target post id (must already exist).
+	 * @param array $captured Captured meta map.
+	 * @return array { success: bool, error?: string }
+	 */
+	private function restore_meta_map( $post_id, $captured ) {
+		foreach ( $captured as $key => $info ) {
+			$key = (string) $key;
+			if ( empty( $info['existed'] ) ) {
+				delete_post_meta( $post_id, $key );
+				if ( metadata_exists( 'post', $post_id, $key ) ) {
+					return array( 'success' => false, 'error' => 'Failed to remove meta key: ' . $key );
+				}
+				continue;
+			}
+			$ok = update_post_meta( $post_id, $key, wp_slash( $info['value'] ) );
+			if ( false === $ok && get_post_meta( $post_id, $key, true ) !== $info['value'] ) {
+				return array( 'success' => false, 'error' => 'Failed to restore meta key: ' . $key );
+			}
+		}
+		return array( 'success' => true );
+	}
+
+	/**
 	 * Load a snapshot record by id.
 	 *
 	 * @param string $id Snapshot id.
@@ -346,41 +463,69 @@ class Aura_Worker_Snapshots {
 				if ( ! get_post( $post_id ) ) {
 					return array( 'success' => false, 'error' => 'Target post no longer exists; cannot restore.' );
 				}
-				foreach ( $captured as $key => $info ) {
-					$key = (string) $key;
-					if ( empty( $info['existed'] ) ) {
-						// The key was absent when captured — remove it, don't
-						// resurrect an empty value.
-						delete_post_meta( $post_id, $key );
-						// delete_post_meta returns false both on failure (filter
-						// veto, DB error) AND when there was nothing to delete
-						// (already absent = goal met), so verify by existence
-						// rather than the return value. A key still present means
-						// the delete failed and the rollback is a lie.
-						if ( metadata_exists( 'post', $post_id, $key ) ) {
-							return array(
-								'success' => false,
-								'error'   => 'Failed to remove meta key: ' . $key,
-							);
+				// Delete keys absent at capture, re-slash + write the rest, verify each
+				// (both delete_post_meta and update_post_meta return false ambiguously).
+				return $this->restore_meta_map( $post_id, $captured );
+
+			case 'posts':
+				$payload_path = $record['payload_path'] ?? '';
+				if ( ! $payload_path || ! file_exists( $payload_path ) ) {
+					return array( 'success' => false, 'error' => 'Snapshot payload missing.' );
+				}
+				$captured = unserialize( file_get_contents( $payload_path ) );
+				if ( ! is_array( $captured ) ) {
+					return array( 'success' => false, 'error' => 'Snapshot payload corrupt.' );
+				}
+				foreach ( $captured as $pid => $info ) {
+					$pid    = (int) $pid;
+					$exists = (bool) get_post( $pid );
+					$was    = ! empty( $info['existed'] );
+
+					if ( ! $was ) {
+						// Absent at capture. If the write CREATED it, delete to roll
+						// back; if still absent, nothing to do. Verify by existence —
+						// wp_delete_post's return is unreliable (a pre_delete_post
+						// filter can short-circuit it to a truthy value without
+						// deleting), so a truthy return doesn't prove removal.
+						if ( $exists ) {
+							wp_delete_post( $pid, true );
+							if ( get_post( $pid ) ) {
+								return array( 'success' => false, 'error' => 'Failed to delete created post: ' . $pid );
+							}
 						}
 						continue;
 					}
-					// Meta writers expect slashed input (WP unslashes before
-					// storing); get_post_meta returned unslashed, so re-slash.
-					$ok = update_post_meta( $post_id, $key, wp_slash( $info['value'] ) );
-					if ( false === $ok ) {
-						// update_post_meta returns false both on a real failure
-						// (DB error, filter veto) AND when the stored value already
-						// equals the target (a no-op). Only the former is a failed
-						// rollback — disambiguate by reading the value back. If it
-						// does not match, the value stays clobbered, so we must NOT
-						// report a successful restore.
-						if ( get_post_meta( $post_id, $key, true ) !== $info['value'] ) {
-							return array(
-								'success' => false,
-								'error'   => 'Failed to restore meta key: ' . $key,
-							);
+
+					$fields = is_array( $info['fields'] ?? null ) ? $info['fields'] : array();
+
+					if ( ! $exists ) {
+						// Present at capture, deleted by the write — recreate it with
+						// its ORIGINAL id (import_id) so id references stay valid.
+						$insert              = $fields;
+						$insert['import_id'] = $pid;
+						$new                 = wp_insert_post( wp_slash( $insert ), true );
+						if ( is_wp_error( $new ) ) {
+							return array( 'success' => false, 'error' => 'Failed to recreate post ' . $pid . ': ' . $new->get_error_message() );
 						}
+						if ( (int) $new !== $pid ) {
+							return array( 'success' => false, 'error' => 'Recreated post got id ' . (int) $new . ', expected ' . $pid . ' (id already taken).' );
+						}
+					} elseif ( ! empty( $fields ) ) {
+						// Present at capture AND still present — but the write may have
+						// changed its fields (e.g. a "delete" that trashed it: status →
+						// 'trash', row kept). Revert the captured fields, not just meta.
+						$update       = $fields;
+						$update['ID'] = $pid;
+						$upd          = wp_update_post( wp_slash( $update ), true );
+						if ( is_wp_error( $upd ) ) {
+							return array( 'success' => false, 'error' => 'Failed to restore fields of post ' . $pid . ': ' . $upd->get_error_message() );
+						}
+					}
+
+					$meta = is_array( $info['meta'] ?? null ) ? $info['meta'] : array();
+					$res  = $this->restore_meta_map( $pid, $meta );
+					if ( empty( $res['success'] ) ) {
+						return $res;
 					}
 				}
 				return array( 'success' => true );
