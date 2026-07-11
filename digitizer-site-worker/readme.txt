@@ -1,6 +1,6 @@
 === SiteAgent for Aura ===
 Contributors: benkalsky
-Tags: wordpress management, remote updates, site monitoring, maintenance, dashboard
+Tags: ai, automation, maintenance, updates, wordpress management
 Requires at least: 6.2
 Tested up to: 7.0
 Requires PHP: 7.4
@@ -8,13 +8,15 @@ Stable tag: 2.7.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
-Connect your WordPress site to the Aura dashboard for remote monitoring, plugin & theme updates, and maintenance — all from one place.
+Let AI update and maintain WordPress safely — every change is approval-gated and audited, and safe batch updates auto-roll back if a site breaks.
 
 == Description ==
 
-**SiteAgent** is the bridge between your WordPress sites and the [Aura infrastructure dashboard](https://my-aura.app) — a unified control center for teams managing multiple WordPress sites alongside servers, CDN, and DNS.
+**SiteAgent** turns every WordPress site into one an AI agent can safely operate — update, maintain, audit, and fix. Every change it makes is gated behind human approval and a full audit trail, and the risky ones — updates, plugin changes, block edits — are snapshotted so they can be rolled back. It's the on-site half of [Aura](https://my-aura.app), the governed control room agencies use to run whole fleets of client sites alongside their servers, CDN, and DNS.
 
-Install this plugin on any WordPress site to unlock remote management capabilities directly from Aura — no SSH, no wp-admin juggling, no manual logins.
+Plugin and core updates are the riskiest thing you do on a live client site. SiteAgent makes them safe: batch updates run behind health checks and **roll back automatically** if the site breaks, every plugin is zip-snapshotted before it changes, and an agent can never silently touch production — mutating actions wait for a human to approve them in Aura. Think of it as the undo button for AI on your clients' sites.
+
+Install this plugin on any WordPress site to connect it to Aura — no SSH, no wp-admin juggling, no manual logins.
 
 = What You Can Do =
 
