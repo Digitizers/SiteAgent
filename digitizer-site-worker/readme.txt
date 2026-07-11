@@ -8,7 +8,7 @@ Stable tag: 2.7.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
-Let AI update and maintain WordPress safely — every change is approval-gated and audited, and failed updates roll back automatically.
+Let AI update and maintain WordPress safely — every change is approval-gated and audited, and safe batch updates auto-roll back if a site breaks.
 
 == Description ==
 
