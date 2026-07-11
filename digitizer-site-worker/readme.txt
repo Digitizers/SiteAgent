@@ -4,7 +4,7 @@ Tags: ai, automation, maintenance, updates, wordpress management
 Requires at least: 6.2
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 2.7.1
+Stable tag: 2.8.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -203,6 +203,18 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 
 == Changelog ==
 
+= 2.8.0 =
+* Internal: Snapshot-engine primitives for reversible meta and multi-post writes —
+  `snapshot_meta` (post-meta capture with a `meta` restore kind) and
+  `snapshot_posts` (multi-post capture with a `posts` restore kind that recreates
+  a deleted post under its original id). These are groundwork for upcoming
+  governed Elementor and bulk-post editing; they are not yet exposed over the
+  remote snapshot API in this release (which still handles `file` and `option`).
+* Fix: SEO-meta writes now return a distinct "Failed to write SEO meta" error when
+  a write fails despite input, instead of the misleading "Nothing to update".
+* Docs: Listing repositioned around governed, reversible AI, with the approval and
+  rollback guarantees scoped to the paths that actually enforce and snapshot.
+
 = 2.7.1 =
 * Self-update integrity: when the Aura gateway supplies the release's SHA-256,
   SiteAgent now downloads the zip, verifies its bytes against that digest, and
@@ -350,6 +362,11 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 * Zero frontend performance impact.
 
 == Upgrade Notice ==
+
+= 2.8.0 =
+Internal snapshot-engine primitives (groundwork for reversible Elementor and
+bulk-post editing, not yet exposed over the API) and a clearer SEO-meta
+write-failure error. No action required; existing connections keep working.
 
 = 2.3.0 =
 Token-only connection: the Aura Site Token alone now authorizes site management. Existing connections keep working — no action required.
