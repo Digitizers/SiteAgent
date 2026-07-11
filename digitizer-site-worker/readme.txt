@@ -204,14 +204,12 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 == Changelog ==
 
 = 2.8.0 =
-* Feature: Post-meta snapshots — `snapshot_meta` captures selected post-meta and a
-  new `meta` restore kind rolls it back, so single-valued meta writes (such as
-  Elementor's `_elementor_data`, page settings, and kit globals) can be reverted.
-* Feature: Multi-post collection snapshots — `snapshot_posts` captures a set of
-  posts before a write (existence, recreate fields, selected meta) with a `posts`
-  restore kind that restores meta, recreates a post the write deleted with its
-  original id (via `import_id`, so cross-post id references stay valid), and
-  removes a post the write created.
+* Internal: Snapshot-engine primitives for reversible meta and multi-post writes —
+  `snapshot_meta` (post-meta capture with a `meta` restore kind) and
+  `snapshot_posts` (multi-post capture with a `posts` restore kind that recreates
+  a deleted post under its original id). These are groundwork for upcoming
+  governed Elementor and bulk-post editing; they are not yet exposed over the
+  remote snapshot API in this release (which still handles `file` and `option`).
 * Fix: SEO-meta writes now return a distinct "Failed to write SEO meta" error when
   a write fails despite input, instead of the misleading "Nothing to update".
 * Docs: Listing repositioned around governed, reversible AI, with the approval and
@@ -366,9 +364,9 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 == Upgrade Notice ==
 
 = 2.8.0 =
-Adds post-meta and multi-post snapshot/restore primitives (reversible Elementor and
-bulk-post writes) and a clearer SEO-meta write-failure error. No action required;
-existing connections keep working.
+Internal snapshot-engine primitives (groundwork for reversible Elementor and
+bulk-post editing, not yet exposed over the API) and a clearer SEO-meta
+write-failure error. No action required; existing connections keep working.
 
 = 2.3.0 =
 Token-only connection: the Aura Site Token alone now authorizes site management. Existing connections keep working — no action required.
