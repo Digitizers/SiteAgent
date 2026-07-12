@@ -4,7 +4,7 @@ Tags: ai, automation, maintenance, updates, wordpress management
 Requires at least: 6.2
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 2.8.0
+Stable tag: 2.8.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -227,6 +227,15 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 
 == Changelog ==
 
+= 2.8.1 =
+* Docs: the listing now describes the optional **SiteAgent Power Pack** companion
+  plugin — the governed power tools (file read/write, read-only SQL, allowlisted
+  WP-CLI, PHP execution) that are deliberately NOT part of this WordPress.org
+  build. It states plainly that the write and code tools stay disabled until the
+  site owner arms each one in wp-config.php, that the site must be connected to
+  Aura first (that provisions the approval key which makes grant enforcement
+  active), and that the model is governance — not a sandbox. No code changes.
+
 = 2.8.0 =
 * Internal: Snapshot-engine primitives for reversible meta and multi-post writes —
   `snapshot_meta` (post-meta capture with a `meta` restore kind) and
@@ -386,6 +395,10 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 * Zero frontend performance impact.
 
 == Upgrade Notice ==
+
+= 2.8.1 =
+Documentation only — the listing now describes the optional Power Pack companion
+plugin and its governance model. No code changes; no action required.
 
 = 2.8.0 =
 Internal snapshot-engine primitives (groundwork for reversible Elementor and
