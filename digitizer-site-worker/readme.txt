@@ -99,6 +99,30 @@ Write tools (approval-gated):
 
 Tools are classified by verb so the Aura Fleet gateway applies the right risk and approval policy automatically.
 
+= Pro: the SiteAgent Power Pack =
+
+Everything above is free and ships in this plugin. Agencies that need an agent to *fix* a site — not just report on it — can add the **SiteAgent Power Pack**, a separate companion plugin that registers higher-capability tools through this plugin's own tool registry.
+
+It is **not** included in this download and is **not** distributed on WordPress.org — the tools it adds execute code, so they don't belong in a hosted repository. It comes with the Aura **Agency** and **Studio** plans, or as **SiteAgent Pro**.
+
+What it adds:
+
+* `read_file` — read a text file from inside wp-content (jailed; refuses wp-config.php).
+* `db_query` — a single read-only SQL statement (SELECT / SHOW / EXPLAIN), row-capped.
+* `write_file` — write a file inside wp-content, snapshot-first so it can be rolled back.
+* `run_wp_cli` — run an allowlisted WP-CLI command, with no shell and no metacharacters.
+* `execute_php` — run a PHP snippet against the full WordPress API.
+
+These are governed harder than anything in the free set, deliberately:
+
+1. **Off until you arm them.** The write and code tools do nothing until the site owner sets an explicit constant in `wp-config.php` for each one. Installing the Power Pack alone enables no writes and no code execution.
+2. **Human approval, cryptographically enforced.** Once the site holds Aura's approval key (provisioned when you connect the site), each of these calls requires a single-use, signed grant bound to that exact tool and its exact parameters — one only the Aura dashboard can mint, after a human approves the action. A leaked Site Token cannot run them. (Until a site has that key, the gate is dormant — so connect the site from Aura before arming anything.)
+3. **Reversible where it can be.** File writes are snapshotted first, so there's a previous state to restore.
+
+The safety model is governance, not a sandbox: `execute_php` is powerful by design. The controls are the constant you set, the human who approves the call, and the audit trail — not a promise that arbitrary code is safe.
+
+Learn more at [my-aura.app/siteagent](https://my-aura.app/siteagent).
+
 = About Aura =
 
 Aura is a full-stack operations dashboard by [Digitizer](https://digitizer.studio) that brings servers, applications, DNS zones, and CDN pull zones from Cloudways, Hostinger VPS, Cloudflare, and Bunny.net into a single unified interface.
