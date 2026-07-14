@@ -84,9 +84,10 @@ class Aura_Tool_Clear_Caches extends Aura_Tool_Base {
 			$cleared[] = 'autoptimize';
 		}
 
-		// LiteSpeed Cache (no-op if the plugin isn't active).
+		// LiteSpeed Cache (no-op if the plugin isn't active). `litespeed_purge_all`
+		// is LiteSpeed's own documented purge hook, so it is deliberately unprefixed.
 		if ( has_action( 'litespeed_purge_all' ) ) {
-			do_action( 'litespeed_purge_all' );
+			do_action( 'litespeed_purge_all' ); // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound
 			$cleared[] = 'litespeed_cache';
 		}
 

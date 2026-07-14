@@ -74,12 +74,15 @@ class Aura_Tool_Cleanup_Transients extends Aura_Tool_Base {
 	 * @return int
 	 */
 	private function count_expired( $wpdb ) {
+		// Deliberate uncached direct call: expired transient rows have no core
+		// lookup API, and a cached count would misreport what cleanup will remove.
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
 		return (int) $wpdb->get_var(
 			$wpdb->prepare(
 				"SELECT COUNT(*) FROM {$wpdb->options} WHERE option_name LIKE %s AND option_value < %d",
 				$wpdb->esc_like( '_transient_timeout_' ) . '%',
 				time()
 			)
-		); // phpcs:ignore WordPress.DB
+		);
 	}
 }

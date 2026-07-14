@@ -52,6 +52,12 @@ class Aura_Worker_Abilities {
 	 * later hook — is too late: every tool would be silently dropped and the
 	 * MCP adapter would discover zero SiteAgent tools. A `description` is also
 	 * required by wp_register_ability_category().
+	 *
+	 * The Abilities API only exists on WP 6.9+ (or via the feature plugin), while
+	 * SiteAgent still supports 6.2 — hence the function_exists() guard. On older
+	 * cores this is a no-op and the plugin runs on its own REST namespace instead.
+	 * Plugin Check flags the call as incompatible with "Requires at least: 6.2";
+	 * it does not evaluate the guard, so that report is a false positive.
 	 */
 	public function register_category() {
 		if ( ! function_exists( 'wp_register_ability_category' ) ) {
@@ -69,7 +75,8 @@ class Aura_Worker_Abilities {
 
 	/**
 	 * Register every SiteAgent tool as a WordPress ability.
-	 * Hooked on `wp_abilities_api_init`; a no-op when the API is absent.
+	 * Hooked on `wp_abilities_api_init`; a no-op when the API is absent (WP < 6.9
+	 * without the feature plugin) — see register_category() on the version guard.
 	 * The category is registered separately on `wp_abilities_api_categories_init`.
 	 */
 	public function register() {
