@@ -16,8 +16,8 @@
         }
     },
     "scripts": {
-        "lint": "phpcs --warning-severity=0",
-        "lint:all": "phpcs",
+        "lint": "phpcs --runtime-set ignore_warnings_on_exit 1",
+        "lint:strict": "phpcs",
         "lint:fix": "phpcbf",
         "test": "phpunit"
     }

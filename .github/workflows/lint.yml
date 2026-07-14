@@ -38,11 +38,15 @@ jobs:
       - name: Install dependencies
         run: composer install --no-interaction --prefer-dist --no-progress
 
-      # Fails the build on ERRORS only. Warnings still print, so the known gaps
+      # Fails the build on ERRORS only. `ignore_warnings_on_exit` keeps warnings
+      # in the report and in the PR annotations while exiting 0 on them — unlike
+      # `--warning-severity=0`, which does not "not block" on warnings, it
+      # suppresses them outright (the docs equate it to `-n`). The known gaps
       # (WP_Filesystem in the snapshot engine, serialize() in the rollback
-      # payloads) stay visible without blocking unrelated work on them.
+      # payloads) are meant to stay visible; silencing them would defeat the
+      # point of reporting rather than suppressing them.
       - name: Run PHPCS
-        run: vendor/bin/phpcs --report-full --report-checkstyle=./phpcs-report.xml --warning-severity=0
+        run: vendor/bin/phpcs --report-full --report-checkstyle=./phpcs-report.xml --runtime-set ignore_warnings_on_exit 1
 
       - name: Annotate PR with PHPCS results
         if: ${{ always() }}
