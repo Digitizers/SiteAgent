@@ -48,9 +48,13 @@ jobs:
       - name: Run PHPCS
         run: vendor/bin/phpcs --report-full --report-checkstyle=./phpcs-report.xml --runtime-set ignore_warnings_on_exit 1
 
+      # `--graceful-warnings` is required, not cosmetic: cs2pr exits 1 on *any*
+      # message by default, warnings included. Without it the job fails on the
+      # very warnings the step above deliberately lets through, which would put
+      # the gate straight back to red-on-day-one.
       - name: Annotate PR with PHPCS results
         if: ${{ always() }}
-        run: cs2pr ./phpcs-report.xml
+        run: cs2pr --graceful-warnings ./phpcs-report.xml
 
   plugin-check:
     name: Plugin Check
