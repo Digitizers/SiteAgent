@@ -1,0 +1,71 @@
+name: Lint
+
+# Two gates that PHPUnit cannot cover:
+#
+#   phpcs        — correctness/security sniffs (see phpcs.xml.dist for why it is
+#                  a subset and not the full WordPress standard).
+#   plugin-check — the same tool WordPress.org runs against a submission. This
+#                  repo deploys straight to the WP.org SVN on every published
+#                  release, so without this job nothing stands between a merge
+#                  and the public plugin directory except the unit suite.
+#
+# Both run on PRs, before the merge that would ship them.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  phpcs:
+    name: PHPCS
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.2"
+          coverage: none
+          tools: cs2pr
+
+      - name: Install dependencies
+        run: composer install --no-interaction --prefer-dist --no-progress
+
+      # Fails the build on ERRORS only. Warnings still print, so the known gaps
+      # (WP_Filesystem in the snapshot engine, serialize() in the rollback
+      # payloads) stay visible without blocking unrelated work on them.
+      - name: Run PHPCS
+        run: vendor/bin/phpcs --report-full --report-checkstyle=./phpcs-report.xml --warning-severity=0
+
+      - name: Annotate PR with PHPCS results
+        if: ${{ always() }}
+        run: cs2pr ./phpcs-report.xml
+
+  plugin-check:
+    name: Plugin Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Plugin Check
+        uses: wordpress/plugin-check-action@v1
+        with:
+          build-dir: ./digitizer-site-worker
+          # `wp_function_not_compatible_with_requires_wp` is a false positive here.
+          # The plugin calls wp_autoload_values_to_autoload() (WP 6.6) and
+          # wp_register_ability*() (WP 6.9) behind function_exists() guards with
+          # working fallbacks, so it degrades cleanly on its declared floor of
+          # WP 6.2. Plugin Check does not evaluate the guards and reports the
+          # calls as hard errors regardless. Ignoring the code keeps the gate
+          # meaningful; dropping WP 6.2 support to satisfy a static check would
+          # cost real users. Revisit if the floor ever moves to 6.9.
+          ignore-codes: |
+            wp_function_not_compatible_with_requires_wp
