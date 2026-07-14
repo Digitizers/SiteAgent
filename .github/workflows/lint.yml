@@ -1,0 +1,79 @@
+name: Lint
+
+# Two gates that PHPUnit cannot cover:
+#
+#   phpcs        — correctness/security sniffs (see phpcs.xml.dist for why it is
+#                  a subset and not the full WordPress standard).
+#   plugin-check — the same tool WordPress.org runs against a submission. This
+#                  repo deploys straight to the WP.org SVN on every published
+#                  release, so without this job nothing stands between a merge
+#                  and the public plugin directory except the unit suite.
+#
+# Both run on PRs, before the merge that would ship them.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  phpcs:
+    name: PHPCS
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.2"
+          coverage: none
+          tools: cs2pr
+
+      - name: Install dependencies
+        run: composer install --no-interaction --prefer-dist --no-progress
+
+      # Fails the build on ERRORS only. `ignore_warnings_on_exit` keeps warnings
+      # in the report and in the PR annotations while exiting 0 on them — unlike
+      # `--warning-severity=0`, which does not "not block" on warnings, it
+      # suppresses them outright (the docs equate it to `-n`). The known gaps
+      # (WP_Filesystem in the snapshot engine, serialize() in the rollback
+      # payloads) are meant to stay visible; silencing them would defeat the
+      # point of reporting rather than suppressing them.
+      - name: Run PHPCS
+        run: vendor/bin/phpcs --report-full --report-checkstyle=./phpcs-report.xml --runtime-set ignore_warnings_on_exit 1
+
+      # `--graceful-warnings` is required, not cosmetic: cs2pr exits 1 on *any*
+      # message by default, warnings included. Without it the job fails on the
+      # very warnings the step above deliberately lets through, which would put
+      # the gate straight back to red-on-day-one.
+      - name: Annotate PR with PHPCS results
+        if: ${{ always() }}
+        run: cs2pr --graceful-warnings ./phpcs-report.xml
+
+  plugin-check:
+    name: Plugin Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Plugin Check
+        uses: wordpress/plugin-check-action@v1
+        with:
+          build-dir: ./digitizer-site-worker
+          # `wp_function_not_compatible_with_requires_wp` is a false positive here.
+          # The plugin calls wp_autoload_values_to_autoload() (WP 6.6) and
+          # wp_register_ability*() (WP 6.9) behind function_exists() guards with
+          # working fallbacks, so it degrades cleanly on its declared floor of
+          # WP 6.2. Plugin Check does not evaluate the guards and reports the
+          # calls as hard errors regardless. Ignoring the code keeps the gate
+          # meaningful; dropping WP 6.2 support to satisfy a static check would
+          # cost real users. Revisit if the floor ever moves to 6.9.
+          ignore-codes: |
+            wp_function_not_compatible_with_requires_wp

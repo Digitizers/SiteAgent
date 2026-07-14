@@ -1,0 +1,68 @@
+<?xml version="1.0"?>
+<ruleset name="SiteAgent">
+	<description>
+		Correctness and security sniffs for the SiteAgent plugin.
+
+		This is deliberately NOT the full WordPress standard. The full standard
+		reports ~400 style errors against this codebase (Yoda conditions, long
+		array syntax, docblock formatting) — none of which can produce a bug. A
+		gate that is red on day one is a gate everyone learns to ignore, so this
+		ruleset selects only the sniffs that catch things that actually break:
+		unsafe SQL, unescaped output, unvalidated input, discouraged core APIs,
+		and globals leaking out of the plugin's prefix.
+
+		The suppressions in the codebase are load-bearing and must stay accurate:
+		a `phpcs:ignore` has to sit on the line the sniff reports, not on the
+		closing paren of the call. This gate is what proves they still do.
+	</description>
+
+	<file>digitizer-site-worker</file>
+	<exclude-pattern>*/vendor/*</exclude-pattern>
+	<exclude-pattern>*/node_modules/*</exclude-pattern>
+
+	<arg name="extensions" value="php"/>
+	<arg name="colors"/>
+	<arg value="sp"/>
+
+	<!-- Match the plugin's own floor (readme.txt: Requires PHP 7.4). -->
+	<config name="testVersion" value="7.4-"/>
+	<config name="minimum_wp_version" value="6.2"/>
+
+	<!-- SQL: unprepared queries, bad placeholders, uncached direct calls. -->
+	<rule ref="WordPress.DB"/>
+
+	<!-- Security: output escaping, input validation, nonce checks. -->
+	<rule ref="WordPress.Security"/>
+
+	<!-- Core APIs that have a WordPress equivalent (e.g. unlink -> wp_delete_file). -->
+	<rule ref="WordPress.WP.AlternativeFunctions"/>
+	<rule ref="WordPress.WP.GlobalVariablesOverride"/>
+	<rule ref="WordPress.WP.DeprecatedFunctions"/>
+
+	<!-- PHP footguns: silenced errors, debug functions left in, unserialize. -->
+	<rule ref="WordPress.PHP.NoSilencedErrors"/>
+	<rule ref="WordPress.PHP.DevelopmentFunctions"/>
+	<rule ref="WordPress.PHP.DiscouragedPHPFunctions"/>
+
+	<!-- Everything global this plugin declares must carry its prefix. -->
+	<rule ref="WordPress.NamingConventions.PrefixAllGlobals">
+		<properties>
+			<property name="prefixes" type="array">
+				<element value="aura"/>
+				<element value="Aura"/>
+				<element value="AURA"/>
+				<element value="digitizer_site_worker"/>
+				<element value="DIGITIZER_SITE_WORKER"/>
+			</property>
+		</properties>
+	</rule>
+
+	<!--
+		The snapshot/rollback engine reads and writes its own files with plain
+		PHP calls rather than WP_Filesystem. That is a real portability gap on
+		FTP-based hosts, but migrating the restore path is a change with its own
+		blast radius — it is tracked separately, not suppressed. Warnings here
+		stay visible; the gate below fails on errors only, so this reports
+		without blocking.
+	-->
+</ruleset>
