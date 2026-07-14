@@ -113,16 +113,23 @@ class Aura_Tool_Perf_Check extends Aura_Tool_Base {
 		// 5. Autoload weight. WP 6.6+ stores several "autoload on" values
 		// (yes, on, auto-on, auto), so build the IN clause from core's list
 		// instead of hard-coding 'yes' (which would under-report on new sites).
+		// Guarded by function_exists because the plugin still supports WP 6.2.
+		//
+		// Both queries below are deliberate uncached direct calls: a perf check
+		// reports the database's state right now, and neither the autoload sum nor
+		// the expired-transient count has a core API. The `IN (...)` list is %s
+		// placeholders built from a counted array and passed to prepare().
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare
 		$autoload_values = function_exists( 'wp_autoload_values_to_autoload' )
 			? wp_autoload_values_to_autoload()
 			: array( 'yes' );
 		$placeholders    = implode( ', ', array_fill( 0, count( $autoload_values ), '%s' ) );
 		$autoload_bytes  = (int) $wpdb->get_var(
 			$wpdb->prepare(
-				"SELECT SUM(LENGTH(option_value)) FROM {$wpdb->options} WHERE autoload IN ($placeholders)", // phpcs:ignore WordPress.DB.PreparedSQL
+				"SELECT SUM(LENGTH(option_value)) FROM {$wpdb->options} WHERE autoload IN ($placeholders)",
 				$autoload_values
 			)
-		); // phpcs:ignore WordPress.DB
+		);
 		$autoload_mb    = $autoload_bytes / 1048576;
 		$findings[]     = array(
 			'check'   => 'autoload_weight',
@@ -155,7 +162,8 @@ class Aura_Tool_Perf_Check extends Aura_Tool_Base {
 				$wpdb->esc_like( '_transient_timeout_' ) . '%',
 				time()
 			)
-		); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+		);
+		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare
 		$findings[] = array(
 			'check'   => 'expired_transients',
 			'status'  => $expired > 100 ? 'warning' : 'ok',

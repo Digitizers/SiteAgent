@@ -412,10 +412,10 @@ Token-only connection: the Aura Site Token alone now authorizes site management.
 Fixes one-click "Connect to Aura": the magic-link onboarding now targets the Aura app host (`app.my-aura.app`) instead of the marketing domain, so connect works out of the box. Sites that set the `AURA_DASHBOARD_URL` constant are unaffected.
 
 = 2.2.3 =
-Accuracy fixes for the auditor tools: `set_seo_meta` now refreshes Yoast's cache so SEO changes show immediately, `perf_check` counts all WP 6.6+ autoload values, `scan_broken_links` reports true totals, `scan_seo` scores missing excerpts, and `scan_a11y` checks the rendered page language. No changes to your site's content.
+Accuracy fixes for the auditor tools: `set_seo_meta` refreshes Yoast's cache, `perf_check` counts all WP 6.6+ autoload values, `scan_broken_links` reports true totals, `scan_seo` scores missing excerpts, and `scan_a11y` checks page language. No content changes.
 
 = 2.2.2 =
-Adds on-site SEO-meta tools (`get_seo_meta` / `set_seo_meta`) for Rank Math, Yoast, and SEOPress — read and update a page's SEO title, description, and focus keyword across your fleet, even on sites where a WAF blocks the SEO plugin's REST endpoint. Writes are approval-gated through Aura.
+Adds on-site SEO-meta tools (`get_seo_meta` / `set_seo_meta`) for Rank Math, Yoast, and SEOPress — read and update a page's SEO title, description, and focus keyword, even where a WAF blocks the SEO plugin's REST endpoint. Writes are approval-gated through Aura.
 
 = 2.2.1 =
 Adds two read-only auditor tools — `perf_check` and `scan_broken_links` — for performance and link triage across your fleet. No changes to your site; `scan_broken_links` performs no outbound HTTP.

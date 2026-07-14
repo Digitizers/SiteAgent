@@ -191,7 +191,7 @@ class Aura_Worker_Updater {
 			}
 			$verified = $this->verify_zip_integrity( $tmp, $expected_sha256 );
 			if ( is_wp_error( $verified ) ) {
-				@unlink( $tmp ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+				wp_delete_file( $tmp );
 				return array(
 					'success' => false,
 					'error'   => $verified->get_error_message(),
@@ -204,7 +204,7 @@ class Aura_Worker_Updater {
 		$result = $upgrader->install( $install_source, array( 'overwrite_package' => true ) );
 
 		if ( '' !== $tmp && file_exists( $tmp ) ) {
-			@unlink( $tmp ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+			wp_delete_file( $tmp );
 		}
 
 		if ( is_wp_error( $result ) ) {

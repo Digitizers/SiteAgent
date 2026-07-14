@@ -89,8 +89,11 @@ class Aura_Tool_Scan_Seo extends Aura_Tool_Base {
 			'message' => '' !== $title ? 'Site title is set.' : 'Site title is empty.',
 		);
 
-		// 4. XML sitemap (WordPress core or a known SEO plugin).
-		$core_sitemap = function_exists( 'wp_sitemaps_get_server' ) && (bool) apply_filters( 'wp_sitemaps_enabled', true );
+		// 4. XML sitemap (WordPress core or a known SEO plugin). Read the state via
+		// the sitemaps server rather than re-applying `wp_sitemaps_enabled` — firing
+		// another component's filter to read it can trip filters that count calls.
+		$sitemaps     = function_exists( 'wp_sitemaps_get_server' ) ? wp_sitemaps_get_server() : null;
+		$core_sitemap = $sitemaps instanceof WP_Sitemaps && $sitemaps->sitemaps_enabled();
 		$seo_plugin   = defined( 'WPSEO_VERSION' ) || defined( 'RANK_MATH_VERSION' ) || defined( 'SEOPRESS_VERSION' ) || class_exists( 'All_in_One_SEO_Pack' );
 		$has_sitemap  = $core_sitemap || $seo_plugin;
 		$findings[]   = array(
