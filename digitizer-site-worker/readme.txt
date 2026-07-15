@@ -4,7 +4,7 @@ Tags: ai, automation, maintenance, updates, wordpress management
 Requires at least: 6.2
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 2.8.1
+Stable tag: 2.8.2
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -227,6 +227,20 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 
 == Changelog ==
 
+= 2.8.2 =
+* Security (hardening): the snapshot/rollback engine now reads its stored
+  payloads back with `unserialize()` restricted to `allowed_classes => false`,
+  so a tampered payload file can no longer instantiate arbitrary PHP objects on
+  the restore path (object-injection defense-in-depth). Restores fail closed on
+  any object-bearing or malformed payload. The restore paths are unchanged for
+  the scalar and array data the engine actually stores.
+* Fix: the self-updater deletes its temporary download with `wp_delete_file()`,
+  and the SEO auditor reads WordPress core's sitemap state through the sitemaps
+  server instead of re-firing the `wp_sitemaps_enabled` filter.
+* Internal: PRs are now gated in CI on PHPCS (security/correctness sniffs) and
+  the official WordPress Plugin Check, so regressions in the above are caught
+  before release. No effect on the shipped plugin.
+
 = 2.8.1 =
 * Docs: the listing now describes the optional **SiteAgent Power Pack** companion
   plugin — the governed power tools (file read/write, read-only SQL, allowlisted
@@ -395,6 +409,10 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 * Zero frontend performance impact.
 
 == Upgrade Notice ==
+
+= 2.8.2 =
+Security hardening: snapshot restores now reject tampered payloads instead of
+unserializing arbitrary objects. Recommended for all users. No action required.
 
 = 2.8.1 =
 Documentation only — the listing now describes the optional Power Pack companion
