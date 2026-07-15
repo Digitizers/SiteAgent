@@ -515,6 +515,28 @@ final class SnapshotsTest extends TestCase {
 		$this->assertSame( 'orig', get_post_meta( 91, '_elementor_data', true ) );
 	}
 
+	public function test_cyclic_array_payload_fails_closed_without_fataling(): void {
+		// unserialize() rebuilds a serialized reference cycle into a genuinely
+		// self-referential array; the stripped-object walk must not recurse into
+		// it forever (stack exhaustion / DoS) but reject it fast.
+		update_option( 'cyclic_opt', 'benign' );
+		$snaps = new Aura_Worker_Snapshots();
+		$snap  = $snaps->snapshot_option( 'cyclic_opt' );
+
+		// a:2:{s:1:"k";i:1;s:4:"self";R:1;} — element 'self' points back at the array.
+		$cyclic = 'a:2:{s:1:"k";i:1;s:4:"self";R:1;}';
+		$this->tamperPayload( $snap['snapshot'], $cyclic );
+
+		$start = microtime( true );
+		$res   = $snaps->restore( $snap['snapshot']['id'] );
+		$elapsed = microtime( true ) - $start;
+
+		$this->assertFalse( $res['success'], 'A cyclic payload must be refused, not restored.' );
+		$this->assertStringContainsString( 'object', $res['error'] );
+		$this->assertLessThan( 1.0, $elapsed, 'The walk must terminate, not spin on the cycle.' );
+		$this->assertSame( 'benign', get_option( 'cyclic_opt' ) );
+	}
+
 	public function test_scalar_and_array_option_payloads_still_round_trip(): void {
 		// The hardening must not regress the real payloads: scalars and nested
 		// arrays are exactly what options and Elementor meta hold.

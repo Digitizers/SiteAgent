@@ -419,6 +419,15 @@ class Aura_Worker_Snapshots {
 	}
 
 	/**
+	 * Maximum array nesting the stripped-object walk will descend before it
+	 * treats the payload as unsafe. Real snapshot payloads (option values, the
+	 * shallow meta/post maps, Elementor's JSON-string blobs) are nowhere near
+	 * this deep, so a legitimate payload never reaches it; the cap exists only
+	 * to bound a tampered one.
+	 */
+	private const MAX_WALK_DEPTH = 64;
+
+	/**
 	 * True when a value is — or contains, at any depth — an object stripped by
 	 * allowed_classes => false.
 	 *
@@ -429,16 +438,29 @@ class Aura_Worker_Snapshots {
 	 * / update_post_meta persists the incomplete class as a "successful" restore.
 	 * Walking the whole structure is what lets every kind fail closed on it.
 	 *
+	 * The walk is depth-bounded: unserialize() faithfully rebuilds a serialized
+	 * reference cycle (e.g. `a:1:{i:0;R:1;}`) into a genuinely self-referential
+	 * array, and an unbounded recursion over one would exhaust the stack and fatal
+	 * the restore request rather than fail closed. Hitting the cap is itself
+	 * treated as "unsafe" (return true) so a pathological payload is rejected, not
+	 * restored.
+	 *
 	 * @param mixed $value Unserialized value.
+	 * @param int   $depth Current recursion depth (internal).
 	 * @return bool
 	 */
-	private function contains_stripped_object( $value ) {
+	private function contains_stripped_object( $value, $depth = 0 ) {
 		if ( $value instanceof \__PHP_Incomplete_Class ) {
 			return true;
 		}
 		if ( is_array( $value ) ) {
+			if ( $depth >= self::MAX_WALK_DEPTH ) {
+				// Too deep to be a real payload — a reference cycle or a crafted
+				// deeply-nested array. Refuse it rather than recurse into a fatal.
+				return true;
+			}
 			foreach ( $value as $item ) {
-				if ( $this->contains_stripped_object( $item ) ) {
+				if ( $this->contains_stripped_object( $item, $depth + 1 ) ) {
 					return true;
 				}
 			}
