@@ -396,6 +396,79 @@ class Aura_Worker_Snapshots {
 	}
 
 	/**
+	 * Unserialize a snapshot payload without ever instantiating a class.
+	 *
+	 * The payload files are written by this plugin, but they sit on disk and are
+	 * the one untrusted-if-tampered input on the restore path — a plain
+	 * unserialize() would let a crafted payload build arbitrary objects and fire
+	 * __wakeup()/__destruct() gadget chains. `allowed_classes => false` turns any
+	 * serialized object into a __PHP_Incomplete_Class instead, closing that
+	 * surface. Everything this engine actually captures — option values, the
+	 * meta/post arrays it builds, Elementor's JSON-string payloads — is scalars
+	 * and arrays, so nothing legitimate is lost. A payload that *did* contain an
+	 * object was either tampered or a pathological object-valued option; the
+	 * callers detect the resulting incomplete class (an object is not an array,
+	 * and is_stripped_object() catches the top-level option case) and fail closed
+	 * rather than write it back.
+	 *
+	 * @param string $raw Serialized payload bytes.
+	 * @return mixed Unserialized value, or false on malformed input.
+	 */
+	private function unserialize_payload( $raw ) {
+		return unserialize( (string) $raw, array( 'allowed_classes' => false ) );
+	}
+
+	/**
+	 * Maximum array nesting the stripped-object walk will descend before it
+	 * treats the payload as unsafe. Real snapshot payloads (option values, the
+	 * shallow meta/post maps, Elementor's JSON-string blobs) are nowhere near
+	 * this deep, so a legitimate payload never reaches it; the cap exists only
+	 * to bound a tampered one.
+	 */
+	private const MAX_WALK_DEPTH = 64;
+
+	/**
+	 * True when a value is — or contains, at any depth — an object stripped by
+	 * allowed_classes => false.
+	 *
+	 * The check must recurse: allowed_classes => false strips every serialized
+	 * object to __PHP_Incomplete_Class, but a tampered payload can nest one
+	 * inside an otherwise-valid array (e.g. serialize( array( 'x' => $gadget ) )).
+	 * A top-level-only check passes that array straight through and update_option
+	 * / update_post_meta persists the incomplete class as a "successful" restore.
+	 * Walking the whole structure is what lets every kind fail closed on it.
+	 *
+	 * The walk is depth-bounded: unserialize() faithfully rebuilds a serialized
+	 * reference cycle (e.g. `a:1:{i:0;R:1;}`) into a genuinely self-referential
+	 * array, and an unbounded recursion over one would exhaust the stack and fatal
+	 * the restore request rather than fail closed. Hitting the cap is itself
+	 * treated as "unsafe" (return true) so a pathological payload is rejected, not
+	 * restored.
+	 *
+	 * @param mixed $value Unserialized value.
+	 * @param int   $depth Current recursion depth (internal).
+	 * @return bool
+	 */
+	private function contains_stripped_object( $value, $depth = 0 ) {
+		if ( $value instanceof \__PHP_Incomplete_Class ) {
+			return true;
+		}
+		if ( is_array( $value ) ) {
+			if ( $depth >= self::MAX_WALK_DEPTH ) {
+				// Too deep to be a real payload — a reference cycle or a crafted
+				// deeply-nested array. Refuse it rather than recurse into a fatal.
+				return true;
+			}
+			foreach ( $value as $item ) {
+				if ( $this->contains_stripped_object( $item, $depth + 1 ) ) {
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	/**
 	 * Restore state from a snapshot.
 	 *
 	 * @param string $id Snapshot id.
@@ -425,7 +498,16 @@ class Aura_Worker_Snapshots {
 				}
 				$payload_path = $record['payload_path'] ?? '';
 				$raw          = ( $payload_path && file_exists( $payload_path ) ) ? file_get_contents( $payload_path ) : '';
-				update_option( $record['target'], unserialize( $raw ) );
+				$value        = $this->unserialize_payload( $raw );
+				// Fail closed rather than write back an incomplete class: the payload
+				// held a serialized object (tampered, or a rare object-valued option),
+				// which allowed_classes => false intentionally refused to rebuild.
+				// Recurses so a nested object inside an array is caught too, not just
+				// a top-level one.
+				if ( $this->contains_stripped_object( $value ) ) {
+					return array( 'success' => false, 'error' => 'Snapshot payload contains an object and cannot be safely restored.' );
+				}
+				update_option( $record['target'], $value );
 				return array( 'success' => true );
 
 			case 'post':
@@ -452,8 +534,11 @@ class Aura_Worker_Snapshots {
 				if ( ! $payload_path || ! file_exists( $payload_path ) ) {
 					return array( 'success' => false, 'error' => 'Snapshot payload missing.' );
 				}
-				$captured = unserialize( file_get_contents( $payload_path ) );
-				if ( ! is_array( $captured ) ) {
+				$captured = $this->unserialize_payload( file_get_contents( $payload_path ) );
+				// A tampered payload that serialized an object is stripped to an
+				// incomplete class. Reject both a top-level one (not an array) and one
+				// nested inside a captured meta value, before any of it is written.
+				if ( ! is_array( $captured ) || $this->contains_stripped_object( $captured ) ) {
 					return array( 'success' => false, 'error' => 'Snapshot payload corrupt.' );
 				}
 				$post_id = (int) $record['target'];
@@ -472,8 +557,11 @@ class Aura_Worker_Snapshots {
 				if ( ! $payload_path || ! file_exists( $payload_path ) ) {
 					return array( 'success' => false, 'error' => 'Snapshot payload missing.' );
 				}
-				$captured = unserialize( file_get_contents( $payload_path ) );
-				if ( ! is_array( $captured ) ) {
+				$captured = $this->unserialize_payload( file_get_contents( $payload_path ) );
+				// A tampered payload that serialized an object is stripped to an
+				// incomplete class. Reject both a top-level one (not an array) and one
+				// nested inside a captured post/meta value, before any of it is written.
+				if ( ! is_array( $captured ) || $this->contains_stripped_object( $captured ) ) {
 					return array( 'success' => false, 'error' => 'Snapshot payload corrupt.' );
 				}
 				foreach ( $captured as $pid => $info ) {

@@ -404,4 +404,167 @@ final class SnapshotsTest extends TestCase {
 		$snaps = new Aura_Worker_Snapshots();
 		$this->assertFalse( $snaps->snapshot_posts( array(), '_x' )['success'] );
 	}
+
+	// --- object-injection hardening on the restore path ---------------------
+	//
+	// Payload files are written by the plugin, but they are the one on-disk,
+	// tamperable input restore() consumes. A plain unserialize() there would
+	// build arbitrary objects and fire __wakeup()/__destruct() gadget chains, so
+	// every payload is unserialized with allowed_classes => false. These tests
+	// pin the security property (no class is ever instantiated) and prove the
+	// scalar/array payloads the engine actually uses still round-trip.
+
+	/** Overwrite a snapshot's payload file with attacker-chosen bytes. */
+	private function tamperPayload( array $snapshot, string $bytes ): void {
+		$this->assertNotEmpty( $snapshot['payload_path'] ?? '' );
+		file_put_contents( $snapshot['payload_path'], $bytes );
+	}
+
+	public function test_object_payload_never_instantiates_a_class_on_restore(): void {
+		Aura_Snapshot_Gadget::$woke = false;
+
+		update_option( 'gadget_opt', 'benign' );
+		$snaps = new Aura_Worker_Snapshots();
+		$snap  = $snaps->snapshot_option( 'gadget_opt' );
+
+		// Attacker replaces the payload with a serialized gadget object.
+		$this->tamperPayload( $snap['snapshot'], serialize( new Aura_Snapshot_Gadget() ) );
+
+		$res = $snaps->restore( $snap['snapshot']['id'] );
+
+		$this->assertFalse( Aura_Snapshot_Gadget::$woke, 'allowed_classes=false must prevent __wakeup() from ever firing.' );
+		$this->assertFalse( $res['success'], 'An object payload is refused, not written back.' );
+		$this->assertStringContainsString( 'object', $res['error'] );
+		// The live option is untouched — no incomplete class leaked into storage.
+		$this->assertSame( 'benign', get_option( 'gadget_opt' ) );
+	}
+
+	public function test_meta_object_payload_is_rejected_as_corrupt(): void {
+		Aura_Snapshot_Gadget::$woke = false;
+
+		$this->seedPost( 88 );
+		update_post_meta( 88, '_elementor_data', 'orig' );
+		$snaps = new Aura_Worker_Snapshots();
+		$snap  = $snaps->snapshot_meta( 88, '_elementor_data' );
+
+		$this->tamperPayload( $snap['snapshot'], serialize( new Aura_Snapshot_Gadget() ) );
+
+		$res = $snaps->restore( $snap['snapshot']['id'] );
+
+		$this->assertFalse( Aura_Snapshot_Gadget::$woke );
+		$this->assertFalse( $res['success'] );
+		$this->assertStringContainsString( 'corrupt', $res['error'] );
+	}
+
+	public function test_posts_object_payload_is_rejected_as_corrupt(): void {
+		Aura_Snapshot_Gadget::$woke = false;
+
+		$this->seedClassPost( 601, '{"v":1}' );
+		$snaps = new Aura_Worker_Snapshots();
+		$snap  = $snaps->snapshot_posts( array( 601 ), '_elementor_global_class_data' );
+
+		$this->tamperPayload( $snap['snapshot'], serialize( new Aura_Snapshot_Gadget() ) );
+
+		$res = $snaps->restore( $snap['snapshot']['id'] );
+
+		$this->assertFalse( Aura_Snapshot_Gadget::$woke );
+		$this->assertFalse( $res['success'] );
+		$this->assertStringContainsString( 'corrupt', $res['error'] );
+	}
+
+	public function test_option_nested_object_payload_is_rejected(): void {
+		// A gadget hidden INSIDE an array: allowed_classes=false strips it to an
+		// incomplete class, the top level stays an array, so a top-level-only guard
+		// would store it as a successful restore. The recursive check must catch it.
+		Aura_Snapshot_Gadget::$woke = false;
+
+		update_option( 'nested_opt', 'benign' );
+		$snaps = new Aura_Worker_Snapshots();
+		$snap  = $snaps->snapshot_option( 'nested_opt' );
+
+		$this->tamperPayload( $snap['snapshot'], serialize( array( 'x' => new Aura_Snapshot_Gadget() ) ) );
+
+		$res = $snaps->restore( $snap['snapshot']['id'] );
+
+		$this->assertFalse( Aura_Snapshot_Gadget::$woke );
+		$this->assertFalse( $res['success'], 'A nested object payload must not restore.' );
+		$this->assertStringContainsString( 'object', $res['error'] );
+		// Nothing corrupt leaked into storage.
+		$this->assertSame( 'benign', get_option( 'nested_opt' ) );
+	}
+
+	public function test_meta_nested_object_payload_is_rejected(): void {
+		// snapshot_meta serializes array( key => array( 'existed'=>.., 'value'=>.. ) ),
+		// so a gadget in a leaf value is the realistic nesting for this kind.
+		Aura_Snapshot_Gadget::$woke = false;
+
+		$this->seedPost( 91 );
+		update_post_meta( 91, '_elementor_data', 'orig' );
+		$snaps = new Aura_Worker_Snapshots();
+		$snap  = $snaps->snapshot_meta( 91, '_elementor_data' );
+
+		$payload = array( '_elementor_data' => array( 'existed' => true, 'value' => new Aura_Snapshot_Gadget() ) );
+		$this->tamperPayload( $snap['snapshot'], serialize( $payload ) );
+
+		$res = $snaps->restore( $snap['snapshot']['id'] );
+
+		$this->assertFalse( Aura_Snapshot_Gadget::$woke );
+		$this->assertFalse( $res['success'] );
+		$this->assertStringContainsString( 'corrupt', $res['error'] );
+		// The live meta was not overwritten with a stripped class.
+		$this->assertSame( 'orig', get_post_meta( 91, '_elementor_data', true ) );
+	}
+
+	public function test_cyclic_array_payload_fails_closed_without_fataling(): void {
+		// unserialize() rebuilds a serialized reference cycle into a genuinely
+		// self-referential array; the stripped-object walk must not recurse into
+		// it forever (stack exhaustion / DoS) but reject it fast.
+		update_option( 'cyclic_opt', 'benign' );
+		$snaps = new Aura_Worker_Snapshots();
+		$snap  = $snaps->snapshot_option( 'cyclic_opt' );
+
+		// a:2:{s:1:"k";i:1;s:4:"self";R:1;} — element 'self' points back at the array.
+		$cyclic = 'a:2:{s:1:"k";i:1;s:4:"self";R:1;}';
+		$this->tamperPayload( $snap['snapshot'], $cyclic );
+
+		$start = microtime( true );
+		$res   = $snaps->restore( $snap['snapshot']['id'] );
+		$elapsed = microtime( true ) - $start;
+
+		$this->assertFalse( $res['success'], 'A cyclic payload must be refused, not restored.' );
+		$this->assertStringContainsString( 'object', $res['error'] );
+		$this->assertLessThan( 1.0, $elapsed, 'The walk must terminate, not spin on the cycle.' );
+		$this->assertSame( 'benign', get_option( 'cyclic_opt' ) );
+	}
+
+	public function test_scalar_and_array_option_payloads_still_round_trip(): void {
+		// The hardening must not regress the real payloads: scalars and nested
+		// arrays are exactly what options and Elementor meta hold.
+		$snaps = new Aura_Worker_Snapshots();
+
+		update_option( 'scalar_opt', 'a string' );
+		$s1 = $snaps->snapshot_option( 'scalar_opt' );
+		update_option( 'scalar_opt', 'changed' );
+		$this->assertTrue( $snaps->restore( $s1['snapshot']['id'] )['success'] );
+		$this->assertSame( 'a string', get_option( 'scalar_opt' ) );
+
+		update_option( 'array_opt', array( 'n' => 1, 'deep' => array( 'x', 'y' ) ) );
+		$s2 = $snaps->snapshot_option( 'array_opt' );
+		update_option( 'array_opt', array( 'n' => 2 ) );
+		$this->assertTrue( $snaps->restore( $s2['snapshot']['id'] )['success'] );
+		$this->assertSame( array( 'n' => 1, 'deep' => array( 'x', 'y' ) ), get_option( 'array_opt' ) );
+	}
+}
+
+/**
+ * A stand-in object-injection gadget: if a plain unserialize() ever rebuilt it,
+ * __wakeup() would flip the static flag. allowed_classes => false must keep that
+ * flag false. Defined at file scope so serialize()/unserialize() can name it.
+ */
+final class Aura_Snapshot_Gadget {
+	public static bool $woke = false;
+
+	public function __wakeup(): void {
+		self::$woke = true;
+	}
 }
