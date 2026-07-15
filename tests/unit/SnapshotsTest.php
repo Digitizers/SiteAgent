@@ -472,6 +472,49 @@ final class SnapshotsTest extends TestCase {
 		$this->assertStringContainsString( 'corrupt', $res['error'] );
 	}
 
+	public function test_option_nested_object_payload_is_rejected(): void {
+		// A gadget hidden INSIDE an array: allowed_classes=false strips it to an
+		// incomplete class, the top level stays an array, so a top-level-only guard
+		// would store it as a successful restore. The recursive check must catch it.
+		Aura_Snapshot_Gadget::$woke = false;
+
+		update_option( 'nested_opt', 'benign' );
+		$snaps = new Aura_Worker_Snapshots();
+		$snap  = $snaps->snapshot_option( 'nested_opt' );
+
+		$this->tamperPayload( $snap['snapshot'], serialize( array( 'x' => new Aura_Snapshot_Gadget() ) ) );
+
+		$res = $snaps->restore( $snap['snapshot']['id'] );
+
+		$this->assertFalse( Aura_Snapshot_Gadget::$woke );
+		$this->assertFalse( $res['success'], 'A nested object payload must not restore.' );
+		$this->assertStringContainsString( 'object', $res['error'] );
+		// Nothing corrupt leaked into storage.
+		$this->assertSame( 'benign', get_option( 'nested_opt' ) );
+	}
+
+	public function test_meta_nested_object_payload_is_rejected(): void {
+		// snapshot_meta serializes array( key => array( 'existed'=>.., 'value'=>.. ) ),
+		// so a gadget in a leaf value is the realistic nesting for this kind.
+		Aura_Snapshot_Gadget::$woke = false;
+
+		$this->seedPost( 91 );
+		update_post_meta( 91, '_elementor_data', 'orig' );
+		$snaps = new Aura_Worker_Snapshots();
+		$snap  = $snaps->snapshot_meta( 91, '_elementor_data' );
+
+		$payload = array( '_elementor_data' => array( 'existed' => true, 'value' => new Aura_Snapshot_Gadget() ) );
+		$this->tamperPayload( $snap['snapshot'], serialize( $payload ) );
+
+		$res = $snaps->restore( $snap['snapshot']['id'] );
+
+		$this->assertFalse( Aura_Snapshot_Gadget::$woke );
+		$this->assertFalse( $res['success'] );
+		$this->assertStringContainsString( 'corrupt', $res['error'] );
+		// The live meta was not overwritten with a stripped class.
+		$this->assertSame( 'orig', get_post_meta( 91, '_elementor_data', true ) );
+	}
+
 	public function test_scalar_and_array_option_payloads_still_round_trip(): void {
 		// The hardening must not regress the real payloads: scalars and nested
 		// arrays are exactly what options and Elementor meta hold.

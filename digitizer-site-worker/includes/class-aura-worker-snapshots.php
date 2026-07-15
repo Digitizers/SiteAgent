@@ -419,13 +419,31 @@ class Aura_Worker_Snapshots {
 	}
 
 	/**
-	 * True when a value is an object stripped by allowed_classes => false.
+	 * True when a value is — or contains, at any depth — an object stripped by
+	 * allowed_classes => false.
+	 *
+	 * The check must recurse: allowed_classes => false strips every serialized
+	 * object to __PHP_Incomplete_Class, but a tampered payload can nest one
+	 * inside an otherwise-valid array (e.g. serialize( array( 'x' => $gadget ) )).
+	 * A top-level-only check passes that array straight through and update_option
+	 * / update_post_meta persists the incomplete class as a "successful" restore.
+	 * Walking the whole structure is what lets every kind fail closed on it.
 	 *
 	 * @param mixed $value Unserialized value.
 	 * @return bool
 	 */
-	private function is_stripped_object( $value ) {
-		return $value instanceof \__PHP_Incomplete_Class;
+	private function contains_stripped_object( $value ) {
+		if ( $value instanceof \__PHP_Incomplete_Class ) {
+			return true;
+		}
+		if ( is_array( $value ) ) {
+			foreach ( $value as $item ) {
+				if ( $this->contains_stripped_object( $item ) ) {
+					return true;
+				}
+			}
+		}
+		return false;
 	}
 
 	/**
@@ -462,7 +480,9 @@ class Aura_Worker_Snapshots {
 				// Fail closed rather than write back an incomplete class: the payload
 				// held a serialized object (tampered, or a rare object-valued option),
 				// which allowed_classes => false intentionally refused to rebuild.
-				if ( $this->is_stripped_object( $value ) ) {
+				// Recurses so a nested object inside an array is caught too, not just
+				// a top-level one.
+				if ( $this->contains_stripped_object( $value ) ) {
 					return array( 'success' => false, 'error' => 'Snapshot payload contains an object and cannot be safely restored.' );
 				}
 				update_option( $record['target'], $value );
@@ -494,8 +514,9 @@ class Aura_Worker_Snapshots {
 				}
 				$captured = $this->unserialize_payload( file_get_contents( $payload_path ) );
 				// A tampered payload that serialized an object is stripped to an
-				// incomplete class (not an array) and rejected here as corrupt.
-				if ( ! is_array( $captured ) ) {
+				// incomplete class. Reject both a top-level one (not an array) and one
+				// nested inside a captured meta value, before any of it is written.
+				if ( ! is_array( $captured ) || $this->contains_stripped_object( $captured ) ) {
 					return array( 'success' => false, 'error' => 'Snapshot payload corrupt.' );
 				}
 				$post_id = (int) $record['target'];
@@ -516,8 +537,9 @@ class Aura_Worker_Snapshots {
 				}
 				$captured = $this->unserialize_payload( file_get_contents( $payload_path ) );
 				// A tampered payload that serialized an object is stripped to an
-				// incomplete class (not an array) and rejected here as corrupt.
-				if ( ! is_array( $captured ) ) {
+				// incomplete class. Reject both a top-level one (not an array) and one
+				// nested inside a captured post/meta value, before any of it is written.
+				if ( ! is_array( $captured ) || $this->contains_stripped_object( $captured ) ) {
 					return array( 'success' => false, 'error' => 'Snapshot payload corrupt.' );
 				}
 				foreach ( $captured as $pid => $info ) {
