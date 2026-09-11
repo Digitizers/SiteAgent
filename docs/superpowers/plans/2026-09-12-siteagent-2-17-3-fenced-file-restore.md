@@ -416,6 +416,58 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 		$this->assertSame( 0600, fileperms( $file ) & 0777, 'a private file is never widened by a restore' );
 	}
 
+	public function test_a_chmod_that_lands_after_the_claim_is_the_mode_that_is_restored(): void {
+		// Codex #101 round-4 P1: a chmod leaves the content alone, so the
+		// authoritative hash still passes; republishing at the mode read before
+		// the claim would discard the restriction someone just applied.
+		$file  = WP_CONTENT_DIR . '/tightened.php';
+		file_put_contents( $file, "<?php // original\n" );
+		chmod( $file, 0644 );
+		$snaps = new class extends Aura_Worker_Snapshots {
+			public $done = false;
+			protected function after_claim( $claim, $target ) {
+				if ( ! $this->done ) {
+					$this->done = true;
+					chmod( $claim, 0600 ); // tightened while we hold it
+				}
+			}
+		};
+		$rec = $snaps->overwrite_file( $file, "<?php // written\n" )['snapshot'];
+
+		$out = $snaps->restore( $rec['id'] );
+
+		$this->assertTrue( $out['success'] );
+		$this->assertSame( "<?php // original\n", file_get_contents( $file ) );
+		clearstatcache();
+		$this->assertSame( 0600, fileperms( $file ) & 0777, 'the mode the file had when we claimed it is the mode it comes back with' );
+	}
+
+	public function test_a_dangling_symlink_that_takes_the_path_answers_the_changed_code(): void {
+		// Codex #101 round-4 P2: publish() answers 'unsupported_filesystem' for
+		// a DANGLING link (file_exists() is false for one), and the merge used
+		// to overwrite the put-back's code with null — a 500 for what is a
+		// designated changed-since refusal.
+		$file  = WP_CONTENT_DIR . '/raced-link.php';
+		file_put_contents( $file, "<?php // original\n" );
+		$snaps = new class extends Aura_Worker_Snapshots {
+			public $done = false;
+			protected function after_claim( $claim, $target ) {
+				if ( ! $this->done ) {
+					$this->done = true;
+					symlink( WP_CONTENT_DIR . '/does-not-exist.php', $target ); // a racer takes the path
+				}
+			}
+		};
+		$rec = $snaps->overwrite_file( $file, "<?php // written\n" )['snapshot'];
+
+		$out = $snaps->restore( $rec['id'] );
+
+		$this->assertFalse( $out['success'] );
+		$this->assertSame( 'aura_file_changed_since', $out['code'], 'a designated refusal, not a 500' );
+		$this->assertArrayHasKey( 'moved_aside', $out );
+		$this->assertTrue( is_link( $file ), "the racer's link is never replaced" );
+	}
+
 	public function test_a_write_through_a_descriptor_opened_before_the_claim_is_kept_aside(): void {
 		// Codex #101 round-2 P1: rename() does not revoke an open descriptor.
 		// A writer that opened the target before the claim can write into the
@@ -582,7 +634,7 @@ And REPLACE the existing `test_file_snapshot_and_restore_roundtrip` (line 44) �
 
 - [ ] **Step 3: Run the new and changed tests to verify they fail**
 
-Run: `vendor/bin/phpunit --filter 'overwrite_restore|unfenced|bare_file_snapshot|external_write_after_the_claim|directory_or_symlink_at_the_path|descriptor_opened_before_the_claim|failed_stage_never_removes|restored_file_keeps_its_restrictive_mode' tests/unit/SnapshotsTest.php`
+Run: `vendor/bin/phpunit --filter 'overwrite_restore|unfenced|bare_file_snapshot|external_write_after_the_claim|directory_or_symlink_at_the_path|descriptor_opened_before_the_claim|failed_stage_never_removes|restored_file_keeps_its_restrictive_mode|chmod_that_lands_after_the_claim|dangling_symlink_that_takes_the_path' tests/unit/SnapshotsTest.php`
 Expected: FAIL — today's restore writes the payload back unconditionally, so the fenced, `already`, coded and claim tests all fail.
 
 - [ ] **Step 4: Pass the record into the file restore**
@@ -738,6 +790,27 @@ Replace the body of `restore_existing_file()` and add its helpers:
 			return $this->put_claim_back( $claim, $target, 'the file changed as the restore claimed it' );
 		}
 
+		// AND THE CLAIMED INODE OWNS THE MODE (Codex #101 round-4 P1). The mode
+		// read before the claim is a guess by the time we publish: a chmod that
+		// lands in between leaves the CONTENT untouched, so the hash above still
+		// passes, and republishing at the older mode would discard a
+		// restriction someone just applied. Re-read it from the file we hold
+		// and carry it onto the stage.
+		$claimed_mode = @fileperms( $claim ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- We hold this file; a false keeps the mode the stage already has.
+		if ( false !== $claimed_mode ) {
+			$claimed_mode &= 0777;
+			if ( ! $this->link_available() && 0 !== ( $claimed_mode & 0111 ) ) {
+				// It gained execute bits while we held it, and fopen() cannot
+				// recreate those: put it back rather than republish it lesser.
+				$this->discard_stage( $tmp );
+				return $this->put_claim_back( $claim, $target, 'the file became executable while the restore ran, and this host has no link()' );
+			}
+			if ( ! $this->secure_stage( $tmp, $claimed_mode ) ) {
+				$this->discard_stage( $tmp );
+				return $this->put_claim_back( $claim, $target, 'the mode the file now has could not be set on the replacement' );
+			}
+		}
+
 		// THE MODE MUST SURVIVE A link()-LESS PUBLISH (Codex #101 round-3 P1).
 		// publish() reaches write_exclusively() with NO mode, which creates from
 		// FS_CHMOD_FILE (0644) — restoring a 0600 file on a host without link()
@@ -748,16 +821,23 @@ Replace the body of `restore_existing_file()` and add its helpers:
 		// publish( $tmp, $path ), and PHP rejects an override that drops a
 		// parameter the parent declares.
 		$published = $this->link_available()
-			? $this->publish( $tmp, $target )
-			: $this->publish_restored_by_write( $tmp, $target, false === $mode ? null : ( $mode & 0777 ) );
+			? $this->publish( $tmp, $target ) // link() preserves the stage's mode, set from the claim just above
+			: $this->publish_restored_by_write( $tmp, $target, false === $claimed_mode ? ( false === $mode ? null : ( $mode & 0777 ) ) : $claimed_mode );
 		if ( true !== $published ) {
 			$this->discard_stage( $tmp );
 			if ( 'exists' === $published ) {
 				// Something took the path while we held the file: never clobber it.
 				return $this->changed_since( 'another file took the path while the restore was in flight', array( 'moved_aside' => $claim ) );
 			}
-			$out = $this->put_claim_back( $claim, $target, 'the old bytes could not be published' );
-			return array_merge( $out, array( 'error' => 'Failed to write file: ' . $target . ' (' . (string) $published . ')', 'code' => null ) );
+			// The put-back's answer is KEPT WHOLE, including its code (Codex
+			// #101 round-4 P2): a racer that drops a DANGLING symlink at the
+			// path makes publish() answer 'unsupported_filesystem' rather than
+			// 'exists' (it tests file_exists(), false for a dangling link), and
+			// overwriting the code with null turned that designated
+			// changed-since refusal into a 500. Only the detail is appended.
+			$out           = $this->put_claim_back( $claim, $target, 'the old bytes could not be published' );
+			$out['detail'] = ( isset( $out['detail'] ) ? $out['detail'] . '; ' : '' ) . 'Failed to write file: ' . $target . ' (' . (string) $published . ')';
+			return $out;
 		}
 		$this->discard_stage( $tmp ); // in link mode the stage is a second name of the published inode
 
@@ -841,8 +921,8 @@ Replace the body of `restore_existing_file()` and add its helpers:
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
-Run: `vendor/bin/phpunit --filter 'overwrite_restore|unfenced|bare_file_snapshot|external_write_after_the_claim|directory_or_symlink_at_the_path|descriptor_opened_before_the_claim|failed_stage_never_removes|restored_file_keeps_its_restrictive_mode' tests/unit/SnapshotsTest.php`
-Expected: PASS (11 tests).
+Run: `vendor/bin/phpunit --filter 'overwrite_restore|unfenced|bare_file_snapshot|external_write_after_the_claim|directory_or_symlink_at_the_path|descriptor_opened_before_the_claim|failed_stage_never_removes|restored_file_keeps_its_restrictive_mode|chmod_that_lands_after_the_claim|dangling_symlink_that_takes_the_path' tests/unit/SnapshotsTest.php`
+Expected: PASS (13 tests).
 
 - [ ] **Step 7: Run the whole suite and the linter**
 
