@@ -476,8 +476,12 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 			protected function link_available() {
 				return false;
 			}
+			public $writes = 0;
 			protected function write_all( $fh, $src ) {
-				return false; // force the cleanup path
+				if ( 0 === $this->writes++ ) {
+					return false; // force the cleanup path
+				}
+				return parent::write_all( $fh, $src );
 			}
 			protected function before_entry_removal( $target ) {
 				if ( ! $this->done ) {
@@ -507,9 +511,17 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 			protected function link_available() {
 				return false;
 			}
+			public $writes = 0;
 			protected function write_all( $fh, $src ) {
-				fwrite( $fh, '<?php // half' ); // a short write
-				return false;
+				// ONLY THE PUBLISH IS SHORT (Codex #101 round-7 P2):
+				// put_back_by_write()'s recovery copy dispatches through this
+				// same method, so failing every call would break the put-back
+				// the assertions below depend on.
+				if ( 0 === $this->writes++ ) {
+					fwrite( $fh, '<?php // half' ); // a short write
+					return false;
+				}
+				return parent::write_all( $fh, $src );
 			}
 		};
 		$out = $snaps->restore( $rec['id'] );
@@ -533,8 +545,12 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 			protected function link_available() {
 				return false;
 			}
+			public $writes = 0;
 			protected function write_all( $fh, $src ) {
-				return false;
+				if ( 0 === $this->writes++ ) {
+					return false; // the publish is short
+				}
+				return parent::write_all( $fh, $src ); // the put-back copy is real
 			}
 			protected function remove_own_entry( $fh, $target, $mine ) {
 				return false; // the entry cannot be unlinked
@@ -598,6 +614,51 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 		$this->assertSame( 'aura_file_changed_since', $out['code'], 'a designated refusal, not a 500' );
 		$this->assertArrayHasKey( 'moved_aside', $out );
 		$this->assertTrue( is_link( $file ), "the racer's link is never replaced" );
+	}
+
+	public function test_a_directory_that_takes_the_path_after_the_claim_is_put_back(): void {
+		// Codex #101 round-7 P1: the claim moves whatever is at the path, and a
+		// directory cannot be put back by link or copy — only by rename.
+		$file  = WP_CONTENT_DIR . '/raced-dir.php';
+		file_put_contents( $file, "<?php // original\n" );
+		$snaps = new class extends Aura_Worker_Snapshots {
+			public $done = false;
+			protected function after_claim( $claim, $target ) {
+				if ( ! $this->done ) {
+					$this->done = true;
+					rename( $claim, $claim . '-stash' );   // our file steps aside
+					mkdir( $claim, 0755 );                 // a directory is what we now hold
+				}
+			}
+		};
+		$rec = $snaps->overwrite_file( $file, "<?php // written\n" )['snapshot'];
+
+		$out = $snaps->restore( $rec['id'] );
+
+		$this->assertFalse( $out['success'] );
+		$this->assertSame( 'aura_file_changed_since', $out['code'] );
+		$this->assertDirectoryExists( $file, 'the directory is put back at its path, not stranded aside' );
+	}
+
+	public function test_a_voided_create_record_answers_voided_even_when_the_file_is_gone(): void {
+		// Codex #101 round-7 P2: the already-gone shortcut used to run first, so
+		// a retired record reported a cheerful success and a rollback counted
+		// it as undone.
+		$snaps = new class extends Aura_Worker_Snapshots {
+			public function void( $id ) {
+				return $this->void_record_in_place( $id, array( 'interrupted' => true ) );
+			}
+		};
+		$file = WP_CONTENT_DIR . '/voided-gone.php';
+		$rec  = $snaps->create_file( $file, "<?php // new\n" )['snapshot'];
+		$this->assertTrue( $snaps->void( $rec['id'] ) );
+		unlink( $file );
+
+		$out = $snaps->restore( $rec['id'] );
+
+		$this->assertFalse( $out['success'] );
+		$this->assertSame( 'aura_snapshot_voided', $out['code'] );
+		$this->assertArrayNotHasKey( 'already', $out );
 	}
 
 	public function test_a_write_through_a_descriptor_opened_before_the_claim_is_kept_aside(): void {
@@ -766,7 +827,7 @@ And REPLACE the existing `test_file_snapshot_and_restore_roundtrip` (line 44) �
 
 - [ ] **Step 3: Run the new and changed tests to verify they fail**
 
-Run: `vendor/bin/phpunit --filter 'overwrite_restore|unfenced|bare_file_snapshot|external_write_after_the_claim|directory_or_symlink_at_the_path|descriptor_opened_before_the_claim|failed_stage_never_removes|restored_file_keeps_its_restrictive_mode|chmod_that_lands_after_the_claim|dangling_symlink_that_takes_the_path|write_never_lands_leaves_an_unfenced|stamp_that_fails|racer_that_takes_the_path_during_cleanup|short_restore_write_clears|partial_restore_write_that_cannot_be_cleared' tests/unit/SnapshotsTest.php`
+Run: `vendor/bin/phpunit --filter 'overwrite_restore|unfenced|bare_file_snapshot|external_write_after_the_claim|directory_or_symlink_at_the_path|descriptor_opened_before_the_claim|failed_stage_never_removes|restored_file_keeps_its_restrictive_mode|chmod_that_lands_after_the_claim|dangling_symlink_that_takes_the_path|write_never_lands_leaves_an_unfenced|stamp_that_fails|racer_that_takes_the_path_during_cleanup|directory_that_takes_the_path_after_the_claim|voided_create_record_answers_voided|short_restore_write_clears|partial_restore_write_that_cannot_be_cleared' tests/unit/SnapshotsTest.php`
 Expected: FAIL — today's restore writes the payload back unconditionally, so the fenced, `already`, coded and claim tests all fail.
 
 - [ ] **Step 4: Pass the record into the file restore, and retire a record whose write never landed**
@@ -995,6 +1056,22 @@ Replace the body of `restore_existing_file()` and add its helpers:
 				: $this->changed_since( 'the file was removed while the restore was being prepared' );
 		}
 		$this->after_claim( $claim, $target );
+
+		// A RACED NON-FILE IS PUT STRAIGHT BACK (Codex #101 round-7 P1). A
+		// writer can replace the verified file with a DIRECTORY — or a symlink
+		// — between the in-place hash and the rename above, and the rename
+		// moves whatever is there to the claim name. put_claim_back() can only
+		// hard-link or copy a REGULAR file, so it would leave a directory
+		// stranded under an opaque name with the target missing, which is the
+		// opposite of the exact-match contract: a replacement we did not write
+		// is left exactly where it is. rename() is the only primitive that
+		// moves such an entry back whole.
+		if ( is_link( $claim ) || ! is_file( $claim ) ) {
+			$this->discard_stage( $tmp );
+			return @rename( $claim, $target ) // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.rename_rename -- Putting a racer's entry back, atomically; a refusal is answered below.
+				? $this->changed_since( 'something that is not a regular file took the path while the restore was being prepared' )
+				: $this->changed_since( 'something that is not a regular file took the path and could not be put back', array( 'moved_aside' => $claim ) );
+		}
 
 		// THE authoritative check: the file we hold, not the name we read.
 		$actual = hash_file( 'sha256', $claim );
@@ -1235,8 +1312,8 @@ Replace the body of `restore_existing_file()` and add its helpers:
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
-Run: `vendor/bin/phpunit --filter 'overwrite_restore|unfenced|bare_file_snapshot|external_write_after_the_claim|directory_or_symlink_at_the_path|descriptor_opened_before_the_claim|failed_stage_never_removes|restored_file_keeps_its_restrictive_mode|chmod_that_lands_after_the_claim|dangling_symlink_that_takes_the_path|write_never_lands_leaves_an_unfenced|stamp_that_fails|racer_that_takes_the_path_during_cleanup|short_restore_write_clears|partial_restore_write_that_cannot_be_cleared' tests/unit/SnapshotsTest.php`
-Expected: PASS (18 tests).
+Run: `vendor/bin/phpunit --filter 'overwrite_restore|unfenced|bare_file_snapshot|external_write_after_the_claim|directory_or_symlink_at_the_path|descriptor_opened_before_the_claim|failed_stage_never_removes|restored_file_keeps_its_restrictive_mode|chmod_that_lands_after_the_claim|dangling_symlink_that_takes_the_path|write_never_lands_leaves_an_unfenced|stamp_that_fails|racer_that_takes_the_path_during_cleanup|directory_that_takes_the_path_after_the_claim|voided_create_record_answers_voided|short_restore_write_clears|partial_restore_write_that_cannot_be_cleared' tests/unit/SnapshotsTest.php`
+Expected: PASS (20 tests).
 
 - [ ] **Step 7: Run the whole suite and the linter**
 
@@ -1380,9 +1457,14 @@ In `restore_created_file_locked()`, the "already gone" answer at the top of the 
 		}
 ```
 
-the voided record's answer gains its code:
+the voided record's answer gains its code AND moves to the top of the method, ahead of the already-gone shortcut (Codex #101 round-7 P2). A voided record's target is usually absent — the create never landed — so `path_present()` answered a cheerful `200 already` for a record retired precisely because nothing can be restored from it, and a rollback counted it as undone. The head of `restore_created_file_locked()` becomes:
 
 ```php
+	private function restore_created_file_locked( array $record, $target ) {
+		// RETIRED FIRST, GONE SECOND. A record with no expected hash was voided
+		// (a sweep, or an interrupted publish), and its target is usually
+		// absent — so the already-gone branch below would report success for a
+		// record that cannot restore anything (Codex #101 round-7 P2).
 		$expected = isset( $record['expected_sha256'] ) ? (string) $record['expected_sha256'] : '';
 		if ( '' === $expected ) {
 			return array(
@@ -1391,7 +1473,12 @@ the voided record's answer gains its code:
 				'error'   => 'Snapshot record carries no expected hash.', // unchanged wording; only the code is added
 			);
 		}
+		if ( ! self::path_present( $target ) ) {
+			return array( 'success' => true, 'already' => true ); // already gone
+		}
 ```
+
+and the `$expected` block that used to sit BELOW the `is_file()` check is deleted, since it has moved up. A record that is not voided still answers `already` for an absent target, which is what `test_restoring_a_created_file_that_is_already_gone_succeeds` asserts.
 
 the not-a-regular-file branch (~line 2074), which today refuses a directory or a dangling symlink with no code at all and so reaches Aura as a 500 (Codex #101 round-1 P1) — the wording stays, exactly as `test_a_dangling_symlink_at_the_created_path_is_reported_never_treated_as_gone` asserts it:
 
