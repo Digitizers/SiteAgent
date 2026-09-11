@@ -17,7 +17,7 @@
   </a>
   <img src="https://img.shields.io/badge/WordPress-6.2%E2%80%937.1-21759b?logo=wordpress" alt="WordPress" />
   <img src="https://img.shields.io/badge/PHP-7.4%2B-777bb4?logo=php" alt="PHP" />
-  <img src="https://img.shields.io/badge/Stable-2.17.1-green" alt="Stable" />
+  <img src="https://img.shields.io/badge/Stable-2.17.2-green" alt="Stable" />
 </p>
 
 ---
@@ -238,6 +238,14 @@ These plug straight into **Aura's Fleet MCP Gateway**: read tools run on demand,
 ---
 
 ## Changelog
+
+### 2.17.2
+
+- **Snapshots: one lock per path.** `create_file()`, the new `overwrite_file()` and the restore of a created file run under a per-path lock (SiteAgent#99): two agent writes racing one new file could interleave in the same inode — an in-place overwrite by the second writer passed the first's inode check. After a publish the target must hash to the recorded content, else the record is voided as `interrupted` and the staged bytes are kept.
+- **Snapshots: `overwrite_file()`.** Replaces an existing file the way the engine creates one — old bytes snapshotted, new content staged beside the target with its own mode, renamed over it. A reader sees the old file or the new, never a truncated one; a short write touches nothing. The Power Pack's `write_file` adopts it in 0.2.5.
+- **Snapshots: locks without `flock()`.** The record and path locks fall back to `mkdir()` directories (atomic on every filesystem; one older than five minutes is a crashed holder and is broken) instead of running unlocked, which let a stage sweep retire the record of a publish that then completed.
+- **Snapshots: an edited executable stays put.** Without `link()`, an executable created file that was edited since is verified in place and left where it is on `file_changed_since`; the claim by rename came first and the put-back refused exec bits, stranding the edited file under its `.aura-restore-*` name.
+- **Snapshots: `delete()`** removes the record's lock file with the record (SiteAgent#98).
 
 ### 2.17.1
 

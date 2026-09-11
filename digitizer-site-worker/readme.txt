@@ -4,7 +4,7 @@ Tags: ai, automation, maintenance, updates, wordpress management
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.17.1
+Stable tag: 2.17.2
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -252,6 +252,13 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 7. Connections: provider connections (Cloudways, Cloudflare, Bunny, Hostinger, Vultr, xCloud) with resource counts, status, and credential-rotation reminders.
 
 == Changelog ==
+
+= 2.17.2 =
+* Snapshots: every engine write to a path — `create_file()`, the new `overwrite_file()`, and the restore of a created file — runs under a per-path lock, so two agent writes racing one new file can no longer interleave in the same inode (a concurrent in-place overwrite passed the inode check). After a publish the target must hash to the recorded content, else the record is voided as `interrupted` and the staged bytes kept.
+* Snapshots: `overwrite_file()` replaces an existing file the way the engine creates one — old bytes snapshotted, new content staged beside the target with its own mode, then renamed over it: a reader sees the old file or the new, never a truncated one, and a short write touches nothing. The Power Pack's `write_file` adopts it in 0.2.5.
+* Snapshots: on a host without `flock()` the record and path locks are `mkdir()` directories (atomic everywhere; a lock older than five minutes is a crashed holder and is broken) instead of running unlocked, which let a stage sweep retire the record of a publish that then completed.
+* Snapshots: without `link()`, an executable created file that was edited since is verified in place and left where it is on `file_changed_since` — the claim by rename came first and the put-back refused exec bits, stranding the edited file under its `.aura-restore-*` name.
+* Snapshots: `delete()` removes the record's lock file with the record.
 
 = 2.17.1 =
 * Snapshots: `create_file()` publishes without `link()`. Most managed hosts put `link()` in `disable_functions` for web PHP (Cloudways does), and 2.17.0 refused every new-file create there (`unsupported_filesystem`). Without `link()` the target is now claimed with an exclusive create — it refuses an existing path and returns an inode this call owns — and the bytes are written into that handle; ownership is checked by inode after the write, so nothing that took the path meanwhile is ever overwritten. What this mode gives up is the empty-to-complete jump: a reader in the milliseconds of the write can see the file grow. A short write leaves the entry empty, never truncated content. Restoring a created file that was edited since puts it back the same way instead of leaving it aside under its `.aura-restore-*` name. A publish interrupted mid-write is reconciled by the stage sweep: the record is voided and marked `interrupted`, the file is never deleted by a restore. `create_file()` answers `published: link | write`.
