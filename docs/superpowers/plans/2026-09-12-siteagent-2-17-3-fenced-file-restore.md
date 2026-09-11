@@ -304,8 +304,9 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 **The shape, and why it is not a simple stage-and-rename.** `with_target_lock()` serialises SiteAgent's writers only; a plugin or an administrator can write the target while we hold it. Hashing the file and then renaming a stage over it would clobber an edit that lands in between — the exact thing the fence exists to prevent (Codex #101 round-1 P1). So:
 
 1. an in-place hash decides every answer that **writes nothing** — `already`, and both refusals;
-2. when the restore intends to **write**, it claims the path by `rename()` to `.aura-restore-<hex>`, re-verifies the file it now holds, and publishes the payload into the freed path with the no-clobber `publish()` — `link()` where available, an exclusive-create write where not;
-3. anything that arrives at the path after the claim is never touched, and a claimed file that turns out to be changed is put back by the same primitives the created-file restore uses.
+2. when the restore intends to **write**, it STAGES the payload first — while the target is still live — then claims the path by `rename()` to `.aura-restore-<hex>`, re-verifies the file it now holds, and publishes the stage into the freed path with the no-clobber `publish()` (`link()` where available, an exclusive-create write where not). Staging first keeps the live pathname absent only for the rename and the publish, instead of for however long it takes to write the whole payload on a slow disk (Codex #101 round-2 P2);
+3. anything that arrives at the path after the claim is never touched, and a claimed file that turns out to be changed is put back by the same primitives the created-file restore uses;
+4. **the claim is re-hashed immediately before it is deleted.** A writer that opened the target BEFORE the claim still holds a descriptor on that inode and can write through it after the authoritative hash; the claim is then the only pathname those bytes have, and unlinking it would destroy them. A claim whose hash moved is kept and named in `moved_aside` (Codex #101 round-2 P1).
 
 **One documented residual.** On a host without `link()`, an **executable** target cannot be republished at all: `publish_by_write()` and `put_back_by_write()` both refuse execute bits, because `fopen()` cannot create them (SiteAgent#96, #97). Claiming such a file would strand it aside. So for that case only — no `link()` AND the target is executable — the restore verifies in place and replaces with `replace_in_place()`, keeping the 2.17.2 behaviour and its narrow window. This mirrors the created-file restore's own executable branch, which 2.17.2 added for the same reason.
 
@@ -363,6 +364,58 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 		$this->assertFalse( $out['success'] );
 		$this->assertSame( 'aura_file_changed_since', $out['code'] );
 		$this->assertSame( "<?php // edited under us\n", file_get_contents( $file ), 'the edit is back at its path, not overwritten' );
+	}
+
+	public function test_a_write_through_a_descriptor_opened_before_the_claim_is_kept_aside(): void {
+		// Codex #101 round-2 P1: rename() does not revoke an open descriptor.
+		// A writer that opened the target before the claim can write into the
+		// claimed inode while we publish; the claim is then the only pathname
+		// those bytes have, so it is re-hashed and KEPT instead of unlinked.
+		$file  = WP_CONTENT_DIR . '/descriptor.php';
+		file_put_contents( $file, "<?php // original\n" );
+		$snaps = new class extends Aura_Worker_Snapshots {
+			public $fh = null;
+			protected function publish( $tmp, $path ) {
+				if ( null !== $this->fh ) {
+					fwrite( $this->fh, "// appended through the open handle\n" ); // into the claimed inode
+					fflush( $this->fh );
+					$this->fh = null;
+				}
+				return parent::publish( $tmp, $path );
+			}
+		};
+		$rec = $snaps->overwrite_file( $file, "<?php // written\n" )['snapshot'];
+
+		$snaps->fh = fopen( $file, 'ab' ); // opened BEFORE the claim
+		$out       = $snaps->restore( $rec['id'] );
+
+		$this->assertTrue( $out['success'], 'the old bytes are back at the path' );
+		$this->assertSame( "<?php // original\n", file_get_contents( $file ) );
+		$this->assertArrayHasKey( 'moved_aside', $out, 'the changed inode is named, not destroyed' );
+		$this->assertFileExists( $out['moved_aside'] );
+		$this->assertStringContainsString( 'appended through the open handle', file_get_contents( $out['moved_aside'] ) );
+	}
+
+	public function test_a_failed_stage_never_removes_the_live_path(): void {
+		// Codex #101 round-2 P2: the payload is staged while the target is
+		// still live, so a staging failure leaves the path untouched and
+		// nothing is ever claimed.
+		$file = WP_CONTENT_DIR . '/stage-first.php';
+		file_put_contents( $file, "<?php // original\n" );
+		$plain = new Aura_Worker_Snapshots();
+		$rec   = $plain->overwrite_file( $file, "<?php // written\n" )['snapshot'];
+
+		$short = new class extends Aura_Worker_Snapshots {
+			protected function stage( $dir, $name, $content, $mode = null ) {
+				return array( 'success' => false, 'error' => 'Short write while staging (disk full?): ' . $dir );
+			}
+		};
+		$out = $short->restore( $rec['id'] );
+
+		$this->assertFalse( $out['success'] );
+		$this->assertStringContainsString( 'Short write', $out['error'] );
+		$this->assertSame( "<?php // written\n", file_get_contents( $file ), 'the live path never went away' );
+		$this->assertSame( array(), glob( WP_CONTENT_DIR . '/.aura-restore-*' ), 'nothing was claimed' );
 	}
 
 	public function test_an_overwrite_restore_run_twice_is_already_and_writes_nothing(): void {
@@ -479,7 +532,7 @@ And REPLACE the existing `test_file_snapshot_and_restore_roundtrip` (line 44) �
 
 - [ ] **Step 3: Run the new and changed tests to verify they fail**
 
-Run: `vendor/bin/phpunit --filter 'overwrite_restore|unfenced|bare_file_snapshot|external_write_after_the_claim|directory_or_symlink_at_the_path' tests/unit/SnapshotsTest.php`
+Run: `vendor/bin/phpunit --filter 'overwrite_restore|unfenced|bare_file_snapshot|external_write_after_the_claim|directory_or_symlink_at_the_path|descriptor_opened_before_the_claim|failed_stage_never_removes' tests/unit/SnapshotsTest.php`
 Expected: FAIL — today's restore writes the payload back unconditionally, so the fenced, `already`, coded and claim tests all fail.
 
 - [ ] **Step 4: Pass the record into the file restore**
@@ -604,6 +657,16 @@ Replace the body of `restore_existing_file()` and add its helpers:
 	 * @return array
 	 */
 	private function publish_restored_bytes( $target, $bytes, $replaced ) {
+		// STAGE FIRST, while the target is still live (Codex #101 round-2 P2):
+		// staging writes the whole payload, and doing it after the claim left
+		// the pathname absent for the length of that write. The mode is read
+		// from the live file for the same reason.
+		$mode = @fileperms( $target ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- The file is there (hashed by the caller); a false falls back to the create mode.
+		$tmp  = $this->stage( dirname( $target ), basename( $target ), $bytes, false === $mode ? null : ( $mode & 0777 ) );
+		if ( is_array( $tmp ) ) {
+			return array( 'success' => false, 'error' => (string) $tmp['error'] ); // nothing claimed, nothing moved
+		}
+
 		try {
 			$suffix = bin2hex( random_bytes( 8 ) );
 		} catch ( \Exception $e ) {
@@ -611,6 +674,7 @@ Replace the body of `restore_existing_file()` and add its helpers:
 		}
 		$claim = dirname( $target ) . '/.aura-restore-' . $suffix; // opaque, never a .php name
 		if ( ! @rename( $target, $claim ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.rename_rename -- The claim IS the point: atomic, inode-preserving.
+			$this->discard_stage( $tmp );
 			return self::path_present( $target )
 				? array( 'success' => false, 'error' => 'Unable to claim file for restore: ' . $target )
 				: $this->changed_since( 'the file was removed while the restore was being prepared' );
@@ -620,15 +684,10 @@ Replace the body of `restore_existing_file()` and add its helpers:
 		// THE authoritative check: the file we hold, not the name we read.
 		$actual = hash_file( 'sha256', $claim );
 		if ( ! is_string( $actual ) || ! hash_equals( $replaced, $actual ) ) {
+			$this->discard_stage( $tmp );
 			return $this->put_claim_back( $claim, $target, 'the file changed as the restore claimed it' );
 		}
 
-		$mode = @fileperms( $claim ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- We hold this file; a false falls back to the create mode.
-		$tmp  = $this->stage( dirname( $target ), basename( $target ), $bytes, false === $mode ? null : ( $mode & 0777 ) );
-		if ( is_array( $tmp ) ) {
-			$out = $this->put_claim_back( $claim, $target, 'nothing was staged' );
-			return array_merge( $out, array( 'error' => (string) $tmp['error'], 'code' => null ) );
-		}
 		$published = $this->publish( $tmp, $target );
 		if ( true !== $published ) {
 			$this->discard_stage( $tmp );
@@ -640,8 +699,21 @@ Replace the body of `restore_existing_file()` and add its helpers:
 			return array_merge( $out, array( 'error' => 'Failed to write file: ' . $target . ' (' . (string) $published . ')', 'code' => null ) );
 		}
 		$this->discard_stage( $tmp ); // in link mode the stage is a second name of the published inode
+
+		// THE CLAIM IS NOT DELETED ON TRUST (Codex #101 round-2 P1). A writer
+		// that opened the target before the claim holds a descriptor on THIS
+		// inode and may have written through it since the hash above; the
+		// claim is now the only pathname those bytes have. Re-hash, and keep
+		// the file — named — when it moved. The restore itself still
+		// succeeded: the old bytes are at the path.
+		$out   = array( 'success' => true );
+		$after = hash_file( 'sha256', $claim );
+		if ( ! is_string( $after ) || ! hash_equals( $actual, $after ) ) {
+			$out['moved_aside'] = $claim;
+			$out['detail']      = 'the replaced file was written to while the restore ran and was kept aside rather than deleted';
+			return $out;
+		}
 		wp_delete_file( $claim );
-		$out = array( 'success' => true );
 		if ( file_exists( $claim ) ) {
 			$out['moved_aside'] = $claim; // `.aura-restore-*` is never swept: say where it is
 		}
@@ -685,8 +757,8 @@ Replace the body of `restore_existing_file()` and add its helpers:
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
-Run: `vendor/bin/phpunit --filter 'overwrite_restore|unfenced|bare_file_snapshot|external_write_after_the_claim|directory_or_symlink_at_the_path' tests/unit/SnapshotsTest.php`
-Expected: PASS (8 tests).
+Run: `vendor/bin/phpunit --filter 'overwrite_restore|unfenced|bare_file_snapshot|external_write_after_the_claim|directory_or_symlink_at_the_path|descriptor_opened_before_the_claim|failed_stage_never_removes' tests/unit/SnapshotsTest.php`
+Expected: PASS (10 tests).
 
 - [ ] **Step 7: Run the whole suite and the linter**
 
@@ -838,7 +910,7 @@ the voided record's answer gains its code:
 			return array(
 				'success' => false,
 				'code'    => 'aura_snapshot_voided',
-				'error'   => 'Snapshot record carries no expected hash; the rollback record for this create is gone.',
+				'error'   => 'Snapshot record carries no expected hash.', // unchanged wording; only the code is added
 			);
 		}
 ```
