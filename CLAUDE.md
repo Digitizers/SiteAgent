@@ -314,6 +314,14 @@ reference; without them the script fails rather than passes. Five releases
 archive records them in a separate, sourced section so coverage is complete
 without pretending they were moved.
 
+**Promoting a pre-release to stable must go through a draft toggle.** `gh release edit
+vX.Y.Z --prerelease=false` alone does NOT emit a `published` event (`publishedAt` stays
+put), so `deploy.yml` never runs and wp.org never sees the release — 2.17.0 sat that way
+until noticed. What works (2.16.2 and 2.17.0): `gh release edit vX.Y.Z --draft`, then
+`gh release edit vX.Y.Z --draft=false --prerelease=false --latest`; the un-draft is a new
+`published` event, `release.yml` re-attaches the zip and `deploy.yml` pushes to SVN.
+Verify with `gh run list --workflow=deploy.yml` and the wp.org plugin info API.
+
 Publishing a **stable GitHub release** IS the WordPress.org deploy: `release.yml`
 builds and attaches the zip, `deploy.yml` pushes to wp.org SVN.
 

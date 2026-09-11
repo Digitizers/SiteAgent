@@ -71,6 +71,7 @@ final class AgentCodeAuditTest extends TestCase {
 				return parent::open_dir( $path );
 			}
 			protected function power_pack_env() { return $this->over['pp'] ?? parent::power_pack_env(); }
+			protected function create_publish() { return array_key_exists( 'publish', $this->over ) ? $this->over['publish'] : parent::create_publish(); }
 			protected function third_party_env() { return $this->over['tp'] ?? parent::third_party_env(); }
 		};
 		$tool->over = $over;
@@ -365,6 +366,18 @@ final class AgentCodeAuditTest extends TestCase {
 		foreach ( array( 'execute_php', 'fs_write', 'wp_cli' ) as $f ) {
 			$this->assertSame( $f === $flag, $pp[ $f ], $f );
 		}
+	}
+
+	public function test_power_pack_reports_how_a_create_publishes_on_this_host(): void {
+		// SiteAgent#96: link() is disabled on Cloudways web PHP, so the fleet
+		// needs to know whether a write_file create lands by link, by the
+		// placeholder+rename fallback, or not at all.
+		$env = array( 'version' => '0.2.4', 'execute_php' => false, 'fs_write' => true, 'wp_cli' => false );
+		$this->assertSame( 'link', $this->tool( array( 'pp' => $env, 'publish' => 'link' ) )->execute( array() )['power_pack']['create_publish'] );
+		$this->assertSame( 'rename', $this->tool( array( 'pp' => $env, 'publish' => 'rename' ) )->execute( array() )['power_pack']['create_publish'] );
+		$this->assertNull( $this->tool( array( 'pp' => $env, 'publish' => null ) )->execute( array() )['power_pack']['create_publish'] );
+		$this->assertSame( Aura_Worker_Snapshots::publish_mode(), $this->tool( array( 'pp' => $env ) )->execute( array() )['power_pack']['create_publish'], 'unseamed: the engine answers' );
+		$this->assertArrayNotHasKey( 'create_publish', $this->tool()->execute( array() )['power_pack'], 'absent Power Pack keeps its fixed shape' );
 	}
 
 	public function flagProvider(): array {

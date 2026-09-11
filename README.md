@@ -17,7 +17,7 @@
   </a>
   <img src="https://img.shields.io/badge/WordPress-6.2%E2%80%937.1-21759b?logo=wordpress" alt="WordPress" />
   <img src="https://img.shields.io/badge/PHP-7.4%2B-777bb4?logo=php" alt="PHP" />
-  <img src="https://img.shields.io/badge/Stable-2.17.0-green" alt="Stable" />
+  <img src="https://img.shields.io/badge/Stable-2.17.1-green" alt="Stable" />
 </p>
 
 ---
@@ -238,6 +238,11 @@ These plug straight into **Aura's Fleet MCP Gateway**: read tools run on demand,
 ---
 
 ## Changelog
+
+### 2.17.1
+
+- **Snapshots: `create_file()` publishes without `link()`.** Most managed hosts put `link()` in `disable_functions` for web PHP (Cloudways does — SiteAgent#96), and 2.17.0 refused every new-file create there with `unsupported_filesystem`. Without `link()` the target is claimed with an exclusive create — it refuses an existing path and returns an inode this call owns — and the bytes are written into that handle; the directory entry is re-checked by inode after the write, so a file that took the path meanwhile is never overwritten (`rename()` over a placeholder would clobber it — Codex #97). What this mode gives up is the empty-to-complete jump: a reader in the milliseconds of the write can see the file grow. A short write leaves the entry empty, never truncated content. Restoring a created file that was edited since puts it back the same way instead of stranding it under its `.aura-restore-*` name. A publish interrupted mid-write is reconciled by the stage sweep — record voided and marked `interrupted`, the file never deleted by a restore. The create result carries `published: link | write`.
+- **`audit_agent_code`:** `power_pack.create_publish` reports how a create lands on this host (`link` or `write`), so the fleet audit can say which sites create with the atomic jump.
 
 ### 2.17.0
 

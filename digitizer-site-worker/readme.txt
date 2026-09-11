@@ -4,7 +4,7 @@ Tags: ai, automation, maintenance, updates, wordpress management
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.17.0
+Stable tag: 2.17.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -252,6 +252,10 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 7. Connections: provider connections (Cloudways, Cloudflare, Bunny, Hostinger, Vultr, xCloud) with resource counts, status, and credential-rotation reminders.
 
 == Changelog ==
+
+= 2.17.1 =
+* Snapshots: `create_file()` publishes without `link()`. Most managed hosts put `link()` in `disable_functions` for web PHP (Cloudways does), and 2.17.0 refused every new-file create there (`unsupported_filesystem`). Without `link()` the target is now claimed with an exclusive create — it refuses an existing path and returns an inode this call owns — and the bytes are written into that handle; ownership is checked by inode after the write, so nothing that took the path meanwhile is ever overwritten. What this mode gives up is the empty-to-complete jump: a reader in the milliseconds of the write can see the file grow. A short write leaves the entry empty, never truncated content. Restoring a created file that was edited since puts it back the same way instead of leaving it aside under its `.aura-restore-*` name. A publish interrupted mid-write is reconciled by the stage sweep: the record is voided and marked `interrupted`, the file is never deleted by a restore. `create_file()` answers `published: link | write`.
+* `audit_agent_code`: `power_pack.create_publish` says how a create lands on this host (`link` or `write`).
 
 = 2.17.0 =
 * New read-only tool `audit_agent_code`: executable code an AI agent authored or can author on this site — Angie code snippets (recorded, agent-authored, and which are live in the environment the loader includes, correlated per snippet directory in both environments), the SiteAgent Power Pack's execute-php / file-write / wp-cli flags, and third-party exec stores (EMCP Pro sandbox, Atarim exec abilities). Counts and presence only; never file contents, never a verdict. Bounded (200 directory entries per environment, `coverage.truncated`), `null` for anything unreadable, `{ error }` per subtree.

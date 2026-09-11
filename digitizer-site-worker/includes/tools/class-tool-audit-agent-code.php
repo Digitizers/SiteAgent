@@ -60,7 +60,7 @@ class Aura_Tool_Audit_Agent_Code extends Aura_Tool_Base {
 	public function get_returns() {
 		return array(
 			'angie_snippets' => 'object — { installed, version } (installed = loaded at runtime OR present in the installed-plugin inventory, so a deactivated Angie still reports its dormant rows and directories) and, when installed: module_active, total|published|drafts|agent_authored (int|null — null when the CPT read failed or hit its cap of 500), active_env ("prod"|"dev"|null — the environment Angie\'s loader includes for THIS request; null when the dev-mode API is not callable or the snippet module is inactive), deployed: { prod: { dirs, agent_authored, orphan }, dev: {…} } (int|null per environment — directories named snippet-<post_id> that contain main.php, joined to the CPT by id; orphan = no row, which the loader still includes), latest_deploy_at: { prod, dev } (ISO8601|null, per environment, never a max across both), recent: [{ id, title, status, agent_authored, environments, modified }] (newest first, cap 20; recent_truncated when cut — never bounds a count), coverage: { total_seen, returned, truncated, cap } (the DIRECTORY WALK only, 200 entries per environment). Absent Angie: { installed: false, version: "" }. A scan that threw: { error }.',
-			'power_pack'     => 'object — { installed, version, execute_php, fs_write, wp_cli } from AURA_POWER_PACK_VERSION / AURA_POWER_EXECUTE_PHP / AURA_POWER_ALLOW_FS_WRITE / AURA_POWER_ALLOW_WP_CLI; every flag false when not installed',
+			'power_pack'     => 'object — { installed, version, execute_php, fs_write, wp_cli, create_publish } from AURA_POWER_PACK_VERSION / AURA_POWER_EXECUTE_PHP / AURA_POWER_ALLOW_FS_WRITE / AURA_POWER_ALLOW_WP_CLI; every flag false when not installed',
 			'third_party'    => 'object — { emcp_sandbox: { present, version }, atarim_exec: { present } }',
 			'counters_as_of' => 'string — ISO8601 instant the counts were taken',
 		);
@@ -446,12 +446,29 @@ class Aura_Tool_Audit_Agent_Code extends Aura_Tool_Base {
 			return array( 'installed' => false, 'version' => '', 'execute_php' => false, 'fs_write' => false, 'wp_cli' => false );
 		}
 		return array(
-			'installed'   => true,
-			'version'     => $this->clip( $env['version'] ),
-			'execute_php' => (bool) $env['execute_php'],
-			'fs_write'    => (bool) $env['fs_write'],
-			'wp_cli'      => (bool) $env['wp_cli'],
+			'installed'      => true,
+			'version'        => $this->clip( $env['version'] ),
+			'execute_php'    => (bool) $env['execute_php'],
+			'fs_write'       => (bool) $env['fs_write'],
+			'wp_cli'         => (bool) $env['wp_cli'],
+			// How a write_file CREATE lands on this host (SiteAgent#96): 'link'
+			// (one atomic hard link), 'write' (exclusive create, bytes written
+			// into the owned handle — a reader can see the file grow), or null
+			// when no create can land here: no link() and FS_CHMOD_FILE carries
+			// execute bits fopen() cannot recreate (or the engine is not loaded).
+			'create_publish' => $this->create_publish(),
 		);
+	}
+
+	/**
+	 * Seam: the engine's publish mode on this host.
+	 *
+	 * @return string|null 'link' | 'write' | null
+	 */
+	protected function create_publish() {
+		return class_exists( 'Aura_Worker_Snapshots' ) && method_exists( 'Aura_Worker_Snapshots', 'publish_mode' )
+			? Aura_Worker_Snapshots::publish_mode()
+			: null;
 	}
 
 	/**
