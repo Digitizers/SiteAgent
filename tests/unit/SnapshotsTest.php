@@ -1431,7 +1431,247 @@ final class SnapshotsTest extends TestCase {
 		$this->assertTrue( $res['success'] );
 		$this->assertArrayNotHasKey( 'warning', $res );
 		$this->assertSame( array(), glob( WP_CONTENT_DIR . '/aura-backups/snapshots/*.lock' ), 'no lock files without flock()' );
+		$this->assertSame( array(), glob( WP_CONTENT_DIR . '/aura-backups/snapshots/*.lock.d', GLOB_ONLYDIR ), 'every mkdir lock is released' );
 	}
+
+	public function test_without_flock_a_mkdir_lock_serialises_the_sweep_and_a_stale_one_is_broken(): void {
+		// SiteAgent#99 (a): the flock()-less fallback ran unlocked, so a sweep
+		// could retire a record a paused publisher then completed. The lock is
+		// now a mkdir() directory — atomic on every filesystem — and a lock
+		// directory older than LOCK_STALE_AFTER is a crashed holder.
+		$file  = WP_CONTENT_DIR . '/mkdirlock.php';
+		$snaps = new class extends Aura_Worker_Snapshots {
+			protected function link_available() {
+				return false;
+			}
+			protected function lock_available() {
+				return false;
+			}
+			protected function write_all( $fh, $src ) {
+				fwrite( $fh, fread( $src, 5 ) );
+				throw new RuntimeException( 'simulated kill mid-write' );
+			}
+		};
+		try {
+			$snaps->create_file( $file, "<?php // whole file\n" );
+		} catch ( RuntimeException $e ) {
+			// expected
+		}
+		$recs   = $snaps->list_snapshots();
+		$staged = $recs[0]['staged'];
+		touch( $staged, time() - 2 * HOUR_IN_SECONDS );
+		$lock = WP_CONTENT_DIR . '/aura-backups/snapshots/' . $recs[0]['id'] . '.lock.d';
+		$this->assertTrue( mkdir( $lock, 0700 ), 'a live holder' );
+
+		$snaps->prune_older_than( 30, Aura_Worker_Snapshots::DOOR_KINDS );
+		$this->assertFileExists( $staged, 'contended: the stage stays for the next pass' );
+		$this->assertArrayNotHasKey( 'voided', $snaps->get( $recs[0]['id'] ) );
+		$this->assertDirectoryExists( $lock, 'a fresh lock is never broken' );
+
+		touch( $lock, time() - Aura_Worker_Snapshots::LOCK_STALE_AFTER - 60 ); // the holder died long ago
+		$snaps->prune_older_than( 30, Aura_Worker_Snapshots::DOOR_KINDS );
+		$this->assertFileDoesNotExist( $staged, 'a stale lock is broken and the sweep proceeds' );
+		$this->assertTrue( $snaps->get( $recs[0]['id'] )['voided'] );
+		$this->assertDirectoryDoesNotExist( $lock, 'released' );
+	}
+
+	public function test_a_second_create_of_the_same_absent_path_waits_for_the_first_and_then_sees_it_exists(): void {
+		// SiteAgent#99 (b): two writers racing one new path in write mode — the
+		// second's in-place overwrite shared the first's inode and passed its
+		// inode check. A per-target lock spans claim, write and verification.
+		$file   = WP_CONTENT_DIR . '/raced.php';
+		$second = new class extends Aura_Worker_Snapshots {
+			protected function link_available() {
+				return false;
+			}
+			protected function target_lock_tries() {
+				return 3; // a test does not wait 5 s
+			}
+		};
+		$first = new class( $second, $file ) extends Aura_Worker_Snapshots {
+			public $other;
+			public $path;
+			public $seen = null;
+			public function __construct( $other, $path ) {
+				parent::__construct();
+				$this->other = $other;
+				$this->path  = $path;
+			}
+			protected function link_available() {
+				return false;
+			}
+			protected function during_write( $path ) {
+				$this->seen = $this->other->create_file( $this->path, "second\n" ); // arrives while the first is still writing
+			}
+		};
+
+		$res = $first->create_file( $file, "first\n" );
+
+		$this->assertTrue( $res['success'] );
+		$this->assertSame( "first\n", file_get_contents( $file ) );
+		$this->assertFalse( $first->seen['success'] );
+		$this->assertSame( 'locked', $first->seen['error'], 'the second writer is refused while the first holds the path' );
+		$this->assertStringContainsString( $file, $first->seen['detail'] );
+		$this->assertCount( 1, $first->list_snapshots(), 'one record, the first writer\'s' );
+
+		$later = $second->create_file( $file, "second\n" );
+		$this->assertSame( 'exists', $later['error'], 'after the first lands, the second sees a complete file' );
+		$this->assertSame( "first\n", file_get_contents( $file ) );
+		$this->assertSame( array(), glob( WP_CONTENT_DIR . '/aura-backups/snapshots/path-*.lock.d', GLOB_ONLYDIR ), 'target locks are released' );
+	}
+
+	public function test_a_target_whose_bytes_were_altered_during_the_write_is_reported_interrupted_not_published(): void {
+		// SiteAgent#99 (b): after the write the target must hold exactly the
+		// recorded bytes. A writer on the same inode (an in-place overwrite that
+		// did not go through the engine) is caught by the hash, not the inode.
+		$file  = WP_CONTENT_DIR . '/altered.php';
+		$snaps = new class extends Aura_Worker_Snapshots {
+			protected function link_available() {
+				return false;
+			}
+			protected function during_write( $path ) {
+				file_put_contents( $path, "// tail\n", FILE_APPEND ); // same inode, other bytes
+			}
+		};
+
+		$res = $snaps->create_file( $file, "<?php // whole\n" );
+
+		$this->assertFalse( $res['success'] );
+		$this->assertSame( 'interrupted', $res['error'] );
+		$this->assertArrayHasKey( 'stale_record', $res );
+		$rec = $snaps->get( $res['stale_record'] );
+		$this->assertTrue( $rec['voided'] );
+		$this->assertTrue( $rec['interrupted'] );
+		$this->assertCount( 1, glob( WP_CONTENT_DIR . '/.aura-create-*' ), 'the staged bytes are kept for the operator' );
+		$this->assertStringContainsString( 'staged bytes kept at', $res['detail'] );
+		$this->assertFalse( $snaps->restore( $rec['id'] )['success'], 'never deleted by a restore' );
+		$this->assertFileExists( $file );
+	}
+
+	public function test_overwrite_file_snapshots_the_old_bytes_and_replaces_the_target_atomically_keeping_its_mode(): void {
+		// SiteAgent#99 (b): the Power Pack's overwrite was file_put_contents() on
+		// the live inode. The engine now owns it: snapshot, stage beside the
+		// target with its mode, rename over it — under the same target lock a
+		// create takes.
+		$file = WP_CONTENT_DIR . '/existing.php';
+		file_put_contents( $file, "<?php // old\n" );
+		chmod( $file, 0600 );
+		$snaps = new Aura_Worker_Snapshots();
+
+		$res = $snaps->overwrite_file( $file, "<?php // new\n" );
+
+		$this->assertTrue( $res['success'] );
+		$this->assertSame( strlen( "<?php // new\n" ), $res['bytes'] );
+		$this->assertSame( "<?php // new\n", file_get_contents( $file ) );
+		$this->assertSame( 0600, fileperms( $file ) & 0777, 'the target keeps the mode it had' );
+		$this->assertArrayNotHasKey( 'staged', $res['snapshot'] );
+		$this->assertArrayNotHasKey( 'payload_path', $res['snapshot'] );
+		$this->assertSame( array(), glob( WP_CONTENT_DIR . '/.aura-create-*' ), 'no stage left behind' );
+		$this->assertSame( array(), glob( WP_CONTENT_DIR . '/aura-backups/snapshots/path-*.lock.d', GLOB_ONLYDIR ), 'the target lock is released' );
+
+		$this->assertTrue( $snaps->restore( $res['snapshot']['id'] )['success'] );
+		$this->assertSame( "<?php // old\n", file_get_contents( $file ), 'the snapshot restores the old bytes' );
+	}
+
+	public function test_overwrite_file_with_a_short_stage_write_leaves_the_target_untouched(): void {
+		$file = WP_CONTENT_DIR . '/kept.php';
+		file_put_contents( $file, "<?php // old\n" );
+		$snaps = new class extends Aura_Worker_Snapshots {
+			protected function stage( $dir, $name, $content ) {
+				return array( 'success' => false, 'error' => 'Short write while staging (disk full?): ' . $dir );
+			}
+		};
+
+		$res = $snaps->overwrite_file( $file, "<?php // new\n" );
+
+		$this->assertFalse( $res['success'] );
+		$this->assertStringContainsString( 'Short write', $res['error'] );
+		$this->assertSame( "<?php // old\n", file_get_contents( $file ), 'a short stage write never reaches the target' );
+	}
+
+	public function test_overwrite_file_refuses_a_missing_target_a_directory_and_a_symlink(): void {
+		$snaps = new Aura_Worker_Snapshots();
+		$this->assertSame( 'File not found: ' . WP_CONTENT_DIR . '/nope.php', $snaps->overwrite_file( WP_CONTENT_DIR . '/nope.php', 'x' )['error'] );
+		$this->assertStringContainsString( 'not a regular file', $snaps->overwrite_file( WP_CONTENT_DIR, 'x' )['error'] );
+		$real = WP_CONTENT_DIR . '/real.txt';
+		file_put_contents( $real, "real\n" );
+		$link = WP_CONTENT_DIR . '/alias.txt';
+		symlink( $real, $link );
+		$res = $snaps->overwrite_file( $link, "x\n" );
+		$this->assertFalse( $res['success'] );
+		$this->assertStringContainsString( 'symlink', $res['error'] );
+		$this->assertSame( "real\n", file_get_contents( $real ), 'nothing written through the link' );
+		$this->assertTrue( is_link( $link ), 'the link itself is untouched' );
+		$this->assertSame( array(), $snaps->list_snapshots(), 'nothing snapshotted' );
+	}
+
+	public function test_overwrite_file_is_refused_while_a_create_holds_the_target(): void {
+		$file = WP_CONTENT_DIR . '/held.php';
+		file_put_contents( $file, "old\n" );
+		$lock = WP_CONTENT_DIR . '/aura-backups/snapshots/path-' . sha1( $file ) . '.lock';
+		$snaps = new class extends Aura_Worker_Snapshots {
+			protected function target_lock_tries() {
+				return 3;
+			}
+		};
+		$snaps->snapshot_option( 'aura_probe' ); // the snapshots directory exists before the lock file is opened
+		$held = fopen( $lock, 'cb' );
+		$this->assertTrue( flock( $held, LOCK_EX | LOCK_NB ) );
+
+		$res = $snaps->overwrite_file( $file, "new\n" );
+
+		flock( $held, LOCK_UN );
+		fclose( $held );
+		$this->assertSame( 'locked', $res['error'] );
+		$this->assertSame( "old\n", file_get_contents( $file ) );
+	}
+
+	public function test_without_link_an_edited_executable_is_verified_in_place_and_left_at_its_path(): void {
+		// SiteAgent#99 (c): the claim by rename() preceded the hash, and the
+		// write-mode put-back refuses exec bits — an edited 0755 file was left
+		// aside with its path absent. It is hashed in place first now.
+		$file  = WP_CONTENT_DIR . '/tool.sh';
+		$maker = new Aura_Worker_Snapshots(); // link() is available here: the create lands
+		$rec   = $maker->create_file( $file, "#!/bin/sh\necho a\n" )['snapshot'];
+		chmod( $file, 0755 );
+		file_put_contents( $file, "#!/bin/sh\necho edited\n" );
+		$snaps = new class extends Aura_Worker_Snapshots {
+			protected function link_available() {
+				return false;
+			}
+		};
+
+		$res = $snaps->restore( $rec['id'] );
+
+		$this->assertFalse( $res['success'] );
+		$this->assertSame( 'file_changed_since', $res['error'] );
+		$this->assertArrayNotHasKey( 'moved_aside', $res );
+		$this->assertSame( "#!/bin/sh\necho edited\n", file_get_contents( $file ), 'untouched at its path' );
+		$this->assertSame( 0755, fileperms( $file ) & 0777 );
+		$this->assertSame( array(), glob( WP_CONTENT_DIR . '/.aura-restore-*' ), 'nothing moved' );
+
+		// Unedited: verified in place, then claimed and removed as before.
+		$file2 = WP_CONTENT_DIR . '/tool2.sh';
+		$rec2  = $maker->create_file( $file2, "#!/bin/sh\necho b\n" )['snapshot'];
+		chmod( $file2, 0755 );
+		$this->assertTrue( $snaps->restore( $rec2['id'] )['success'] );
+		$this->assertFileDoesNotExist( $file2 );
+	}
+
+	public function test_delete_removes_the_record_lock_with_the_record(): void {
+		// SiteAgent#98: delete() left `<id>.lock` behind.
+		$file  = WP_CONTENT_DIR . '/locked-then-deleted.php';
+		$snaps = new Aura_Worker_Snapshots();
+		$rec   = $snaps->create_file( $file, "x\n" )['snapshot'];
+		$lock  = WP_CONTENT_DIR . '/aura-backups/snapshots/' . $rec['id'] . '.lock';
+		$this->assertFileExists( $lock, 'the publisher\'s re-check under the record lock leaves the lock file' );
+
+		$this->assertTrue( $snaps->delete( $rec['id'] ) );
+
+		$this->assertFileDoesNotExist( $lock );
+		$this->assertNull( $snaps->get( $rec['id'] ) );
+	}
+
 
 	public function test_without_link_a_created_entry_whose_real_mode_differs_from_the_asked_one_is_refused(): void {
 		// Codex #97 round-8 P1: a default POSIX ACL makes the kernel ignore the
@@ -1639,20 +1879,24 @@ final class SnapshotsTest extends TestCase {
 		$this->assertSame( '<?php', file_get_contents( $file ), 'never deleted by a restore' );
 	}
 
-	public function test_without_link_an_executable_changed_file_is_kept_aside_because_its_mode_cannot_be_recreated(): void {
+	public function test_without_link_an_executable_changed_inside_the_claim_window_is_kept_aside_because_its_mode_cannot_be_recreated(): void {
 		// Codex #97 round-4 P2: fopen() creates from 0666 and a umask only
 		// removes bits — a 0755 file would come back 0644. Refuse the put-back
 		// instead: the file stays aside under its claim name, nothing lands at
-		// the path.
+		// the path. Since 2.17.2 an executable is verified in place BEFORE the
+		// claim (SiteAgent#99), so this residual is reached only by a change
+		// inside the claim window — modelled with the after_claim seam.
 		$file  = WP_CONTENT_DIR . '/nolinkback-exec.sh';
 		$snaps = new class extends Aura_Worker_Snapshots {
 			public $allow_link = true;
 			protected function link_available() {
 				return $this->allow_link;
 			}
+			protected function after_claim( $claim, $target ) {
+				file_put_contents( $claim, "#!/bin/sh\necho edited\n" ); // the editor's save lands on the claimed inode
+			}
 		};
 		$rec = $snaps->create_file( $file, "#!/bin/sh\n" )['snapshot'];
-		file_put_contents( $file, "#!/bin/sh\necho edited\n" );
 		chmod( $file, 0755 );
 		$snaps->allow_link = false;
 
