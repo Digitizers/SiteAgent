@@ -654,13 +654,17 @@ class Aura_Worker_Snapshots {
 	 * 'write' (exclusive create, bytes written into the owned handle — a
 	 * reader can see the file grow), or null when neither can land a create:
 	 * no link() AND a configured create mode with execute bits, which fopen()
-	 * cannot recreate (Codex #97 round-6 P2). Reported by audit_agent_code so
-	 * the fleet knows which sites can create at all, and how.
+	 * cannot recreate (Codex #97 round-6 P2), or no chmod() at all — the stage
+	 * cannot be secured and every create refuses (round-7 P2). Reported by
+	 * audit_agent_code so the fleet knows which sites can create at all, and how.
 	 *
 	 * @param int|null $mode The create mode; null = FS_CHMOD_FILE (0644).
 	 * @return string|null
 	 */
 	public static function publish_mode( $mode = null ) {
+		if ( ! function_exists( 'chmod' ) ) {
+			return null; // secure_stage() refuses every create without it (Codex #97 round-7 P2)
+		}
 		if ( function_exists( 'link' ) ) {
 			return 'link';
 		}
@@ -825,6 +829,12 @@ class Aura_Worker_Snapshots {
 	 * @return mixed $work's return, or null when the lock could not be taken.
 	 */
 	private function with_record_lock( $id, $work ) {
+		if ( ! $this->lock_available() ) {
+			// flock() in disable_functions (Codex #97 round-7 P2): the section
+			// runs unlocked — the round-6 ordering is then best-effort on such a
+			// host, which beats never reconciling and fataling after a publish.
+			return $work();
+		}
 		$lock = $this->dir . basename( (string) $id ) . '.lock';
 		$fh   = @fopen( $lock, 'cb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- A lock file this class owns; a refusal is answered, not surfaced.
 		if ( false === $fh ) {
@@ -847,6 +857,16 @@ class Aura_Worker_Snapshots {
 			flock( $fh, LOCK_UN );
 			fclose( $fh ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 		}
+	}
+
+	/**
+	 * Whether flock() can be called on this host. Seam: a test models a host
+	 * that disables it.
+	 *
+	 * @return bool
+	 */
+	protected function lock_available() {
+		return function_exists( 'flock' );
 	}
 
 	/**
@@ -930,7 +950,8 @@ class Aura_Worker_Snapshots {
 	 * partial file this create left) or something else took the path after we
 	 * died; the record is VOIDED so a restore can never delete that file,
 	 * and marked `interrupted` so the listing says why (Codex #97 round-1 P1).
-	 * An absent target needs nothing: restore on the record is "already gone".
+	 * An absent target means the claim never happened: the record is retired
+	 * (removed, else voided) so its hash can never match a later file there.
 	 *
 	 * The stage is the signal that reconciliation is still owed: when the
 	 * record could not be voided (snapshot directory unwritable, disk full)
@@ -958,10 +979,18 @@ class Aura_Worker_Snapshots {
 			function () use ( $id, $target ) {
 				$current  = $this->get( $id );
 				$expected = is_array( $current ) ? (string) ( $current['expected_sha256'] ?? '' ) : '';
-				if ( '' === $expected || ! is_file( $target ) ) {
-					return true;
+				if ( '' === $expected ) {
+					return true; // already voided or retired
 				}
-				$actual = hash_file( 'sha256', $target );
+				if ( ! self::path_present( $target ) ) {
+					// The process died between the record and the claim: nothing
+					// was ever created, so the record of a create that did not
+					// happen goes — a live hash would match an unrelated file
+					// that lands at this path later and let a restore delete it
+					// (Codex #97 round-7 P2). Removed, else voided in place.
+					return $this->void_create_record( $id );
+				}
+				$actual = is_file( $target ) ? hash_file( 'sha256', $target ) : false;
 				if ( is_string( $actual ) && hash_equals( $expected, $actual ) ) {
 					return true; // published; only the stage cleanup was lost
 				}

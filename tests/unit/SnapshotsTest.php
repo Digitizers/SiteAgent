@@ -975,10 +975,9 @@ final class SnapshotsTest extends TestCase {
 		$this->assertFileExists( $fresh, 'a young staged file may belong to a create in flight' );
 	}
 
-	public function test_prune_older_than_removes_a_stale_staged_file_named_by_a_record_and_keeps_the_record(): void {
+	public function test_prune_older_than_removes_a_stale_staged_file_and_retires_the_record_of_a_create_that_never_claimed_its_target(): void {
 		// Crash after the record and before publish: record + staged file,
-		// target absent. The sweep removes the staged bytes; the record stays
-		// (restore on it is "already gone" → success).
+		// target absent. The sweep removes the staged bytes AND retires the record.
 		$file  = WP_CONTENT_DIR . '/crash.php';
 		$snaps = new class extends Aura_Worker_Snapshots {
 			protected function publish( $tmp, $path ) {
@@ -998,10 +997,15 @@ final class SnapshotsTest extends TestCase {
 
 		$pruned = $snaps->prune_older_than( 30, Aura_Worker_Snapshots::DOOR_KINDS );
 
-		$this->assertSame( 0, $pruned, 'file records are never pruned' );
+		$this->assertSame( 0, $pruned, 'file records are never pruned by age' );
 		$this->assertFileDoesNotExist( $staged );
-		$this->assertCount( 1, $snaps->list_snapshots() );
-		$this->assertTrue( $snaps->restore( $recs[0]['id'] )['success'] );
+		// Codex #97 round-7 P2: the record of a create that never claimed its
+		// target is retired with the stage — a live hash would match an
+		// unrelated file created at that path later and let a restore delete it.
+		$this->assertSame( array(), $snaps->list_snapshots(), 'the record of a create that never happened is gone' );
+		file_put_contents( $file, "x\n" ); // someone else creates the same bytes there later
+		$this->assertFalse( $snaps->restore( $recs[0]['id'] )['success'] );
+		$this->assertFileExists( $file, 'never deleted' );
 	}
 
 	public function test_on_a_network_the_staged_sweep_touches_only_this_blogs_records(): void {
@@ -1389,6 +1393,44 @@ final class SnapshotsTest extends TestCase {
 		$this->assertTrue( $res['success'] );
 		$this->assertStringContainsString( 'could not be locked', $res['warning'] );
 		$this->assertSame( "x\n", file_get_contents( $file2 ) );
+	}
+
+	public function test_without_flock_the_sweep_still_reconciles_and_the_publisher_does_not_warn(): void {
+		// Codex #97 round-7 P2: flock() in disable_functions must not fatal after
+		// a publish nor stall reconciliation forever — the sections run unlocked.
+		$file  = WP_CONTENT_DIR . '/noflock.php';
+		$snaps = new class extends Aura_Worker_Snapshots {
+			public $kill = true;
+			protected function link_available() {
+				return false;
+			}
+			protected function lock_available() {
+				return false;
+			}
+			protected function write_all( $fh, $src ) {
+				if ( $this->kill ) {
+					fwrite( $fh, fread( $src, 5 ) );
+					throw new RuntimeException( 'simulated kill mid-write' );
+				}
+				return parent::write_all( $fh, $src );
+			}
+		};
+		try {
+			$snaps->create_file( $file, "<?php // whole file\n" );
+		} catch ( RuntimeException $e ) {
+			// expected
+		}
+		$recs = $snaps->list_snapshots();
+		touch( $recs[0]['staged'], time() - 2 * HOUR_IN_SECONDS );
+		$snaps->prune_older_than( 30, Aura_Worker_Snapshots::DOOR_KINDS );
+		$this->assertFileDoesNotExist( $recs[0]['staged'] );
+		$this->assertTrue( $snaps->get( $recs[0]['id'] )['voided'] );
+
+		$snaps->kill = false;
+		$res = $snaps->create_file( WP_CONTENT_DIR . '/noflock2.php', "x\n" );
+		$this->assertTrue( $res['success'] );
+		$this->assertArrayNotHasKey( 'warning', $res );
+		$this->assertSame( array(), glob( WP_CONTENT_DIR . '/aura-backups/snapshots/*.lock' ), 'no lock files without flock()' );
 	}
 
 	public function test_a_completed_publish_whose_stage_cleanup_was_lost_keeps_its_record(): void {
