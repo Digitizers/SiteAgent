@@ -1243,7 +1243,7 @@ class Aura_Worker_Snapshots {
 				// the two calls (the ordinary race — try again, Codex #100
 				// round-2 P2) or no lock can be created under the snapshots
 				// directory at all.
-				if ( ! is_dir( $this->dir ) || ! is_writable( $this->dir ) ) {
+				if ( ! is_dir( $this->dir ) || ! is_writable( $this->dir ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_is_writable -- The snapshots directory this class owns; $wp_filesystem is not initialised on this path.
 					self::discard_preparation( $prep );
 					return self::LOCK_UNAVAILABLE;
 				}
