@@ -1462,6 +1462,7 @@ final class SnapshotsTest extends TestCase {
 		touch( $staged, time() - 2 * HOUR_IN_SECONDS );
 		$lock = WP_CONTENT_DIR . '/aura-backups/snapshots/' . $recs[0]['id'] . '.lock.d';
 		$this->assertTrue( mkdir( $lock, 0700 ), 'a live holder' );
+		file_put_contents( $lock . '/tok', '4194301:1' ); // a holder's token — fresh, so its liveness is not even asked (round-3: an EMPTY directory is never a holder; the token arrives with the lock)
 
 		$snaps->prune_older_than( 30, Aura_Worker_Snapshots::DOOR_KINDS );
 		$this->assertFileExists( $staged, 'contended: the stage stays for the next pass' );
@@ -1811,6 +1812,48 @@ final class SnapshotsTest extends TestCase {
 		$res = $snaps->create_file( $file, "x\n" );
 		$this->assertTrue( $res['success'] );
 		$this->assertStringNotContainsString( 'Unable to create a lock', (string) ( $res['error'] ?? '' ) );
+	}
+
+	public function test_without_flock_a_breaker_that_lost_the_race_cannot_reclaim_the_new_holders_lock(): void {
+		// Codex #100 round-3 P1: two breakers judge the same dead instance; the
+		// first reclaims and re-acquires, the second must take nothing from it.
+		// The lock is taken by renaming a prepared directory with the token
+		// already inside, so it is never empty; the loser's rmdir() is refused.
+		$file  = WP_CONTENT_DIR . '/two-breakers.php';
+		$snaps = new class extends Aura_Worker_Snapshots {
+			public $second_breaker_rmdir = null;
+			public $tokens_during        = null;
+			public $preps_during         = null;
+			protected function link_available() {
+				return false;
+			}
+			protected function lock_available() {
+				return false;
+			}
+			protected function during_write( $path ) {
+				$dir = WP_CONTENT_DIR . '/aura-backups/snapshots/path-' . sha1( $path ) . '.lock.d';
+				// The second breaker, late: it unlinks the token it inspected
+				// (already gone) and tries to remove "the dead directory".
+				@unlink( $dir . '/dead-token' );
+				$this->second_breaker_rmdir = @rmdir( $dir );
+				$this->tokens_during        = count( glob( $dir . '/*' ) );
+				$this->preps_during         = glob( WP_CONTENT_DIR . '/aura-backups/snapshots/path-*.lock.d.tmp-*' );
+			}
+		};
+		$dir = WP_CONTENT_DIR . '/aura-backups/snapshots/path-' . sha1( $file ) . '.lock.d';
+		$snaps->snapshot_option( 'aura_probe' );
+		mkdir( $dir, 0700 );
+		file_put_contents( $dir . '/dead-token', '4194301:1' ); // a holder that is not there
+		touch( $dir, time() - Aura_Worker_Snapshots::LOCK_STALE_AFTER - 60 );
+
+		$res = $snaps->create_file( $file, "x\n" );
+
+		$this->assertTrue( $res['success'], 'the first breaker reclaimed and re-acquired' );
+		$this->assertFalse( $snaps->second_breaker_rmdir, 'the late breaker\'s rmdir() is refused: the new holder\'s token is inside' );
+		$this->assertSame( 1, $snaps->tokens_during, 'exactly the new holder\'s token' );
+		$this->assertSame( array(), $snaps->preps_during, 'the preparation directory was renamed, not copied' );
+		$this->assertDirectoryDoesNotExist( $dir, 'released' );
+		$this->assertSame( array(), glob( WP_CONTENT_DIR . '/aura-backups/snapshots/path-*.lock.d*' ), 'nothing left behind' );
 	}
 
 	public function test_without_flock_a_broken_holder_cannot_release_the_replacement_lock(): void {
