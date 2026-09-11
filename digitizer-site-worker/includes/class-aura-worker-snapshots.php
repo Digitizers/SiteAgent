@@ -223,22 +223,9 @@ class Aura_Worker_Snapshots {
 				if ( empty( $snap['success'] ) ) {
 					return $snap;
 				}
-				$perms = @fileperms( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- The file is there (checked above); a refusal is answered below.
-				if ( false === $perms ) {
-					return array( 'success' => false, 'error' => 'Unable to read the mode of: ' . $path );
-				}
-				$tmp = $this->stage( dirname( $path ), basename( $path ), $content );
-				if ( is_array( $tmp ) ) {
-					return $tmp; // nothing at the target changed; the snapshot is an extra restore point
-				}
-				// stage() set the create mode; the replacement keeps the file's OWN.
-				if ( ! @chmod( $tmp, $perms & 0777 ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Our own staged file; a refusal is answered, not surfaced.
-					$this->discard_stage( $tmp );
-					return array( 'success' => false, 'error' => 'Unable to set permissions on the staged file: ' . $tmp );
-				}
-				if ( ! @rename( $tmp, $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.rename_rename -- Clobbering IS the point here, atomically; $wp_filesystem->move() may copy+delete.
-					$this->discard_stage( $tmp );
-					return array( 'success' => false, 'error' => 'Unable to replace the target: ' . $path );
+				$replaced = $this->replace_in_place( $path, $content );
+				if ( true !== $replaced ) {
+					return array( 'success' => false, 'error' => $replaced ); // nothing at the target changed; the snapshot is an extra restore point
 				}
 				return array(
 					'success'  => true,
@@ -388,8 +375,17 @@ class Aura_Worker_Snapshots {
 			// a success (SiteAgent#99): the inode check proves the ENTRY is ours,
 			// not that nothing else wrote into it. Same outcome as a partial —
 			// the file is a fact, the record must never let a restore delete it.
+			$this->after_publish( $path );
 			$landed = is_file( $path ) ? hash_file( 'sha256', $path ) : false;
 			if ( ! is_string( $landed ) || ! hash_equals( $sha, $landed ) ) {
+				if ( 'link' === $this->last_publish_mode ) {
+					// The stage is a second NAME of the altered inode, not a copy
+					// (Codex #100 round-1 P2): the intended content is staged
+					// afresh so what is called kept is what should have landed.
+					$this->discard_stage( $tmp );
+					$fresh = $this->stage( $dir, $name, $content );
+					$tmp   = is_string( $fresh ) ? $fresh : null;
+				}
 				return $this->interrupted_create( $record['id'], $tmp, 'interrupted', 'the target does not hold the staged bytes after the publish (a concurrent writer on the same file?)' );
 			}
 		}
@@ -751,6 +747,7 @@ class Aura_Worker_Snapshots {
 	 */
 	protected function write_all( $fh, $src ) {
 		while ( ! feof( $src ) ) {
+			$this->heartbeat_locks();
 			$chunk = fread( $src, 65536 ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread
 			if ( false === $chunk ) {
 				return false;
@@ -830,8 +827,14 @@ class Aura_Worker_Snapshots {
 	 */
 	private function abandon_create( $tmp, $id, $error ) {
 		$this->discard_stage( $tmp );
-		$out = array( 'success' => false, 'error' => $error );
-		if ( ! $this->void_create_record( $id ) ) {
+		$out  = array( 'success' => false, 'error' => $error );
+		$done = $this->with_record_lock(
+			$id,
+			function () use ( $id ) {
+				return $this->void_create_record( $id );
+			}
+		);
+		if ( true !== $done ) {
 			$out['stale_record'] = $id;
 		}
 		return $out;
@@ -852,9 +855,19 @@ class Aura_Worker_Snapshots {
 	private function interrupted_create( $id, $tmp, $error, $detail ) {
 		$out = array( 'success' => false, 'error' => $error, 'detail' => (string) $detail, 'stale_record' => $id );
 		if ( $this->void_record_in_place( $id, array( 'interrupted' => true ) ) ) {
-			$out['detail'] .= '; record ' . $id . ' voided and marked interrupted, staged bytes kept at ' . $tmp;
+			$out['detail'] .= '; record ' . $id . ' voided and marked interrupted, '
+				. ( is_string( $tmp ) ? 'staged bytes kept at ' . $tmp : 'the intended content could not be kept' );
 		}
 		return $out;
+	}
+
+	/**
+	 * Seam between the publish and the verification of what landed. Nothing
+	 * in production; a test models a writer on the published inode here.
+	 *
+	 * @param string $path Target path.
+	 */
+	protected function after_publish( $path ) {
 	}
 
 	/**
@@ -1046,19 +1059,31 @@ class Aura_Worker_Snapshots {
 		// waiter that opened the old inode and a newcomer that creates a new one
 		// would both hold "the" lock). It is empty, one per record or path, and
 		// a record's goes with the record.
-		$fh = @fopen( $base . '.lock', 'cb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- A lock file this class owns; a refusal is answered, not surfaced.
-		if ( false === $fh ) {
-			return self::LOCK_UNAVAILABLE;
-		}
-		$held = false;
-		for ( $i = 0; $i < $tries && ! $held; $i++ ) {
-			$held = flock( $fh, LOCK_EX | LOCK_NB );
-			if ( ! $held ) {
-				usleep( 20000 );
+		$lock = $base . '.lock';
+		$fh   = null;
+		for ( $i = 0; $i < $tries; $i++ ) {
+			$fh = @fopen( $lock, 'cb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- A lock file this class owns; a refusal is answered, not surfaced.
+			if ( false === $fh ) {
+				return self::LOCK_UNAVAILABLE;
 			}
-		}
-		if ( ! $held ) {
+			if ( flock( $fh, LOCK_EX | LOCK_NB ) ) {
+				// The lock is the INODE, and a holder may unlink the file under
+				// the lock (delete_record_file()). A waiter that opened the old
+				// inode would then "hold" a lock nobody else can see while a
+				// newcomer holds the new one (Codex #100 round-1 P1). Prove the
+				// file at the path is still the one held, else start over.
+				$mine = fstat( $fh );
+				$now  = @stat( $lock ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Gone is an answer: reopen.
+				if ( is_array( $mine ) && is_array( $now ) && $now['ino'] === $mine['ino'] && $now['dev'] === $mine['dev'] ) {
+					break;
+				}
+				flock( $fh, LOCK_UN );
+			}
 			fclose( $fh ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+			$fh = null;
+			usleep( 20000 );
+		}
+		if ( null === $fh ) {
 			return null;
 		}
 		try {
@@ -1078,6 +1103,12 @@ class Aura_Worker_Snapshots {
 	 * @return mixed $work's return, or null when the lock could not be taken.
 	 */
 	private function with_mkdir_lock( $dir, $work, $tries ) {
+		try {
+			$token = bin2hex( random_bytes( 8 ) );
+		} catch ( \Exception $e ) {
+			$token = substr( md5( uniqid( '', true ) ), 0, 16 );
+		}
+		$mine = $dir . '/' . $token;
 		$held = false;
 		for ( $i = 0; $i < $tries && ! $held; $i++ ) {
 			$held = @mkdir( $dir, 0700 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- EEXIST is the expected refusal: someone holds it.
@@ -1087,8 +1118,16 @@ class Aura_Worker_Snapshots {
 			if ( ! is_dir( $dir ) ) {
 				return self::LOCK_UNAVAILABLE; // refused for another reason (permissions): no lock can be created here
 			}
+			// Stale means SILENT: a live holder touches the directory on every
+			// chunk it writes (heartbeat_locks()), so only a holder that has
+			// gone quiet for LOCK_STALE_AFTER is broken — a slow write is not
+			// (Codex #100 round-1 P1). Breaking removes the dead holder's token
+			// and the directory; the next mkdir() to win holds it.
 			$at = @filemtime( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- The holder may release between the two calls; that is an answer.
 			if ( false !== $at && $at < time() - self::LOCK_STALE_AFTER ) {
+				foreach ( (array) @glob( $dir . '/*' ) as $stale ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Released meanwhile is an answer.
+					@unlink( $stale ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.unlink_unlink -- A dead holder's token.
+				}
 				@rmdir( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_rmdir -- A crashed holder's leftover; whoever's mkdir wins next holds it.
 				continue;
 			}
@@ -1097,10 +1136,31 @@ class Aura_Worker_Snapshots {
 		if ( ! $held ) {
 			return null;
 		}
+		// The token names THIS holder: a directory holding another holder's
+		// token cannot be rmdir()ed, so a holder that was broken as stale and
+		// comes back cannot take the replacement's lock away with it.
+		@touch( $mine ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_touch -- Inside a directory this call just created.
+		$this->held_lock_dirs[] = $dir;
 		try {
 			return $work();
 		} finally {
-			@rmdir( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_rmdir -- Release; a directory that is already gone was broken as stale, which is the same state.
+			array_pop( $this->held_lock_dirs );
+			@unlink( $mine ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.unlink_unlink -- Our token; gone already if we were broken as stale.
+			@rmdir( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_rmdir -- Release; refused (non-empty) when a replacement holder's token is inside, which is exactly right.
+		}
+	}
+
+	/** mkdir() lock directories this instance holds right now, innermost last. */
+	private $held_lock_dirs = array();
+
+	/**
+	 * Tell every mkdir() lock this instance holds that its holder is alive.
+	 * Called from the write loop; a heartbeat is what separates a slow
+	 * holder from a dead one. No-op under flock() (the kernel knows).
+	 */
+	private function heartbeat_locks() {
+		foreach ( $this->held_lock_dirs as $dir ) {
+			@touch( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_touch -- Our own lock directory; a refusal only shortens the grace.
 		}
 	}
 
@@ -1171,12 +1231,14 @@ class Aura_Worker_Snapshots {
 		if ( file_exists( $meta_path ) ) {
 			wp_delete_file( $meta_path );
 		}
+		// The flock file goes with the record — safe ONLY because every caller
+		// holds this record's lock and with_lock() re-checks the inode after
+		// acquiring (Codex #100 round-1 P1). A mkdir() lock directory is not
+		// touched here: its holder releases it, and a crashed holder's is
+		// broken by the next taker.
 		$lock = $this->dir . basename( (string) $id ) . '.lock';
 		if ( file_exists( $lock ) ) {
 			wp_delete_file( $lock );
-		}
-		if ( is_dir( $lock . '.d' ) ) {
-			@rmdir( $lock . '.d' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_rmdir -- A stale mkdir lock of a record that is going; a refusal is harmless.
 		}
 	}
 
@@ -1608,6 +1670,66 @@ class Aura_Worker_Snapshots {
 	}
 
 	/**
+	 * Put an existing-file snapshot's bytes back at its path: under the
+	 * target's lock, by the same stage-and-rename the engine overwrites with
+	 * — never an in-place write into an inode a concurrent create or
+	 * overwrite is filling (Codex #100 round-1 P1). A symlink at the path is
+	 * refused: a rename would replace the link itself.
+	 *
+	 * @param string $target Path.
+	 * @param string $bytes  The snapshot's payload.
+	 * @return array { success, error? }
+	 */
+	private function restore_existing_file( $target, $bytes ) {
+		if ( '' === $target ) {
+			return array( 'success' => false, 'error' => 'Snapshot record carries no target.' );
+		}
+		if ( is_link( $target ) ) {
+			return array( 'success' => false, 'error' => 'Target is a symlink: ' . $target );
+		}
+		$out = $this->with_target_lock(
+			$target,
+			function () use ( $target, $bytes ) {
+				$replaced = $this->replace_in_place( $target, $bytes );
+				return true === $replaced
+					? array( 'success' => true )
+					: array( 'success' => false, 'error' => 'Failed to write file: ' . $target . ' (' . $replaced . ')' );
+			}
+		);
+		return $this->locked_answer( $out, $target );
+	}
+
+	/**
+	 * Replace whatever is at $path with $content, atomically: stage beside it
+	 * (with the file's own mode when one is there), rename over it. Callers
+	 * hold the target lock. Nothing at the path changes on any failure.
+	 *
+	 * @param string $path    Path (an existing regular file, or absent).
+	 * @param string $content Complete content.
+	 * @return true|string true, or why not.
+	 */
+	private function replace_in_place( $path, $content ) {
+		$dir = dirname( $path );
+		if ( ! is_dir( $dir ) ) {
+			return 'Directory not found: ' . $dir;
+		}
+		$perms = is_file( $path ) ? @fileperms( $path ) : false; // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- An absent target keeps the create mode.
+		$tmp   = $this->stage( $dir, basename( $path ), $content );
+		if ( is_array( $tmp ) ) {
+			return (string) $tmp['error'];
+		}
+		if ( false !== $perms && ! @chmod( $tmp, $perms & 0777 ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Our own staged file; a refusal is answered, not surfaced.
+			$this->discard_stage( $tmp );
+			return 'Unable to set permissions on the staged file: ' . $tmp;
+		}
+		if ( ! @rename( $tmp, $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.rename_rename -- Clobbering IS the point here, atomically; $wp_filesystem->move() may copy+delete.
+			$this->discard_stage( $tmp );
+			return 'Unable to replace the target: ' . $path;
+		}
+		return true;
+	}
+
+	/**
 	 * The restore proper, under the target's lock (SiteAgent#99).
 	 *
 	 * @param array  $record The record.
@@ -1900,10 +2022,11 @@ class Aura_Worker_Snapshots {
 				if ( ! $payload_path || ! file_exists( $payload_path ) ) {
 					return array( 'success' => false, 'error' => 'Snapshot payload missing.' );
 				}
-				$ok = file_put_contents( $record['target'], file_get_contents( $payload_path ) );
-				return ( false === $ok )
-					? array( 'success' => false, 'error' => 'Failed to write file: ' . $record['target'] )
-					: array( 'success' => true );
+				$bytes = file_get_contents( $payload_path );
+				if ( false === $bytes ) {
+					return array( 'success' => false, 'error' => 'Snapshot payload unreadable.' );
+				}
+				return $this->restore_existing_file( (string) $record['target'], $bytes );
 
 			case 'option':
 				if ( empty( $record['existed'] ) ) {
@@ -2244,10 +2367,19 @@ class Aura_Worker_Snapshots {
 		if ( null === $record ) {
 			return false;
 		}
-		if ( ! empty( $record['payload_path'] ) && file_exists( $record['payload_path'] ) ) {
-			wp_delete_file( $record['payload_path'] );
-		}
-		$this->delete_record_file( $id ); // the record AND its lock (SiteAgent#98)
-		return true;
+		// Under the record's own lock (SiteAgent#98, Codex #100 round-1 P1): a
+		// sweeper voiding or a publisher reinstating this record is never
+		// overlapped by its deletion. Contended → not deleted; say so.
+		$done = $this->with_record_lock(
+			$id,
+			function () use ( $record, $id ) {
+				if ( ! empty( $record['payload_path'] ) && file_exists( $record['payload_path'] ) ) {
+					wp_delete_file( $record['payload_path'] );
+				}
+				$this->delete_record_file( $id ); // the record AND its lock file
+				return true;
+			}
+		);
+		return true === $done;
 	}
 }

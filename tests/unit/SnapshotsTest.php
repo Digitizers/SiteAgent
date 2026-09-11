@@ -1658,18 +1658,171 @@ final class SnapshotsTest extends TestCase {
 		$this->assertFileDoesNotExist( $file2 );
 	}
 
-	public function test_delete_removes_the_record_lock_with_the_record(): void {
-		// SiteAgent#98: delete() left `<id>.lock` behind.
+	public function test_delete_removes_the_record_lock_with_the_record_and_is_refused_while_it_is_held(): void {
+		// SiteAgent#98: delete() left `<id>.lock` behind. Codex #100 round-1
+		// P1: it may go only under the record's lock.
 		$file  = WP_CONTENT_DIR . '/locked-then-deleted.php';
 		$snaps = new Aura_Worker_Snapshots();
 		$rec   = $snaps->create_file( $file, "x\n" )['snapshot'];
 		$lock  = WP_CONTENT_DIR . '/aura-backups/snapshots/' . $rec['id'] . '.lock';
 		$this->assertFileExists( $lock, 'the publisher\'s re-check under the record lock leaves the lock file' );
+		$held = fopen( $lock, 'cb' );
+		$this->assertTrue( flock( $held, LOCK_EX | LOCK_NB ) );
+
+		$this->assertFalse( $snaps->delete( $rec['id'] ), 'held by a sweeper or publisher: not deleted' );
+		$this->assertIsArray( $snaps->get( $rec['id'] ) );
+		flock( $held, LOCK_UN );
+		fclose( $held );
 
 		$this->assertTrue( $snaps->delete( $rec['id'] ) );
-
 		$this->assertFileDoesNotExist( $lock );
 		$this->assertNull( $snaps->get( $rec['id'] ) );
+	}
+
+	public function test_a_waiter_that_opened_a_lock_file_since_unlinked_does_not_hold_the_lock(): void {
+		// Codex #100 round-1 P1: the flock is on the inode; once a holder unlinks
+		// the file under the lock, a waiter's inode is nobody's lock. with_lock()
+		// re-checks the inode after acquiring and starts over.
+		$file  = WP_CONTENT_DIR . '/unlinked-lock.php';
+		$snaps = new Aura_Worker_Snapshots();
+		$rec   = $snaps->create_file( $file, "x\n" )['snapshot'];
+		$lock  = WP_CONTENT_DIR . '/aura-backups/snapshots/' . $rec['id'] . '.lock';
+		$old   = fopen( $lock, 'cb' );
+		$this->assertTrue( flock( $old, LOCK_EX | LOCK_NB ) );
+		unlink( $lock ); // what delete_record_file() does under the lock
+		$new = fopen( $lock, 'cb' );
+		$this->assertTrue( flock( $new, LOCK_EX | LOCK_NB ), 'the NEW inode is free' );
+		flock( $old, LOCK_UN );
+		fclose( $old ); // the old inode is free — a naive taker would think it holds the lock now
+
+		$this->assertFalse( $snaps->delete( $rec['id'] ), 'the lock at the path is held (the new inode); the old one is not the lock' );
+		flock( $new, LOCK_UN );
+		fclose( $new );
+		$this->assertTrue( $snaps->delete( $rec['id'] ) );
+	}
+
+	public function test_without_flock_a_slow_holder_heartbeats_and_is_not_broken_by_age(): void {
+		// Codex #100 round-1 P1: stale means silent, not old. The write loop
+		// touches every held lock directory per chunk; a holder that has been
+		// writing for longer than LOCK_STALE_AFTER is still alive.
+		$file  = WP_CONTENT_DIR . '/slow.bin';
+		$snaps = new class extends Aura_Worker_Snapshots {
+			public $seen_token = null;
+			public $seen_fresh = null;
+			protected function link_available() {
+				return false;
+			}
+			protected function lock_available() {
+				return false;
+			}
+			protected function write_all( $fh, $src ) {
+				$dir = WP_CONTENT_DIR . '/aura-backups/snapshots/path-' . sha1( $this->target_for_test ) . '.lock.d';
+				touch( $dir, time() - Aura_Worker_Snapshots::LOCK_STALE_AFTER - 60 ); // as if the holder had been at it for a long time
+				return parent::write_all( $fh, $src );
+			}
+			protected function during_write( $path ) {
+				$dir              = WP_CONTENT_DIR . '/aura-backups/snapshots/path-' . sha1( $path ) . '.lock.d';
+				$this->seen_fresh = filemtime( $dir ) > time() - 60;
+				$this->seen_token = count( glob( $dir . '/*' ) );
+			}
+			public $target_for_test = '';
+		};
+		$snaps->target_for_test = $file;
+
+		$res = $snaps->create_file( $file, str_repeat( 'a', 3 * 65536 + 1 ) );
+
+		$this->assertTrue( $res['success'] );
+		$this->assertTrue( $snaps->seen_fresh, 'the heartbeat moved the lock directory\'s mtime' );
+		$this->assertSame( 1, $snaps->seen_token, 'the holder\'s token is inside' );
+		$this->assertDirectoryDoesNotExist( WP_CONTENT_DIR . '/aura-backups/snapshots/path-' . sha1( $file ) . '.lock.d' );
+	}
+
+	public function test_without_flock_a_broken_holder_cannot_release_the_replacement_lock(): void {
+		// Codex #100 round-1 P1: the directory holds its owner's token, so a
+		// rmdir() by a holder that was broken as stale fails on the replacement's.
+		$dir = WP_CONTENT_DIR . '/aura-backups/snapshots/path-x.lock.d';
+		mkdir( WP_CONTENT_DIR . '/aura-backups/snapshots', 0755, true );
+		mkdir( $dir, 0700 );
+		touch( $dir . '/replacement-token' );
+
+		$this->assertFalse( @rmdir( $dir ), 'non-empty: the old holder\'s release is refused' );
+		$this->assertDirectoryExists( $dir );
+		unlink( $dir . '/replacement-token' );
+		rmdir( $dir );
+	}
+
+	public function test_restoring_an_existing_file_snapshot_replaces_by_stage_and_rename_under_the_target_lock(): void {
+		// Codex #100 round-1 P1: the existing-file restore wrote in place with
+		// file_put_contents(), outside the path lock every other engine writer
+		// takes. It stages and renames now, under the lock.
+		$file = WP_CONTENT_DIR . '/rolled.php';
+		file_put_contents( $file, "<?php // v1\n" );
+		chmod( $file, 0600 );
+		$snaps = new class extends Aura_Worker_Snapshots {
+			protected function target_lock_tries() {
+				return 3;
+			}
+		};
+		$rec = $snaps->overwrite_file( $file, "<?php // v2\n" )['snapshot'];
+		$lock = WP_CONTENT_DIR . '/aura-backups/snapshots/path-' . sha1( $file ) . '.lock';
+		$held = fopen( $lock, 'cb' );
+		$this->assertTrue( flock( $held, LOCK_EX | LOCK_NB ) );
+
+		$res = $snaps->restore( $rec['id'] );
+		$this->assertSame( 'locked', $res['error'] );
+		$this->assertSame( "<?php // v2\n", file_get_contents( $file ), 'nothing written while the path is held' );
+		flock( $held, LOCK_UN );
+		fclose( $held );
+
+		$this->assertTrue( $snaps->restore( $rec['id'] )['success'] );
+		$this->assertSame( "<?php // v1\n", file_get_contents( $file ) );
+		$this->assertSame( 0600, fileperms( $file ) & 0777, 'the file keeps its mode' );
+		$this->assertSame( array(), glob( WP_CONTENT_DIR . '/.aura-create-*' ) );
+
+		// A short stage write on the restore leaves the target as it was.
+		$short = new class extends Aura_Worker_Snapshots {
+			protected function stage( $dir, $name, $content ) {
+				return array( 'success' => false, 'error' => 'Short write while staging (disk full?): ' . $dir );
+			}
+		};
+		file_put_contents( $file, "<?php // v3\n" );
+		$res = $short->restore( $rec['id'] );
+		$this->assertFalse( $res['success'] );
+		$this->assertStringContainsString( 'Short write', $res['error'] );
+		$this->assertSame( "<?php // v3\n", file_get_contents( $file ) );
+
+		// A symlink at the path is refused rather than replaced.
+		unlink( $file );
+		file_put_contents( WP_CONTENT_DIR . '/elsewhere.php', "real\n" );
+		symlink( WP_CONTENT_DIR . '/elsewhere.php', $file );
+		$res = $snaps->restore( $rec['id'] );
+		$this->assertFalse( $res['success'] );
+		$this->assertStringContainsString( 'symlink', $res['error'] );
+		$this->assertTrue( is_link( $file ) );
+		$this->assertSame( "real\n", file_get_contents( WP_CONTENT_DIR . '/elsewhere.php' ) );
+	}
+
+	public function test_with_link_a_target_altered_after_the_publish_is_interrupted_and_the_intended_content_is_re_staged(): void {
+		// Codex #100 round-1 P2: in link mode the stage is a second name of the
+		// published inode, so an in-place writer altered it too. The intended
+		// content is staged afresh before it is called kept.
+		$file  = WP_CONTENT_DIR . '/linked-altered.php';
+		$snaps = new class extends Aura_Worker_Snapshots {
+			protected function after_publish( $path ) {
+				file_put_contents( $path, "// tail\n", FILE_APPEND ); // the same inode as the stage
+			}
+		};
+
+		$res = $snaps->create_file( $file, "<?php // whole\n" );
+
+		$this->assertFalse( $res['success'] );
+		$this->assertSame( 'interrupted', $res['error'] );
+		$this->assertStringContainsString( 'staged bytes kept at', $res['detail'] );
+		$kept = glob( WP_CONTENT_DIR . '/.aura-create-*' );
+		$this->assertCount( 1, $kept );
+		$this->assertSame( "<?php // whole\n", file_get_contents( $kept[0] ), 'the kept copy is the intended content, not the altered inode' );
+		$this->assertSame( "<?php // whole\n// tail\n", file_get_contents( $file ) );
+		$this->assertTrue( $snaps->get( $res['stale_record'] )['interrupted'] );
 	}
 
 
