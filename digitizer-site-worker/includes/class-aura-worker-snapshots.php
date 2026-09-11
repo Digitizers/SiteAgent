@@ -1272,7 +1272,7 @@ class Aura_Worker_Snapshots {
 		// token cannot be rmdir()ed, so a holder that was broken as stale and
 		// comes back cannot take the replacement's lock away with it.
 		self::$mkdir_locks_held[ $dir ] = $mine;
-		if ( ! self::$release_on_shutdown ) {
+		if ( ! self::$release_on_shutdown && function_exists( 'register_shutdown_function' ) ) {
 			// A fatal error skips every finally; a shutdown function still runs.
 			// Only a process the kernel killed leaves a directory behind — and
 			// that one the liveness check below can see is dead.
@@ -1348,8 +1348,11 @@ class Aura_Worker_Snapshots {
 	 * @return string "pid:starttime:host" (starttime empty where unknown).
 	 */
 	protected function holder_identity() {
-		$pid   = (int) getmypid();
-		$start = $this->proc_start_time( $pid );
+		// A hardened host may disable these beside flock() (Codex #100 round-8
+		// P1): pid 0 reads as "unknown holder" to holder_alive(), so the lease
+		// (heartbeat + age) governs instead of a fatal.
+		$pid   = function_exists( 'getmypid' ) ? (int) getmypid() : 0;
+		$start = $pid > 0 ? $this->proc_start_time( $pid ) : null;
 		return $pid . ':' . ( null === $start ? '' : $start ) . ':' . self::host_identity();
 	}
 
@@ -1363,7 +1366,7 @@ class Aura_Worker_Snapshots {
 	 * @return string
 	 */
 	private static function host_identity() {
-		$host = (string) gethostname();
+		$host = function_exists( 'gethostname' ) ? (string) gethostname() : '';
 		$boot = @file_get_contents( '/proc/sys/kernel/random/boot_id' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Not a URL; absent off Linux, which is an answer.
 		return substr( sha1( $host . '|' . ( is_string( $boot ) ? trim( $boot ) : '' ) ), 0, 16 );
 	}

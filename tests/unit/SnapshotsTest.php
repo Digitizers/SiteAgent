@@ -2136,6 +2136,19 @@ final class SnapshotsTest extends TestCase {
 		$this->assertFileDoesNotExist( WP_CONTENT_DIR . '/acl-create.php' );
 	}
 
+	public function test_an_identity_with_no_pid_is_an_unknown_holder_governed_by_the_lease(): void {
+		// Codex #100 round-8 P1: getmypid()/gethostname() disabled beside flock()
+		// must not fatal; a pid of 0 is "unknown", and age decides.
+		$snaps = new class extends Aura_Worker_Snapshots {
+			public function alive_for_test( $identity ) {
+				return $this->holder_alive( $identity );
+			}
+		};
+		$this->assertNull( $snaps->alive_for_test( '0::' ) );
+		$this->assertNull( $snaps->alive_for_test( '0::abcdef0123456789' ) );
+		$this->assertNull( $snaps->alive_for_test( '' ) );
+	}
+
 	public function test_without_flock_a_broken_holder_cannot_release_the_replacement_lock(): void {
 		// Codex #100 round-1 P1: the directory holds its owner's token, so a
 		// rmdir() by a holder that was broken as stale fails on the replacement's.
