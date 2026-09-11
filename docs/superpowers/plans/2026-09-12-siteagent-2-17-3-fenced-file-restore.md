@@ -16,6 +16,7 @@
 
 - **Every new refusal carries a `code`.** `aura_snapshot_unfenced`, `aura_file_changed_since`, `aura_snapshot_voided`, `aura_path_locked` — spelled exactly so. `restore_after_admission()` maps `isset( $result['code'] )` to **409**; an answer without a code is a 500 and means an execution failure, not a refusal (spec §3.1).
 - **The fence is exact-match, both ways.** A restore of an overwrite record writes only when the file hashes to the record's `replaced_with_sha256`; when it already hashes to the payload it answers `{ success: true, already: true }` and writes nothing; anything else — different bytes, gone, not a regular file — is `aura_file_changed_since` and nothing is written (spec §3.1).
+- **The fence key is written AFTER the write lands, which is a deliberate departure from spec §3.1** (which says `replaced_with_sha256` is "persisted with the record (before `replace_in_place()`)"). Persisting it first makes the record assert something untrue for as long as the write can still fail, and every recovery from that state depends on a delete or a void that can itself be refused (Codex #101 round-5/round-6 P1). Stamping after the write removes the unsafe state instead of recovering from it; a stamp that fails leaves the record unfenced, which is the safe side. The spec's intent — no restorable record without a proven fence — is kept exactly.
 - **No hash, no restore.** A `kind: file` record with `existed !== false` and no `replaced_with_sha256` answers `aura_snapshot_unfenced` and writes nothing. Records taken by a direct `snapshot_file()` (REST `POST /aura/v2/snapshot`, an old Power Pack's fallback path) are unfenced by construction and are refused — a deliberate behaviour change, called out in the changelog (spec §2 Q3: fail closed).
 - **`write_seq` is taken under the target lock, before the record is persisted**, as `max(previous + 1, now in microseconds)` with `previous` from the sidecar `path-<sha1>.seq`, and the sidecar is written back before the record (spec §3.1).
 - **A `write_seq` that cannot be established is ABSENT, never guessed.** An unreadable or non-decimal sidecar, a sidecar that cannot be written, or a 32-bit build (`PHP_INT_SIZE < 8`, where microseconds overflow) leaves the record without the key; the write itself still proceeds. Aura mirrors such a row unfenced (spec §3.1).
@@ -265,7 +266,11 @@ In `overwrite_file()`'s locked closure, take the sequence and the replaced-conte
 				if ( null !== $refused ) {
 					return $refused;
 				}
-				$extra = array( 'replaced_with_sha256' => hash( 'sha256', $content ) );
+				// NO FENCE KEY YET (Codex #101 round-6 P1): `replaced_with_sha256`
+				// is stamped only once the write has landed — see Task 2. A
+				// record that carries it before then is a record that asserts
+				// something untrue for as long as the write might fail.
+				$extra = array();
 				$seq   = $this->next_write_seq( $path );
 				if ( null !== $seq ) {
 					$extra['write_seq'] = $seq;
@@ -416,11 +421,10 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 		$this->assertSame( 0600, fileperms( $file ) & 0777, 'a private file is never widened by a restore' );
 	}
 
-	public function test_an_overwrite_whose_write_never_lands_retires_its_record(): void {
-		// Codex #101 round-5 P1: the record asserts the file holds
-		// replaced_with_sha256. If the write failed, it never did — and a later
-		// writer who lands exactly those bytes would be overwritten by this
-		// stale payload on a restore that passes the fence.
+	public function test_an_overwrite_whose_write_never_lands_leaves_an_unfenced_record(): void {
+		// Codex #101 round-5/round-6 P1: the record must never assert bytes that
+		// did not land. It carries no fence until the write succeeds, so a
+		// failed write needs no retirement at all.
 		$file  = WP_CONTENT_DIR . '/never-landed.php';
 		file_put_contents( $file, "<?php // original\n" );
 		$snaps = new class extends Aura_Worker_Snapshots {
@@ -433,7 +437,60 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 		$this->assertFalse( $res['success'] );
 		$this->assertSame( "<?php // original\n", file_get_contents( $file ), 'the target never changed' );
-		$this->assertSame( array(), ( new Aura_Worker_Snapshots() )->list_snapshots(), 'no fenced record survives a write that did not land' );
+		foreach ( ( new Aura_Worker_Snapshots() )->list_snapshots() as $rec ) {
+			$this->assertArrayNotHasKey( 'replaced_with_sha256', $rec, 'no record claims a write that did not land' );
+		}
+	}
+
+	public function test_a_stamp_that_fails_leaves_the_record_unfenced_and_the_write_successful(): void {
+		// The write is a fact; the bookkeeping is not. An unfenced record is
+		// the safe side: Aura never offers it for restore.
+		$file  = WP_CONTENT_DIR . '/unstamped.php';
+		file_put_contents( $file, "<?php // original\n" );
+		$snaps = new class extends Aura_Worker_Snapshots {
+			protected function stamp_replaced_hash( $id, $sha ) {
+				return false;
+			}
+		};
+
+		$res = $snaps->overwrite_file( $file, "<?php // written\n" );
+
+		$this->assertTrue( $res['success'], 'the write landed and is reported as such' );
+		$this->assertSame( "<?php // written\n", file_get_contents( $file ) );
+		$this->assertArrayNotHasKey( 'replaced_with_sha256', $res['snapshot'] );
+		$out = $snaps->restore( $res['snapshot']['id'] );
+		$this->assertSame( 'aura_snapshot_unfenced', $out['code'] );
+	}
+
+	public function test_a_racer_that_takes_the_path_during_cleanup_keeps_its_file(): void {
+		// Codex #101 round-6 P1: stat-then-unlink is two steps on a NAME. The
+		// entry is claimed by rename() and the moved inode re-checked, so a
+		// racer's replacement is never the file that gets deleted.
+		$file  = WP_CONTENT_DIR . '/cleanup-race.php';
+		file_put_contents( $file, "<?php // original\n" );
+		$plain = new Aura_Worker_Snapshots();
+		$rec   = $plain->overwrite_file( $file, "<?php // written\n" )['snapshot'];
+
+		$snaps = new class extends Aura_Worker_Snapshots {
+			public $done = false;
+			protected function link_available() {
+				return false;
+			}
+			protected function write_all( $fh, $src ) {
+				return false; // force the cleanup path
+			}
+			protected function before_entry_removal( $target ) {
+				if ( ! $this->done ) {
+					$this->done = true;
+					unlink( $target );
+					file_put_contents( $target, "<?php // a racer's file\n" );
+				}
+			}
+		};
+		$out = $snaps->restore( $rec['id'] );
+
+		$this->assertFalse( $out['success'] );
+		$this->assertSame( "<?php // a racer's file\n", file_get_contents( $file ), "the racer's file is never deleted" );
 	}
 
 	public function test_without_link_a_short_restore_write_clears_its_entry_and_puts_the_file_back(): void {
@@ -709,7 +766,7 @@ And REPLACE the existing `test_file_snapshot_and_restore_roundtrip` (line 44) �
 
 - [ ] **Step 3: Run the new and changed tests to verify they fail**
 
-Run: `vendor/bin/phpunit --filter 'overwrite_restore|unfenced|bare_file_snapshot|external_write_after_the_claim|directory_or_symlink_at_the_path|descriptor_opened_before_the_claim|failed_stage_never_removes|restored_file_keeps_its_restrictive_mode|chmod_that_lands_after_the_claim|dangling_symlink_that_takes_the_path|write_never_lands_retires|short_restore_write_clears|partial_restore_write_that_cannot_be_cleared' tests/unit/SnapshotsTest.php`
+Run: `vendor/bin/phpunit --filter 'overwrite_restore|unfenced|bare_file_snapshot|external_write_after_the_claim|directory_or_symlink_at_the_path|descriptor_opened_before_the_claim|failed_stage_never_removes|restored_file_keeps_its_restrictive_mode|chmod_that_lands_after_the_claim|dangling_symlink_that_takes_the_path|write_never_lands_leaves_an_unfenced|stamp_that_fails|racer_that_takes_the_path_during_cleanup|short_restore_write_clears|partial_restore_write_that_cannot_be_cleared' tests/unit/SnapshotsTest.php`
 Expected: FAIL — today's restore writes the payload back unconditionally, so the fenced, `already`, coded and claim tests all fail.
 
 - [ ] **Step 4: Pass the record into the file restore, and retire a record whose write never landed**
@@ -725,23 +782,65 @@ And in `overwrite_file()`'s locked closure, the `replace_in_place()` failure bra
 ```php
 				$replaced_ok = $this->replace_in_place( $path, $content );
 				if ( true !== $replaced_ok ) {
-					// A FENCED RECORD FOR A WRITE THAT NEVER LANDED IS A LOADED
-					// GUN (Codex #101 round-5 P1). Until 2.17.3 this record was
-					// deliberately kept as "an extra restore point", which was
-					// harmless while a restore wrote unconditionally. Now the
-					// record ASSERTS that the file holds `replaced_with_sha256`
-					// — bytes that never reached the target. A later writer who
-					// legitimately puts exactly those bytes at this path would
-					// pass the fence and have them replaced by this stale
-					// payload. So retire it: delete it, and when the record lock
-					// is contended, void it in place. (We hold the TARGET lock
-					// here, and the target lock is taken before the record lock
-					// everywhere in this class.)
-					if ( ! $this->delete( $snap['snapshot']['id'] ) ) {
-						$this->void_record_in_place( $snap['snapshot']['id'], array( 'interrupted' => true ) );
-					}
+					// Nothing to retire (Codex #101 round-6 P1). The record was
+					// persisted WITHOUT `replaced_with_sha256`, so a write that
+					// did not land leaves an UNFENCED record: restore refuses it
+					// with `aura_snapshot_unfenced` and Aura mirrors it
+					// unfenced and never offers it. The previous revision
+					// stamped the hash up front and deleted-or-voided the record
+					// on failure, which left the dangerous state reachable
+					// whenever BOTH the delete and the void were refused — a
+					// failure this shape cannot have, because the unsafe record
+					// is never written in the first place.
 					return array( 'success' => false, 'error' => $replaced_ok );
 				}
+				// THE FENCE IS STAMPED ONLY ONCE THE WRITE HAS LANDED. A stamp
+				// that fails (a swept record, an unwritable directory) leaves
+				// the record unfenced, which is the SAFE side: the write is a
+				// fact and is reported as a success, and the record simply
+				// cannot be restored from Aura.
+				$sha    = hash( 'sha256', $content );
+				$record = self::redact( $snap['snapshot'] );
+				if ( $this->stamp_replaced_hash( $snap['snapshot']['id'], $sha ) ) {
+					$record['replaced_with_sha256'] = $sha;
+				}
+				return array(
+					'success'  => true,
+					'snapshot' => $record,
+					'bytes'    => strlen( $content ),
+				);
+```
+
+The stamp, in the idiom `reinstate_record()` already uses — under the record's own lock, so a sweep that is voiding this record cannot be overwritten:
+
+```php
+	/**
+	 * Stamp the overwrite fence onto a record whose write has landed.
+	 *
+	 * @param string $id  Snapshot id.
+	 * @param string $sha sha256 of the content that was written.
+	 * @return bool True when the record now carries the fence.
+	 */
+	protected function stamp_replaced_hash( $id, $sha ) {
+		$done = $this->with_record_lock(
+			$id,
+			function () use ( $id, $sha ) {
+				$meta_path = $this->dir . basename( (string) $id ) . '.json';
+				$record    = $this->get( $id );
+				if ( ! is_array( $record ) || ! empty( $record['voided'] ) ) {
+					return false; // retired while we were writing: leave it unfenced
+				}
+				$record['replaced_with_sha256'] = (string) $sha;
+				$json                           = wp_json_encode( $record );
+				if ( false === $json ) {
+					return false;
+				}
+				$n = @file_put_contents( $meta_path, $json ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- The record file this class owns; a refusal is answered to the caller.
+				return false !== $n && $n === strlen( $json ) && $this->sync_file( $meta_path );
+			}
+		);
+		return true === $done;
+	}
 ```
 
 `void_record_in_place()` must drop the fence key too, or a voided record still looks restorable:
@@ -1052,8 +1151,42 @@ Replace the body of `restore_existing_file()` and add its helpers:
 		if ( ! is_array( $mine ) || ! is_array( $now ) || $now['ino'] !== $mine['ino'] || $now['dev'] !== $mine['dev'] ) {
 			return false; // not ours any more
 		}
-		wp_delete_file( $target );
-		return ! self::path_present( $target );
+		$this->before_entry_removal( $target );
+
+		// CLAIM BEFORE DELETING (Codex #101 round-6 P1). stat-then-unlink is
+		// two steps on a NAME: a writer who replaces the path in between loses
+		// the file we would then unlink, which is exactly the no-clobber rule
+		// this path exists to keep. rename() is atomic and inode-preserving, so
+		// what is deleted is the entry we moved, and a racer's file — if that
+		// is what we moved — is put straight back.
+		try {
+			$suffix = bin2hex( random_bytes( 8 ) );
+		} catch ( \Exception $e ) {
+			$suffix = substr( md5( uniqid( '', true ) ), 0, 16 );
+		}
+		$aside = dirname( $target ) . '/.aura-restore-' . $suffix;
+		if ( ! @rename( $target, $aside ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.rename_rename -- The claim IS the point: atomic, inode-preserving.
+			return false;
+		}
+		$moved = @stat( $aside ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Gone is an answer.
+		if ( ! is_array( $moved ) || $moved['ino'] !== $mine['ino'] || $moved['dev'] !== $mine['dev'] ) {
+			// We moved somebody else's file. Put it back and touch nothing; a
+			// refused put-back leaves it under an `.aura-restore-*` name, which
+			// is never swept, rather than deleting a file that is not ours.
+			@rename( $aside, $target ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.rename_rename -- A best-effort put-back; the failure is answered as "not cleared".
+			return false;
+		}
+		wp_delete_file( $aside );
+		return ! self::path_present( $aside );
+	}
+
+	/**
+	 * Seam between verifying our entry and claiming it for deletion. Nothing
+	 * in production; a test models a racer replacing the path here.
+	 *
+	 * @param string $target The path.
+	 */
+	protected function before_entry_removal( $target ) {
 	}
 
 	/**
@@ -1102,8 +1235,8 @@ Replace the body of `restore_existing_file()` and add its helpers:
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
-Run: `vendor/bin/phpunit --filter 'overwrite_restore|unfenced|bare_file_snapshot|external_write_after_the_claim|directory_or_symlink_at_the_path|descriptor_opened_before_the_claim|failed_stage_never_removes|restored_file_keeps_its_restrictive_mode|chmod_that_lands_after_the_claim|dangling_symlink_that_takes_the_path|write_never_lands_retires|short_restore_write_clears|partial_restore_write_that_cannot_be_cleared' tests/unit/SnapshotsTest.php`
-Expected: PASS (16 tests).
+Run: `vendor/bin/phpunit --filter 'overwrite_restore|unfenced|bare_file_snapshot|external_write_after_the_claim|directory_or_symlink_at_the_path|descriptor_opened_before_the_claim|failed_stage_never_removes|restored_file_keeps_its_restrictive_mode|chmod_that_lands_after_the_claim|dangling_symlink_that_takes_the_path|write_never_lands_leaves_an_unfenced|stamp_that_fails|racer_that_takes_the_path_during_cleanup|short_restore_write_clears|partial_restore_write_that_cannot_be_cleared' tests/unit/SnapshotsTest.php`
+Expected: PASS (18 tests).
 
 - [ ] **Step 7: Run the whole suite and the linter**
 
