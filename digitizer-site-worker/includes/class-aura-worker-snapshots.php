@@ -159,10 +159,12 @@ class Aura_Worker_Snapshots {
 	/**
 	 * Capture a file's current contents before it is modified.
 	 *
-	 * @param string $path Absolute path to the file.
+	 * @param string $path  Absolute path to the file.
+	 * @param array  $extra Extra meta keys merged into the record before it is
+	 *                      persisted (e.g. `write_seq` from an engine writer).
 	 * @return array { success: bool, snapshot?: array, error?: string }
 	 */
-	public function snapshot_file( $path ) {
+	public function snapshot_file( $path, array $extra = array() ) {
 		if ( ! is_string( $path ) || '' === $path || ! file_exists( $path ) || ! is_file( $path ) ) {
 			return array( 'success' => false, 'error' => 'File not found: ' . (string) $path );
 		}
@@ -173,10 +175,13 @@ class Aura_Worker_Snapshots {
 		}
 
 		$record = $this->persist(
-			array(
-				'kind'   => 'file',
-				'target' => $path,
-				'bytes'  => strlen( $contents ),
+			array_merge(
+				array(
+					'kind'   => 'file',
+					'target' => $path,
+					'bytes'  => strlen( $contents ),
+				),
+				$extra
 			),
 			$contents
 		);
@@ -218,7 +223,16 @@ class Aura_Worker_Snapshots {
 				if ( null !== $refused ) {
 					return $refused;
 				}
-				$snap = $this->snapshot_file( $path );
+				// NO FENCE KEY YET (Codex #101 round-6 P1): `replaced_with_sha256`
+				// is stamped only once the write has landed — see Task 2. A
+				// record that carries it before then is a record that asserts
+				// something untrue for as long as the write might fail.
+				$extra = array();
+				$seq   = $this->next_write_seq( $path );
+				if ( null !== $seq ) {
+					$extra['write_seq'] = $seq;
+				}
+				$snap = $this->snapshot_file( $path, $extra );
 				if ( empty( $snap['success'] ) ) {
 					return $snap;
 				}
@@ -318,17 +332,20 @@ class Aura_Worker_Snapshots {
 
 		// 2. Record, with no payload: the record undoes CONTENT AT A PATH, by
 		// hash (the §2 ruling), so the bytes are never stored twice.
-		$sha    = hash( 'sha256', $content );
-		$record = $this->persist_create_record(
-			array(
-				'kind'            => 'file',
-				'target'          => $path,
-				'existed'         => false,
-				'expected_sha256' => $sha,
-				'staged'          => $tmp,
-				'bytes'           => strlen( $content ),
-			)
+		$sha  = hash( 'sha256', $content );
+		$meta = array(
+			'kind'            => 'file',
+			'target'          => $path,
+			'existed'         => false,
+			'expected_sha256' => $sha,
+			'staged'          => $tmp,
+			'bytes'           => strlen( $content ),
 		);
+		$seq  = $this->next_write_seq( $path );
+		if ( null !== $seq ) {
+			$meta['write_seq'] = $seq;
+		}
+		$record = $this->persist_create_record( $meta );
 		if ( false === $record ) {
 			$this->discard_stage( $tmp );
 			return array( 'success' => false, 'error' => 'Failed to persist snapshot (disk full or unwritable).' );
@@ -952,6 +969,80 @@ class Aura_Worker_Snapshots {
 	 * @param string $path Target path.
 	 */
 	protected function after_target_lock( $path ) {
+	}
+
+	/**
+	 * The per-target write sequence: a value that strictly increases for
+	 * successive writes to ONE path, so two writes to one file can be ordered
+	 * after the fact (Aura#520 §3.1). Aura orders a rollback by it, because
+	 * nothing it observes does: it runs its render validation after the site
+	 * answers and stamps the action's finish time only then, so the earlier of
+	 * two concurrent writes can finish later.
+	 *
+	 * Callers hold the target lock, so the read-modify-write below is
+	 * serialised per path. The value is `max(previous + 1, now)` in
+	 * microseconds: monotonic whatever the wall clock does, and still roughly
+	 * chronological across different paths.
+	 *
+	 * @param string $path The target path.
+	 * @return int|null The sequence, or null when it cannot be established —
+	 *                  the record then carries none and Aura fails closed.
+	 */
+	protected function next_write_seq( $path ) {
+		if ( PHP_INT_SIZE < 8 ) {
+			return null; // microseconds do not fit in a 32-bit int
+		}
+		// A crash between stage() and rename() below leaves a `.aura-create-*`
+		// in the SNAPSHOTS directory, and nothing else ever sweeps it: the
+		// create sweeper only visits a create target's own directory (Codex
+		// #101 round-3 P2). reconcile_stage() answers true for a stray with no
+		// record, so these are removed once older than STAGE_MAX_AGE, at most
+		// STAGE_SWEEP_CAP per call.
+		$this->sweep_stale_stages( rtrim( $this->dir, '/' ) );
+
+		$sidecar = $this->dir . 'path-' . sha1( (string) $path ) . '.seq';
+		$prev    = 0;
+		if ( file_exists( $sidecar ) ) {
+			$raw = @file_get_contents( $sidecar ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_file_get_contents -- A sidecar this class owns; an unreadable one is an answer (null), not a warning.
+			if ( ! is_string( $raw ) || 1 !== preg_match( '/^[0-9]+$/', trim( $raw ) ) ) {
+				return null; // present but unreadable: never invent an order
+			}
+			$digits = ltrim( trim( $raw ), '0' );
+			// DECIMAL IS NOT THE SAME AS IN RANGE (Codex #101 round-1 P2). A
+			// value above PHP_INT_MAX saturates on the cast, `$prev + 1` then
+			// becomes a FLOAT, the record gets a non-integer `write_seq`, and
+			// the sidecar is rewritten in exponent notation — unreadable on the
+			// next write. Compare as decimal strings before casting anything,
+			// and refuse the value that cannot be incremented as an int.
+			$max = (string) PHP_INT_MAX;
+			if ( strlen( $digits ) > strlen( $max ) || ( strlen( $digits ) === strlen( $max ) && strcmp( $digits, $max ) >= 0 ) ) {
+				return null;
+			}
+			$prev = (int) $digits;
+		}
+		$now = $this->now_micros();
+		$seq = $prev >= $now ? $prev + 1 : $now;
+
+		// Written BEFORE the record, by the same stage-and-rename every other
+		// write here uses: a reader never sees a half-written sequence.
+		$tmp = $this->stage( rtrim( $this->dir, '/' ), basename( $sidecar ), (string) $seq, 0600 );
+		if ( is_array( $tmp ) ) {
+			return null;
+		}
+		if ( ! @rename( $tmp, $sidecar ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.rename_rename -- Replacing the sidecar IS the point, atomically.
+			$this->discard_stage( $tmp );
+			return null;
+		}
+		return $seq;
+	}
+
+	/**
+	 * Seam: the clock, in microseconds. A test steps it backwards.
+	 *
+	 * @return int
+	 */
+	protected function now_micros() {
+		return (int) round( microtime( true ) * 1000000 );
 	}
 
 	/**

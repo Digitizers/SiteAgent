@@ -1943,13 +1943,19 @@ final class SnapshotsTest extends TestCase {
 		$snaps = new class extends Aura_Worker_Snapshots {
 			public $mode_before_widen = null;
 			public $mode_asked        = 'unset';
+			public $calls             = array();
 			protected function secure_stage( $tmp, $mode = null ) {
 				$this->mode_before_widen = fileperms( $tmp ) & 0777; // the bytes are all in at this point
 				$this->mode_asked        = $mode;
+				$this->calls[]           = array( 'before' => $this->mode_before_widen, 'asked' => $mode );
 				return parent::secure_stage( $tmp, $mode );
 			}
 		};
 
+		// overwrite_file() takes the write_seq sidecar's own stage() call
+		// BEFORE the content's (next_write_seq() runs ahead of
+		// replace_in_place()), so the content stage is still the LAST
+		// secure_stage() call recorded here.
 		$this->assertTrue( $snaps->overwrite_file( $file, "<?php // v2\n" )['success'] );
 		$this->assertSame( 0600, $snaps->mode_before_widen, 'born owner-only' );
 		$this->assertSame( 0600, $snaps->mode_asked );
@@ -1962,9 +1968,15 @@ final class SnapshotsTest extends TestCase {
 		$this->assertSame( 0644, fileperms( $file ) & 0777, 'widened to the file\'s own mode at the end' );
 
 		// A create's stage is born 0600 too and ends at the create mode.
+		// create_file_locked() stages the CONTENT first (step 1) and only
+		// then calls next_write_seq(), which stages the sequence sidecar
+		// second — the reverse order from overwrite_file() above — so the
+		// content's own call is the FIRST one recorded, not the last.
+		$snaps->calls = array();
 		$snaps->create_file( WP_CONTENT_DIR . '/fresh.php', "x\n" );
-		$this->assertSame( 0600, $snaps->mode_before_widen );
-		$this->assertNull( $snaps->mode_asked, 'the create mode' );
+		$content = $snaps->calls[0];
+		$this->assertSame( 0600, $content['before'] );
+		$this->assertNull( $content['asked'], 'the create mode' );
 		$this->assertSame( 0644, fileperms( WP_CONTENT_DIR . '/fresh.php' ) & 0777 );
 	}
 
@@ -2114,7 +2126,12 @@ final class SnapshotsTest extends TestCase {
 			}
 		};
 		$this->assertTrue( $once->overwrite_file( $file, "<?php // v2\n" )['success'] );
-		$this->assertSame( 2, $once->asked, 'read wide, tightened, read again' );
+		// overwrite_file() now stages the write_seq sidecar (next_write_seq())
+		// before it stages the content — that FIRST stage() call is the one
+		// that hits the once-off wide read and is tightened + reread (2
+		// calls); the content's own stage() call, third overall, reads tight
+		// on the first try because the mock's "wide once" is already spent.
+		$this->assertSame( 3, $once->asked, 'read wide, tightened, read again — spent by the write_seq sidecar\'s own stage() call, which now runs first' );
 		$this->assertSame( "<?php // v2\n", file_get_contents( $file ) );
 
 		// (b) the ACL wins even after chmod(): refused before a byte is staged; the target untouched.
@@ -2498,6 +2515,83 @@ final class SnapshotsTest extends TestCase {
 		$this->assertArrayHasKey( 'moved_aside', $restore );
 		$this->assertSame( "edited\n", file_get_contents( $restore['moved_aside'] ), 'the changed bytes are kept' );
 		$this->assertSame( '', file_get_contents( $file ), 'our empty entry, never a truncated one' );
+	}
+
+	public function test_write_seq_is_recorded_and_strictly_increases_per_target(): void {
+		$snaps = new Aura_Worker_Snapshots();
+		$file  = WP_CONTENT_DIR . '/seq.php';
+
+		$first = $snaps->create_file( $file, "<?php // v1\n" );
+		$this->assertTrue( $first['success'] );
+		$a = $snaps->get( $first['snapshot']['id'] )['write_seq'] ?? null;
+		$this->assertIsInt( $a, 'a create records write_seq' );
+
+		$second = $snaps->overwrite_file( $file, "<?php // v2\n" );
+		$this->assertTrue( $second['success'] );
+		$b = $snaps->get( $second['snapshot']['id'] )['write_seq'] ?? null;
+		$this->assertIsInt( $b, 'an overwrite records write_seq' );
+		$this->assertGreaterThan( $a, $b, 'the second write to this path sorts after the first' );
+	}
+
+	public function test_write_seq_increases_even_when_the_clock_goes_backwards(): void {
+		// The sidecar holds the previous value, so a clock that steps back
+		// cannot make the later write sort before the earlier one.
+		$snaps = new class extends Aura_Worker_Snapshots {
+			public $now = 2000000000000000; // microseconds
+			protected function now_micros() {
+				return $this->now;
+			}
+		};
+		$file = WP_CONTENT_DIR . '/clock.php';
+		file_put_contents( $file, "<?php // v0\n" );
+
+		$first    = $snaps->overwrite_file( $file, "<?php // v1\n" );
+		$snaps->now = 1000000000000000; // the clock steps BACK an hour's worth
+		$second   = $snaps->overwrite_file( $file, "<?php // v2\n" );
+
+		$a = $snaps->get( $first['snapshot']['id'] )['write_seq'];
+		$b = $snaps->get( $second['snapshot']['id'] )['write_seq'];
+		$this->assertSame( $a + 1, $b, 'the sidecar, not the clock, orders the second write' );
+	}
+
+	public function test_an_unreadable_sequence_sidecar_leaves_the_record_without_write_seq(): void {
+		$snaps = new Aura_Worker_Snapshots();
+		$file  = WP_CONTENT_DIR . '/garbage.php';
+		file_put_contents( $file, "<?php // v0\n" );
+		$sidecar = WP_CONTENT_DIR . '/aura-backups/snapshots/path-' . sha1( $file ) . '.seq';
+		file_put_contents( $sidecar, "not-a-number\n" );
+
+		$out = $snaps->overwrite_file( $file, "<?php // v1\n" );
+
+		$this->assertTrue( $out['success'], 'the write still lands' );
+		$this->assertArrayNotHasKey( 'write_seq', $snaps->get( $out['snapshot']['id'] ), 'no sequence is invented' );
+	}
+
+	public function test_a_stale_sequence_stage_is_swept_from_the_snapshots_directory(): void {
+		// Codex #101 round-3 P2: a crash between stage() and rename() left a
+		// `.aura-create-*` in the snapshots directory that nothing swept.
+		$snaps = new Aura_Worker_Snapshots();
+		$dir   = WP_CONTENT_DIR . '/aura-backups/snapshots';
+		$stray = $dir . '/.aura-create-deadbeefdeadbeef';
+		file_put_contents( $stray, '123' );
+		touch( $stray, time() - 7200 ); // older than STAGE_MAX_AGE
+
+		$file = WP_CONTENT_DIR . '/sweeps.php';
+		file_put_contents( $file, "<?php // v0\n" );
+		$this->assertTrue( $snaps->overwrite_file( $file, "<?php // v1\n" )['success'] );
+
+		$this->assertFileDoesNotExist( $stray, 'the stale sidecar stage is swept' );
+	}
+
+	public function test_a_direct_snapshot_file_records_no_write_seq(): void {
+		$snaps = new Aura_Worker_Snapshots();
+		$file  = WP_CONTENT_DIR . '/direct.php';
+		file_put_contents( $file, "<?php // v0\n" );
+
+		$snap = $snaps->snapshot_file( $file );
+
+		$this->assertTrue( $snap['success'] );
+		$this->assertArrayNotHasKey( 'write_seq', $snaps->get( $snap['snapshot']['id'] ) );
 	}
 }
 
