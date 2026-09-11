@@ -114,6 +114,22 @@ Add to `tests/unit/SnapshotsTest.php`:
 		$this->assertArrayNotHasKey( 'write_seq', $snaps->get( $out['snapshot']['id'] ), 'no sequence is invented' );
 	}
 
+	public function test_a_stale_sequence_stage_is_swept_from_the_snapshots_directory(): void {
+		// Codex #101 round-3 P2: a crash between stage() and rename() left a
+		// `.aura-create-*` in the snapshots directory that nothing swept.
+		$snaps = new Aura_Worker_Snapshots();
+		$dir   = WP_CONTENT_DIR . '/aura-backups/snapshots';
+		$stray = $dir . '/.aura-create-deadbeefdeadbeef';
+		file_put_contents( $stray, '123' );
+		touch( $stray, time() - 7200 ); // older than STAGE_MAX_AGE
+
+		$file = WP_CONTENT_DIR . '/sweeps.php';
+		file_put_contents( $file, "<?php // v0\n" );
+		$this->assertTrue( $snaps->overwrite_file( $file, "<?php // v1\n" )['success'] );
+
+		$this->assertFileDoesNotExist( $stray, 'the stale sidecar stage is swept' );
+	}
+
 	public function test_a_direct_snapshot_file_records_no_write_seq(): void {
 		$snaps = new Aura_Worker_Snapshots();
 		$file  = WP_CONTENT_DIR . '/direct.php';
@@ -128,7 +144,7 @@ Add to `tests/unit/SnapshotsTest.php`:
 
 - [ ] **Step 2: Run them to verify they fail**
 
-Run: `vendor/bin/phpunit --filter 'write_seq|sequence_sidecar' tests/unit/SnapshotsTest.php`
+Run: `vendor/bin/phpunit --filter 'write_seq|sequence_sidecar|sequence_stage_is_swept' tests/unit/SnapshotsTest.php`
 Expected: FAIL — `write_seq` is absent from every record, so the first three tests fail on their assertions (the fourth passes already, and must keep passing).
 
 - [ ] **Step 3: Add the sequence helper and its clock seam**
@@ -157,6 +173,14 @@ In `class-aura-worker-snapshots.php`, beside `with_target_lock()`:
 		if ( PHP_INT_SIZE < 8 ) {
 			return null; // microseconds do not fit in a 32-bit int
 		}
+		// A crash between stage() and rename() below leaves a `.aura-create-*`
+		// in the SNAPSHOTS directory, and nothing else ever sweeps it: the
+		// create sweeper only visits a create target's own directory (Codex
+		// #101 round-3 P2). reconcile_stage() answers true for a stray with no
+		// record, so these are removed once older than STAGE_MAX_AGE, at most
+		// STAGE_SWEEP_CAP per call.
+		$this->sweep_stale_stages( rtrim( $this->dir, '/' ) );
+
 		$sidecar = $this->dir . 'path-' . sha1( (string) $path ) . '.seq';
 		$prev    = 0;
 		if ( file_exists( $sidecar ) ) {
@@ -270,8 +294,8 @@ In `create_file_locked()`, add it to the record array built at ~line 322 (the re
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `vendor/bin/phpunit --filter 'write_seq|sequence_sidecar' tests/unit/SnapshotsTest.php`
-Expected: PASS (4 tests).
+Run: `vendor/bin/phpunit --filter 'write_seq|sequence_sidecar|sequence_stage_is_swept' tests/unit/SnapshotsTest.php`
+Expected: PASS (5 tests).
 
 - [ ] **Step 6: Run the whole suite and the linter**
 
@@ -308,7 +332,11 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 3. anything that arrives at the path after the claim is never touched, and a claimed file that turns out to be changed is put back by the same primitives the created-file restore uses;
 4. **the claim is re-hashed immediately before it is deleted.** A writer that opened the target BEFORE the claim still holds a descriptor on that inode and can write through it after the authoritative hash; the claim is then the only pathname those bytes have, and unlinking it would destroy them. A claim whose hash moved is kept and named in `moved_aside` (Codex #101 round-2 P1).
 
-**One documented residual.** On a host without `link()`, an **executable** target cannot be republished at all: `publish_by_write()` and `put_back_by_write()` both refuse execute bits, because `fopen()` cannot create them (SiteAgent#96, #97). Claiming such a file would strand it aside. So for that case only — no `link()` AND the target is executable — the restore verifies in place and replaces with `replace_in_place()`, keeping the 2.17.2 behaviour and its narrow window. This mirrors the created-file restore's own executable branch, which 2.17.2 added for the same reason.
+**Two documented residuals.**
+
+**(a) The claim's hash-to-unlink window is accepted, not closed** (Codex #101 round-3 P1, declined with reasons). A writer holding a descriptor opened before the claim can write into the claimed inode after the final re-hash and before the `unlink`, and no portable primitive makes those two steps atomic — PHP exposes no way to unlink a file only if its contents are unchanged. The alternative on offer is to retain the claim whenever such a writer cannot be excluded, which is *always*: every successful restore would then leave an `.aura-restore-<hex>` beside the target — a name this engine deliberately never sweeps — and report `moved_aside`, which Aura surfaces to the operator. That trades a microsecond window for permanent litter on every restore and a warning that means nothing. **The created-file restore has carried this exact window since 2.17.0** (`restore_created_file_locked()`, the `wp_delete_file( $claim )` after its own `hash_file()`), so retaining here would also make the two restore paths disagree about the same risk. The re-hash immediately before the unlink stays: it is the narrowest portable bound, and it catches every writer that has finished by then.
+
+**(b)** On a host without `link()`, an **executable** target cannot be republished at all: `publish_by_write()` and `put_back_by_write()` both refuse execute bits, because `fopen()` cannot create them (SiteAgent#96, #97). Claiming such a file would strand it aside. So for that case only — no `link()` AND the target is executable — the restore verifies in place and replaces with `replace_in_place()`, keeping the 2.17.2 behaviour and its narrow window. This mirrors the created-file restore's own executable branch, which 2.17.2 added for the same reason.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -364,6 +392,28 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 		$this->assertFalse( $out['success'] );
 		$this->assertSame( 'aura_file_changed_since', $out['code'] );
 		$this->assertSame( "<?php // edited under us\n", file_get_contents( $file ), 'the edit is back at its path, not overwritten' );
+	}
+
+	public function test_without_link_a_restored_file_keeps_its_restrictive_mode(): void {
+		// Codex #101 round-3 P1: publish()'s write path creates from
+		// FS_CHMOD_FILE (0644), so a 0600 file restored on a link()-less host
+		// would become readable by every local account.
+		$snaps = new class extends Aura_Worker_Snapshots {
+			protected function link_available() {
+				return false;
+			}
+		};
+		$file = WP_CONTENT_DIR . '/private.php';
+		file_put_contents( $file, "<?php // original\n" );
+		chmod( $file, 0600 );
+		$rec = $snaps->overwrite_file( $file, "<?php // written\n" )['snapshot'];
+
+		$out = $snaps->restore( $rec['id'] );
+
+		$this->assertTrue( $out['success'] );
+		$this->assertSame( "<?php // original\n", file_get_contents( $file ) );
+		clearstatcache();
+		$this->assertSame( 0600, fileperms( $file ) & 0777, 'a private file is never widened by a restore' );
 	}
 
 	public function test_a_write_through_a_descriptor_opened_before_the_claim_is_kept_aside(): void {
@@ -532,7 +582,7 @@ And REPLACE the existing `test_file_snapshot_and_restore_roundtrip` (line 44) �
 
 - [ ] **Step 3: Run the new and changed tests to verify they fail**
 
-Run: `vendor/bin/phpunit --filter 'overwrite_restore|unfenced|bare_file_snapshot|external_write_after_the_claim|directory_or_symlink_at_the_path|descriptor_opened_before_the_claim|failed_stage_never_removes' tests/unit/SnapshotsTest.php`
+Run: `vendor/bin/phpunit --filter 'overwrite_restore|unfenced|bare_file_snapshot|external_write_after_the_claim|directory_or_symlink_at_the_path|descriptor_opened_before_the_claim|failed_stage_never_removes|restored_file_keeps_its_restrictive_mode' tests/unit/SnapshotsTest.php`
 Expected: FAIL — today's restore writes the payload back unconditionally, so the fenced, `already`, coded and claim tests all fail.
 
 - [ ] **Step 4: Pass the record into the file restore**
@@ -688,7 +738,18 @@ Replace the body of `restore_existing_file()` and add its helpers:
 			return $this->put_claim_back( $claim, $target, 'the file changed as the restore claimed it' );
 		}
 
-		$published = $this->publish( $tmp, $target );
+		// THE MODE MUST SURVIVE A link()-LESS PUBLISH (Codex #101 round-3 P1).
+		// publish() reaches write_exclusively() with NO mode, which creates from
+		// FS_CHMOD_FILE (0644) — restoring a 0600 file on a host without link()
+		// would hand it to every local account. link() itself preserves the
+		// stage's mode, and the stage was created with the target's own mode
+		// above, so only the write path needs this. publish()'s signature is
+		// deliberately NOT changed: seven test subclasses override
+		// publish( $tmp, $path ), and PHP rejects an override that drops a
+		// parameter the parent declares.
+		$published = $this->link_available()
+			? $this->publish( $tmp, $target )
+			: $this->publish_restored_by_write( $tmp, $target, false === $mode ? null : ( $mode & 0777 ) );
 		if ( true !== $published ) {
 			$this->discard_stage( $tmp );
 			if ( 'exists' === $published ) {
@@ -718,6 +779,29 @@ Replace the body of `restore_existing_file()` and add its helpers:
 			$out['moved_aside'] = $claim; // `.aura-restore-*` is never swept: say where it is
 		}
 		return $out;
+	}
+
+	/**
+	 * The link()-less publish of a RESTORE: exclusive-create the target and
+	 * stream the staged bytes into the handle we own, with the mode the file
+	 * had. publish()'s own write path cannot be used here — it creates from
+	 * FS_CHMOD_FILE and would widen a private file (Codex #101 round-3 P1).
+	 * Execute bits never reach this path: that case is answered in place,
+	 * before anything is claimed.
+	 *
+	 * @param string   $tmp    The staged payload.
+	 * @param string   $target The path.
+	 * @param int|null $mode   The mode the target had, or null for the default.
+	 * @return true|string As publish(): true, 'exists', 'partial', or a sentence.
+	 */
+	private function publish_restored_by_write( $tmp, $target, $mode ) {
+		$src = @fopen( $tmp, 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Our own staged file; a refusal is answered below.
+		if ( false === $src ) {
+			return 'the staged bytes could not be read back';
+		}
+		$landed = $this->write_exclusively( $target, $src, $mode );
+		fclose( $src ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+		return $landed;
 	}
 
 	/**
@@ -757,8 +841,8 @@ Replace the body of `restore_existing_file()` and add its helpers:
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
-Run: `vendor/bin/phpunit --filter 'overwrite_restore|unfenced|bare_file_snapshot|external_write_after_the_claim|directory_or_symlink_at_the_path|descriptor_opened_before_the_claim|failed_stage_never_removes' tests/unit/SnapshotsTest.php`
-Expected: PASS (10 tests).
+Run: `vendor/bin/phpunit --filter 'overwrite_restore|unfenced|bare_file_snapshot|external_write_after_the_claim|directory_or_symlink_at_the_path|descriptor_opened_before_the_claim|failed_stage_never_removes|restored_file_keeps_its_restrictive_mode' tests/unit/SnapshotsTest.php`
+Expected: PASS (11 tests).
 
 - [ ] **Step 7: Run the whole suite and the linter**
 
@@ -947,7 +1031,7 @@ Also, in `restore_created_file()`, the vanished-target answer inside the claim b
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `vendor/bin/phpunit --filter 'already|changed_code|voided_code|locked_code' tests/unit/SnapshotsTest.php`
-Expected: PASS (4 tests).
+Expected: PASS (5 tests).
 
 - [ ] **Step 5: Run the whole suite and the linter**
 
