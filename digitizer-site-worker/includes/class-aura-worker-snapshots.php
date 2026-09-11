@@ -454,12 +454,13 @@ class Aura_Worker_Snapshots {
 	 *
 	 * Protected so a test can model a short write or a refused create.
 	 *
-	 * @param string $dir     Target's directory.
-	 * @param string $name    Target's basename.
-	 * @param string $content Complete content.
+	 * @param string   $dir     Target's directory.
+	 * @param string   $name    Target's basename.
+	 * @param string   $content Complete content.
+	 * @param int|null $mode    The mode the stage ends with; null = the create mode.
 	 * @return string|array The staged path, or { success: false, error }.
 	 */
-	protected function stage( $dir, $name, $content ) {
+	protected function stage( $dir, $name, $content, $mode = null ) {
 		try {
 			$suffix = bin2hex( random_bytes( 8 ) );
 		} catch ( \Exception $e ) {
@@ -471,7 +472,13 @@ class Aura_Worker_Snapshots {
 		// extension any handler is registered for.
 		$tmp = $dir . '/.aura-create-' . $suffix;
 
-		$fh = @fopen( $tmp, 'xb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- An exclusive create is the point: the name is ours or the call fails, and the failure is reported, not thrown.
+		// Born owner-only: the bytes are nobody else's to read while they are
+		// being written (Codex #100 round-5 P1 — a 0600 secret staged at the
+		// 0644 default was readable by any local account until the chmod
+		// below). Widened to the wanted mode only once complete.
+		$was = umask( 0177 );
+		$fh  = @fopen( $tmp, 'xb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- An exclusive create is the point: the name is ours or the call fails, and the failure is reported, not thrown.
+		umask( $was );
 		if ( false === $fh ) {
 			return array( 'success' => false, 'error' => 'Unable to stage file beside the target: ' . $dir );
 		}
@@ -506,7 +513,7 @@ class Aura_Worker_Snapshots {
 		// set is a refusal, never a publish with whatever fopen() left (Codex
 		// #94 round-1 P1): nothing is staged, nothing is recorded, nothing at
 		// the target.
-		if ( ! $this->secure_stage( $tmp ) ) {
+		if ( ! $this->secure_stage( $tmp, $mode ) ) {
 			$this->discard_stage( $tmp );
 			return array( 'success' => false, 'error' => 'Unable to set permissions on the staged file: ' . $tmp );
 		}
@@ -531,14 +538,15 @@ class Aura_Worker_Snapshots {
 	 *
 	 * Protected so a test can model a host where the mode cannot be set.
 	 *
-	 * @param string $tmp Staged path.
+	 * @param string   $tmp  Staged path.
+	 * @param int|null $mode The mode to set; null = the create mode.
 	 * @return bool
 	 */
-	protected function secure_stage( $tmp ) {
+	protected function secure_stage( $tmp, $mode = null ) {
 		if ( ! function_exists( 'chmod' ) ) {
 			return false;
 		}
-		return (bool) @chmod( $tmp, defined( 'FS_CHMOD_FILE' ) ? FS_CHMOD_FILE : 0644 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- A refusal is an answer this method returns, not a warning to surface; $wp_filesystem is not initialised on this path, and the mode of a file this call exclusively created is not a filesystem abstraction concern.
+		return (bool) @chmod( $tmp, null === $mode ? ( defined( 'FS_CHMOD_FILE' ) ? FS_CHMOD_FILE : 0644 ) : (int) $mode ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- A refusal is an answer this method returns, not a warning to surface; $wp_filesystem is not initialised on this path, and the mode of a file this call exclusively created is not a filesystem abstraction concern.
 	}
 
 	/**
@@ -1158,8 +1166,13 @@ class Aura_Worker_Snapshots {
 		if ( ! @mkdir( $prep, 0700 ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_mkdir -- A refusal is an answer: no lock can be created here.
 			return self::LOCK_UNAVAILABLE;
 		}
-		if ( false === @file_put_contents( $prep . '/' . $token, $this->holder_identity() ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Inside a directory this call just created.
-			@rmdir( $prep ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_rmdir -- Our own empty preparation.
+		$identity = $this->holder_identity();
+		$wrote    = @file_put_contents( $prep . '/' . $token, $identity ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Inside a directory this call just created.
+		if ( false === $wrote || $wrote !== strlen( $identity ) ) {
+			// A short or refused token write (disk full) leaves a file the
+			// rmdir() would trip on: the whole preparation goes (Codex #100
+			// round-5 P2).
+			self::discard_preparation( $prep );
 			return self::LOCK_UNAVAILABLE;
 		}
 		$held = false;
@@ -1168,14 +1181,25 @@ class Aura_Worker_Snapshots {
 			if ( $held ) {
 				break;
 			}
+			if ( 0 === $i ) {
+				// Contended: while waiting, sweep preparations a kernel-killed
+				// request left behind (a live one exists for microseconds, so
+				// any older than LOCK_STALE_AFTER is nobody's) — Codex #100
+				// round-5 P2.
+				foreach ( (array) @glob( $dir . '.tmp-*', GLOB_ONLYDIR ) as $stray ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Gone meanwhile is an answer.
+					$at = @filemtime( $stray ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Gone meanwhile is an answer.
+					if ( $stray !== $prep && false !== $at && $at < time() - self::LOCK_STALE_AFTER ) {
+						self::discard_preparation( $stray );
+					}
+				}
+			}
 			if ( ! is_dir( $dir ) ) {
 				// Not there after the refusal: either the holder released between
 				// the two calls (the ordinary race — try again, Codex #100
 				// round-2 P2) or no lock can be created under the snapshots
 				// directory at all.
 				if ( ! is_dir( $this->dir ) || ! is_writable( $this->dir ) ) {
-					@unlink( $prep . '/' . $token ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.unlink_unlink -- Our own preparation.
-					@rmdir( $prep ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_rmdir -- Our own preparation.
+					self::discard_preparation( $prep );
 					return self::LOCK_UNAVAILABLE;
 				}
 				continue;
@@ -1195,8 +1219,7 @@ class Aura_Worker_Snapshots {
 			usleep( 20000 );
 		}
 		if ( ! $held ) {
-			@unlink( $prep . '/' . $token ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.unlink_unlink -- Our own preparation.
-			@rmdir( $prep ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_rmdir -- Our own preparation.
+			self::discard_preparation( $prep );
 			return null;
 		}
 		// The token names THIS holder — its process, so a breaker can ask the
@@ -1216,6 +1239,18 @@ class Aura_Worker_Snapshots {
 		} finally {
 			self::release_mkdir_lock( $dir );
 		}
+	}
+
+	/**
+	 * Remove a preparation directory and whatever token it holds.
+	 *
+	 * @param string $prep The `.lock.d.tmp-*` directory.
+	 */
+	private static function discard_preparation( $prep ) {
+		foreach ( (array) @glob( $prep . '/*' ) as $inside ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Gone meanwhile is an answer.
+			@unlink( $inside ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.unlink_unlink -- Our own (or an abandoned) token.
+		}
+		@rmdir( $prep ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_rmdir -- Our own (or an abandoned) preparation.
 	}
 
 	/** mkdir() lock directories this process holds right now: dir => token file. */
@@ -1265,12 +1300,27 @@ class Aura_Worker_Snapshots {
 	 * process start time from /proc, so a recycled pid is not mistaken for the
 	 * holder. Seam: a test writes a token for a process that is not there.
 	 *
-	 * @return string "pid:starttime" (starttime empty where unknown).
+	 * @return string "pid:starttime:host" (starttime empty where unknown).
 	 */
 	protected function holder_identity() {
 		$pid   = (int) getmypid();
 		$start = $this->proc_start_time( $pid );
-		return $pid . ':' . ( null === $start ? '' : $start );
+		return $pid . ':' . ( null === $start ? '' : $start ) . ':' . self::host_identity();
+	}
+
+	/**
+	 * Which machine (and boot) a pid belongs to. wp-content can be shared
+	 * between hosts or containers (NFS, a mounted volume): a pid from another
+	 * PID namespace means nothing here, and asking the local kernel about it
+	 * would call a live remote holder dead (Codex #100 round-5 P1). The
+	 * hostname plus Linux's boot_id, hashed.
+	 *
+	 * @return string
+	 */
+	private static function host_identity() {
+		$host = (string) gethostname();
+		$boot = @file_get_contents( '/proc/sys/kernel/random/boot_id' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Not a URL; absent off Linux, which is an answer.
+		return substr( sha1( $host . '|' . ( is_string( $boot ) ? trim( $boot ) : '' ) ), 0, 16 );
 	}
 
 	/**
@@ -1334,13 +1384,19 @@ class Aura_Worker_Snapshots {
 	 *
 	 * Seam: a test models a host that cannot read another process's record.
 	 *
-	 * @param string $identity "pid:starttime" as holder_identity() wrote it.
+	 * @param string $identity "pid:starttime:host" as holder_identity() wrote it.
 	 * @return bool|null true alive, false dead, null unknowable here.
 	 */
 	protected function holder_alive( $identity ) {
-		$parts = explode( ':', $identity, 2 );
+		$parts = explode( ':', $identity, 3 );
 		$pid   = (int) $parts[0];
 		if ( $pid <= 0 ) {
+			return null;
+		}
+		if ( isset( $parts[2] ) && '' !== $parts[2] && $parts[2] !== self::host_identity() ) {
+			// Another machine's process: this kernel cannot be asked about it.
+			// Unknown — the lease (heartbeat + age) is what governs a remote
+			// holder, and a shared wp-content without flock() has nothing better.
 			return null;
 		}
 		$start = isset( $parts[1] ) ? (string) $parts[1] : '';
@@ -1929,13 +1985,9 @@ class Aura_Worker_Snapshots {
 			return 'Directory not found: ' . $dir;
 		}
 		$perms = is_file( $path ) ? @fileperms( $path ) : false; // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- An absent target keeps the create mode.
-		$tmp   = $this->stage( $dir, basename( $path ), $content );
+		$tmp   = $this->stage( $dir, basename( $path ), $content, false === $perms ? null : ( $perms & 0777 ) ); // born 0600, ends with the file's own mode
 		if ( is_array( $tmp ) ) {
 			return (string) $tmp['error'];
-		}
-		if ( false !== $perms && ! @chmod( $tmp, $perms & 0777 ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Our own staged file; a refusal is answered, not surfaced.
-			$this->discard_stage( $tmp );
-			return 'Unable to set permissions on the staged file: ' . $tmp;
 		}
 		if ( ! @rename( $tmp, $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.rename_rename -- Clobbering IS the point here, atomically; $wp_filesystem->move() may copy+delete.
 			$this->discard_stage( $tmp );

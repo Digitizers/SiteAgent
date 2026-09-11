@@ -890,7 +890,7 @@ final class SnapshotsTest extends TestCase {
 	public function test_short_write_while_staging_leaves_no_staged_file_no_record_no_target(): void {
 		$file  = WP_CONTENT_DIR . '/short.php';
 		$snaps = new class extends Aura_Worker_Snapshots {
-			protected function stage( $dir, $name, $content ) {
+			protected function stage( $dir, $name, $content, $mode = null ) {
 				// Model a full disk: the exclusive create succeeded, the bytes did not land.
 				$tmp = $dir . '/.aura-create-shortwrite';
 				file_put_contents( $tmp, substr( $content, 0, 1 ) );
@@ -912,7 +912,7 @@ final class SnapshotsTest extends TestCase {
 		// a publish with whatever fopen() and the umask left behind.
 		$file  = WP_CONTENT_DIR . '/nochmod.php';
 		$snaps = new class extends Aura_Worker_Snapshots {
-			protected function secure_stage( $tmp ) {
+			protected function secure_stage( $tmp, $mode = null ) {
 				return false;
 			}
 		};
@@ -1319,7 +1319,7 @@ final class SnapshotsTest extends TestCase {
 			protected function create_mode() {
 				return 0755;
 			}
-			protected function secure_stage( $tmp ) {
+			protected function secure_stage( $tmp, $mode = null ) {
 				return (bool) @chmod( $tmp, $this->create_mode() );
 			}
 		};
@@ -1578,7 +1578,7 @@ final class SnapshotsTest extends TestCase {
 		$file = WP_CONTENT_DIR . '/kept.php';
 		file_put_contents( $file, "<?php // old\n" );
 		$snaps = new class extends Aura_Worker_Snapshots {
-			protected function stage( $dir, $name, $content ) {
+			protected function stage( $dir, $name, $content, $mode = null ) {
 				return array( 'success' => false, 'error' => 'Short write while staging (disk full?): ' . $dir );
 			}
 		};
@@ -1934,6 +1934,109 @@ final class SnapshotsTest extends TestCase {
 		$this->assertSame( "destination\n", file_get_contents( $real ) );
 	}
 
+	public function test_a_replacement_is_staged_owner_only_and_widened_to_the_targets_mode_after_the_bytes_are_in(): void {
+		// Codex #100 round-5 P1: a 0600 secret staged at the 0644 default was
+		// readable by any local account while its bytes were written.
+		$file = WP_CONTENT_DIR . '/secret.php';
+		file_put_contents( $file, "<?php // v1\n" );
+		chmod( $file, 0600 );
+		$snaps = new class extends Aura_Worker_Snapshots {
+			public $mode_before_widen = null;
+			public $mode_asked        = 'unset';
+			protected function secure_stage( $tmp, $mode = null ) {
+				$this->mode_before_widen = fileperms( $tmp ) & 0777; // the bytes are all in at this point
+				$this->mode_asked        = $mode;
+				return parent::secure_stage( $tmp, $mode );
+			}
+		};
+
+		$this->assertTrue( $snaps->overwrite_file( $file, "<?php // v2\n" )['success'] );
+		$this->assertSame( 0600, $snaps->mode_before_widen, 'born owner-only' );
+		$this->assertSame( 0600, $snaps->mode_asked );
+		$this->assertSame( 0600, fileperms( $file ) & 0777 );
+
+		chmod( $file, 0644 );
+		$this->assertTrue( $snaps->overwrite_file( $file, "<?php // v3\n" )['success'] );
+		$this->assertSame( 0600, $snaps->mode_before_widen, 'owner-only until complete, even for a 0644 target' );
+		$this->assertSame( 0644, $snaps->mode_asked );
+		$this->assertSame( 0644, fileperms( $file ) & 0777, 'widened to the file\'s own mode at the end' );
+
+		// A create's stage is born 0600 too and ends at the create mode.
+		$snaps->create_file( WP_CONTENT_DIR . '/fresh.php', "x\n" );
+		$this->assertSame( 0600, $snaps->mode_before_widen );
+		$this->assertNull( $snaps->mode_asked, 'the create mode' );
+		$this->assertSame( 0644, fileperms( WP_CONTENT_DIR . '/fresh.php' ) & 0777 );
+	}
+
+	public function test_without_flock_a_holder_on_another_host_is_unknown_not_dead(): void {
+		// Codex #100 round-5 P1: wp-content shared between hosts — a foreign pid
+		// means nothing to this kernel. Fresh → contended; only the lease (age
+		// without heartbeat) ever breaks it, never a local liveness verdict.
+		$file  = WP_CONTENT_DIR . '/foreign.php';
+		$snaps = new class extends Aura_Worker_Snapshots {
+			protected function link_available() {
+				return false;
+			}
+			protected function lock_available() {
+				return false;
+			}
+			protected function target_lock_tries() {
+				return 3;
+			}
+			public function alive_for_test( $identity ) {
+				return $this->holder_alive( $identity );
+			}
+		};
+		$this->assertNull( $snaps->alive_for_test( '4194301:1:0000000000000000' ), 'a pid that is not here, on a host that is not this one: unknown' );
+		$this->assertNull( $snaps->alive_for_test( getmypid() . ':1:0000000000000000' ), 'even our own pid number, when the host differs' );
+
+		$dir = WP_CONTENT_DIR . '/aura-backups/snapshots/path-' . sha1( $file ) . '.lock.d';
+		$snaps->snapshot_option( 'aura_probe' );
+		mkdir( $dir, 0700 );
+		file_put_contents( $dir . '/tok', '4194301:1:0000000000000000' );
+		$this->assertSame( 'locked', $snaps->create_file( $file, "x\n" )['error'], 'fresh: held' );
+		touch( $dir, time() - Aura_Worker_Snapshots::LOCK_STALE_AFTER - 60 );
+		$this->assertTrue( $snaps->create_file( $file, "x\n" )['success'], 'silent past the lease: broken — the only policy a remote holder can have' );
+	}
+
+	public function test_without_flock_an_abandoned_preparation_is_swept_on_contention(): void {
+		// Codex #100 round-5 P2: a kernel-killed request can leave a
+		// `.lock.d.tmp-*` behind; a live one exists for microseconds.
+		$file  = WP_CONTENT_DIR . '/prep-sweep.php';
+		$snaps = new class extends Aura_Worker_Snapshots {
+			protected function link_available() {
+				return false;
+			}
+			protected function lock_available() {
+				return false;
+			}
+			protected function target_lock_tries() {
+				return 3;
+			}
+			public function holder_identity_for_test() {
+				return $this->holder_identity();
+			}
+		};
+		$dir  = WP_CONTENT_DIR . '/aura-backups/snapshots/path-' . sha1( $file ) . '.lock.d';
+		$snaps->snapshot_option( 'aura_probe' );
+		$old  = $dir . '.tmp-deadbeef';
+		mkdir( $old, 0700 );
+		file_put_contents( $old . '/deadbeef', 'partial' );
+		touch( $old . '/deadbeef', time() - Aura_Worker_Snapshots::LOCK_STALE_AFTER - 60 );
+		touch( $old, time() - Aura_Worker_Snapshots::LOCK_STALE_AFTER - 60 );
+		$fresh = $dir . '.tmp-cafebabe';
+		mkdir( $fresh, 0700 ); // someone mid-acquire right now
+		mkdir( $dir, 0700 );
+		file_put_contents( $dir . '/tok', $snaps->holder_identity_for_test() );
+		$this->assertSame( 'locked', $snaps->create_file( $file, "x\n" )['error'] );
+
+		$this->assertDirectoryDoesNotExist( $old, 'the abandoned preparation went' );
+		$this->assertDirectoryExists( $fresh, 'a fresh one is somebody\'s' );
+		rmdir( $fresh );
+		unlink( $dir . '/tok' );
+		rmdir( $dir );
+	}
+
 	public function test_without_flock_a_broken_holder_cannot_release_the_replacement_lock(): void {
 		// Codex #100 round-1 P1: the directory holds its owner's token, so a
 		// rmdir() by a holder that was broken as stale fails on the replacement's.
@@ -1978,7 +2081,7 @@ final class SnapshotsTest extends TestCase {
 
 		// A short stage write on the restore leaves the target as it was.
 		$short = new class extends Aura_Worker_Snapshots {
-			protected function stage( $dir, $name, $content ) {
+			protected function stage( $dir, $name, $content, $mode = null ) {
 				return array( 'success' => false, 'error' => 'Short write while staging (disk full?): ' . $dir );
 			}
 		};
