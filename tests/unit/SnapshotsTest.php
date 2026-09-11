@@ -2098,6 +2098,44 @@ final class SnapshotsTest extends TestCase {
 		$this->assertFileDoesNotExist( WP_CONTENT_DIR . '/aura-backups/snapshots/' . $recs[0]['id'] . '.lock', 'and goes only once the record is gone' );
 	}
 
+	public function test_a_stage_born_wider_than_0600_is_tightened_before_the_first_byte_or_refused(): void {
+		// Codex #100 round-7 P1: a default POSIX ACL ignores the umask, so the
+		// stage can be born group- or world-readable. It is tightened and
+		// verified on the handle before any content is written.
+		$file = WP_CONTENT_DIR . '/acl-stage.php';
+		file_put_contents( $file, "<?php // v1\n" );
+
+		// (a) the ACL hands back 0666 once; chmod() tightens it; the write proceeds.
+		$once = new class extends Aura_Worker_Snapshots {
+			public $asked = 0;
+			protected function mode_of( $fh, array $stat ) {
+				++$this->asked;
+				return 1 === $this->asked ? 0100666 : (int) $stat['mode'];
+			}
+		};
+		$this->assertTrue( $once->overwrite_file( $file, "<?php // v2\n" )['success'] );
+		$this->assertSame( 2, $once->asked, 'read wide, tightened, read again' );
+		$this->assertSame( "<?php // v2\n", file_get_contents( $file ) );
+
+		// (b) the ACL wins even after chmod(): refused before a byte is staged; the target untouched.
+		$always = new class extends Aura_Worker_Snapshots {
+			protected function mode_of( $fh, array $stat ) {
+				return 0100666;
+			}
+		};
+		$res = $always->overwrite_file( $file, "<?php // v3\n" );
+		$this->assertFalse( $res['success'] );
+		$this->assertStringContainsString( 'private before writing', $res['error'] );
+		$this->assertSame( "<?php // v2\n", file_get_contents( $file ) );
+		$this->assertSame( array(), glob( WP_CONTENT_DIR . '/.aura-create-*' ), 'nothing staged' );
+
+		// A create goes the same way.
+		$res = $always->create_file( WP_CONTENT_DIR . '/acl-create.php', "x\n" );
+		$this->assertFalse( $res['success'] );
+		$this->assertStringContainsString( 'private before writing', $res['error'] );
+		$this->assertFileDoesNotExist( WP_CONTENT_DIR . '/acl-create.php' );
+	}
+
 	public function test_without_flock_a_broken_holder_cannot_release_the_replacement_lock(): void {
 		// Codex #100 round-1 P1: the directory holds its owner's token, so a
 		// rmdir() by a holder that was broken as stale fails on the replacement's.
@@ -2193,11 +2231,14 @@ final class SnapshotsTest extends TestCase {
 		// handle is checked before a byte is written.
 		$file  = WP_CONTENT_DIR . '/acl.php';
 		$snaps = new class extends Aura_Worker_Snapshots {
+			public $asked = 0;
 			protected function link_available() {
 				return false;
 			}
 			protected function mode_of( $fh, array $stat ) {
-				return 0100666; // what a default ACL would hand back
+				// The stage's own check (2.17.2) reads the real mode; the target
+				// claim is what this test models as ACL-widened.
+				return 0 === $this->asked++ ? (int) $stat['mode'] : 0100666; // what a default ACL would hand back
 			}
 		};
 

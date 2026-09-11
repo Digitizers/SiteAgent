@@ -482,6 +482,16 @@ class Aura_Worker_Snapshots {
 		if ( false === $fh ) {
 			return array( 'success' => false, 'error' => 'Unable to stage file beside the target: ' . $dir );
 		}
+		// A default POSIX ACL on the directory makes the kernel ignore the umask
+		// (the same fact write_exclusively() guards): the entry can be born
+		// wider than 0600. Tighten and VERIFY on the handle before the first
+		// byte; a mode that will not tighten is a refusal, nothing staged
+		// (Codex #100 round-7 P1).
+		if ( ! $this->stage_is_private( $fh, $tmp ) ) {
+			fclose( $fh ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+			$this->discard_stage( $tmp );
+			return array( 'success' => false, 'error' => 'Unable to make the staged file private before writing it (a default ACL?): ' . $tmp );
+		}
 		$len     = strlen( $content );
 		$written = 0;
 		while ( $written < $len ) {
@@ -518,6 +528,30 @@ class Aura_Worker_Snapshots {
 			return array( 'success' => false, 'error' => 'Unable to set permissions on the staged file: ' . $tmp );
 		}
 		return $tmp;
+	}
+
+	/**
+	 * Whether a freshly created stage is owner-only — tightened with chmod()
+	 * when it is not, and read back through the handle to be sure.
+	 *
+	 * @param resource $fh  The open handle.
+	 * @param string   $tmp Its path.
+	 * @return bool
+	 */
+	private function stage_is_private( $fh, $tmp ) {
+		$stat = fstat( $fh );
+		if ( ! is_array( $stat ) ) {
+			return false;
+		}
+		if ( 0600 === ( (int) $this->mode_of( $fh, $stat ) & 0777 ) ) {
+			return true;
+		}
+		if ( ! function_exists( 'chmod' ) || ! @chmod( $tmp, 0600 ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Our own exclusively created file; a refusal is answered, not surfaced.
+			return false;
+		}
+		clearstatcache( true, $tmp );
+		$stat = fstat( $fh );
+		return is_array( $stat ) && 0600 === ( (int) $this->mode_of( $fh, $stat ) & 0777 );
 	}
 
 	/**
