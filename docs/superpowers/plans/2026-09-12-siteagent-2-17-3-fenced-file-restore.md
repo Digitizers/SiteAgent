@@ -341,6 +341,8 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 **(a) The claim's hash-to-unlink window is accepted, not closed** (Codex #101 round-3 P1, declined with reasons). A writer holding a descriptor opened before the claim can write into the claimed inode after the final re-hash and before the `unlink`, and no portable primitive makes those two steps atomic — PHP exposes no way to unlink a file only if its contents are unchanged. The alternative on offer is to retain the claim whenever such a writer cannot be excluded, which is *always*: every successful restore would then leave an `.aura-restore-<hex>` beside the target — a name this engine deliberately never sweeps — and report `moved_aside`, which Aura surfaces to the operator. That trades a microsecond window for permanent litter on every restore and a warning that means nothing. **The created-file restore has carried this exact window since 2.17.0** (`restore_created_file_locked()`, the `wp_delete_file( $claim )` after its own `hash_file()`), so retaining here would also make the two restore paths disagree about the same risk. The re-hash immediately before the unlink stays: it is the narrowest portable bound, and it catches every writer that has finished by then.
 
+**(c) A put-back of a non-regular entry is guarded, not atomic** (Codex #101 round-8 P1). `rename()` clobbers on POSIX and PHP offers no atomic no-clobber move for a directory or a symlink — `link()` cannot name a directory and follows a symlink to its destination. Both put-backs therefore check `path_present( $target )` immediately before the rename and keep the entry under its claim name when the path has been retaken. A writer who takes the path in the instant between that check and the rename is still clobbered; that window is unavoidable in PHP, and it is narrower than the one it replaces by the width of the whole recovery path. Every other write in this engine reaches the target through `link()` or an exclusive create, both of which are genuinely no-clobber; this is the one place where neither is available.
+
 **(b)** On a host without `link()`, an **executable** target cannot be republished at all: `publish_by_write()` and `put_back_by_write()` both refuse execute bits, because `fopen()` cannot create them (SiteAgent#96, #97). Claiming such a file would strand it aside. So for that case only — no `link()` AND the target is executable — the restore verifies in place and replaces with `replace_in_place()`, keeping the 2.17.2 behaviour and its narrow window. This mirrors the created-file restore's own executable branch, which 2.17.2 added for the same reason.
 
 - [ ] **Step 1: Write the failing tests**
@@ -640,6 +642,32 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 		$this->assertDirectoryExists( $file, 'the directory is put back at its path, not stranded aside' );
 	}
 
+	public function test_a_non_file_is_kept_aside_when_the_path_is_retaken(): void {
+		// Codex #101 round-8 P1: rename() clobbers, so putting a raced symlink
+		// back must never destroy a file that took the path after our claim.
+		$file  = WP_CONTENT_DIR . '/retaken.php';
+		file_put_contents( $file, "<?php // original\n" );
+		$snaps = new class extends Aura_Worker_Snapshots {
+			public $done = false;
+			protected function after_claim( $claim, $target ) {
+				if ( ! $this->done ) {
+					$this->done = true;
+					rename( $claim, $claim . '-stash' );                 // our file steps aside
+					symlink( WP_CONTENT_DIR . '/nowhere.php', $claim );  // a symlink is what we hold
+					file_put_contents( $target, "<?php // a newer file\n" ); // and someone retakes the path
+				}
+			}
+		};
+		$rec = $snaps->overwrite_file( $file, "<?php // written\n" )['snapshot'];
+
+		$out = $snaps->restore( $rec['id'] );
+
+		$this->assertFalse( $out['success'] );
+		$this->assertSame( 'aura_file_changed_since', $out['code'] );
+		$this->assertSame( "<?php // a newer file\n", file_get_contents( $file ), 'the newer file is never clobbered' );
+		$this->assertArrayHasKey( 'moved_aside', $out, 'the symlink is named, not destroyed' );
+	}
+
 	public function test_a_voided_create_record_answers_voided_even_when_the_file_is_gone(): void {
 		// Codex #101 round-7 P2: the already-gone shortcut used to run first, so
 		// a retired record reported a cheerful success and a rollback counted
@@ -827,7 +855,7 @@ And REPLACE the existing `test_file_snapshot_and_restore_roundtrip` (line 44) �
 
 - [ ] **Step 3: Run the new and changed tests to verify they fail**
 
-Run: `vendor/bin/phpunit --filter 'overwrite_restore|unfenced|bare_file_snapshot|external_write_after_the_claim|directory_or_symlink_at_the_path|descriptor_opened_before_the_claim|failed_stage_never_removes|restored_file_keeps_its_restrictive_mode|chmod_that_lands_after_the_claim|dangling_symlink_that_takes_the_path|write_never_lands_leaves_an_unfenced|stamp_that_fails|racer_that_takes_the_path_during_cleanup|directory_that_takes_the_path_after_the_claim|voided_create_record_answers_voided|short_restore_write_clears|partial_restore_write_that_cannot_be_cleared' tests/unit/SnapshotsTest.php`
+Run: `vendor/bin/phpunit --filter 'overwrite_restore|unfenced|bare_file_snapshot|external_write_after_the_claim|directory_or_symlink_at_the_path|descriptor_opened_before_the_claim|failed_stage_never_removes|restored_file_keeps_its_restrictive_mode|chmod_that_lands_after_the_claim|dangling_symlink_that_takes_the_path|write_never_lands_leaves_an_unfenced|stamp_that_fails|racer_that_takes_the_path_during_cleanup|directory_that_takes_the_path_after_the_claim|non_file_is_kept_aside_when_the_path_is_retaken|voided_create_record_answers_voided|short_restore_write_clears|partial_restore_write_that_cannot_be_cleared' tests/unit/SnapshotsTest.php`
 Expected: FAIL — today's restore writes the payload back unconditionally, so the fenced, `already`, coded and claim tests all fail.
 
 - [ ] **Step 4: Pass the record into the file restore, and retire a record whose write never landed**
@@ -1068,7 +1096,17 @@ Replace the body of `restore_existing_file()` and add its helpers:
 		// moves such an entry back whole.
 		if ( is_link( $claim ) || ! is_file( $claim ) ) {
 			$this->discard_stage( $tmp );
-			return @rename( $claim, $target ) // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.rename_rename -- Putting a racer's entry back, atomically; a refusal is answered below.
+			// PUT IT BACK ONLY WHILE THE PATH IS STILL FREE (Codex #101
+			// round-8 P1). rename() CLOBBERS on POSIX, and PHP has no atomic
+			// no-clobber move for a directory or a symlink — link() cannot
+			// name a directory and follows a symlink to its destination. So a
+			// second writer who took the path after our claim would be
+			// destroyed by an unconditional put-back. When the path is taken,
+			// the entry stays under its claim name and the answer says where.
+			if ( self::path_present( $target ) ) {
+				return $this->changed_since( 'something that is not a regular file took the path, and another file took it again before it could be put back', array( 'moved_aside' => $claim ) );
+			}
+			return @rename( $claim, $target ) // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.rename_rename -- Putting a racer's entry back; the path was free a statement ago and a refusal is answered below.
 				? $this->changed_since( 'something that is not a regular file took the path while the restore was being prepared' )
 				: $this->changed_since( 'something that is not a regular file took the path and could not be put back', array( 'moved_aside' => $claim ) );
 		}
@@ -1247,10 +1285,16 @@ Replace the body of `restore_existing_file()` and add its helpers:
 		}
 		$moved = @stat( $aside ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Gone is an answer.
 		if ( ! is_array( $moved ) || $moved['ino'] !== $mine['ino'] || $moved['dev'] !== $mine['dev'] ) {
-			// We moved somebody else's file. Put it back and touch nothing; a
-			// refused put-back leaves it under an `.aura-restore-*` name, which
-			// is never swept, rather than deleting a file that is not ours.
-			@rename( $aside, $target ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.rename_rename -- A best-effort put-back; the failure is answered as "not cleared".
+			// We moved somebody else's file. Put it back — but ONLY while the
+			// path is still free (Codex #101 round-8 P1): a SECOND writer can
+			// take the target after our claim, and rename() would destroy that
+			// file too. When the path is taken, the entry stays under its
+			// `.aura-restore-*` name, which this engine never sweeps, rather
+			// than clobbering a file that is not ours. Either way this is "not
+			// cleared", and the caller keeps its own claim aside and says so.
+			if ( ! self::path_present( $target ) ) {
+				@rename( $aside, $target ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.rename_rename -- A best-effort put-back onto a path that was free a statement ago.
+			}
 			return false;
 		}
 		wp_delete_file( $aside );
@@ -1312,8 +1356,8 @@ Replace the body of `restore_existing_file()` and add its helpers:
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
-Run: `vendor/bin/phpunit --filter 'overwrite_restore|unfenced|bare_file_snapshot|external_write_after_the_claim|directory_or_symlink_at_the_path|descriptor_opened_before_the_claim|failed_stage_never_removes|restored_file_keeps_its_restrictive_mode|chmod_that_lands_after_the_claim|dangling_symlink_that_takes_the_path|write_never_lands_leaves_an_unfenced|stamp_that_fails|racer_that_takes_the_path_during_cleanup|directory_that_takes_the_path_after_the_claim|voided_create_record_answers_voided|short_restore_write_clears|partial_restore_write_that_cannot_be_cleared' tests/unit/SnapshotsTest.php`
-Expected: PASS (20 tests).
+Run: `vendor/bin/phpunit --filter 'overwrite_restore|unfenced|bare_file_snapshot|external_write_after_the_claim|directory_or_symlink_at_the_path|descriptor_opened_before_the_claim|failed_stage_never_removes|restored_file_keeps_its_restrictive_mode|chmod_that_lands_after_the_claim|dangling_symlink_that_takes_the_path|write_never_lands_leaves_an_unfenced|stamp_that_fails|racer_that_takes_the_path_during_cleanup|directory_that_takes_the_path_after_the_claim|non_file_is_kept_aside_when_the_path_is_retaken|voided_create_record_answers_voided|short_restore_write_clears|partial_restore_write_that_cannot_be_cleared' tests/unit/SnapshotsTest.php`
+Expected: PASS (21 tests).
 
 - [ ] **Step 7: Run the whole suite and the linter**
 
