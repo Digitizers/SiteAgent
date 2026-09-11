@@ -1856,6 +1856,84 @@ final class SnapshotsTest extends TestCase {
 		$this->assertSame( array(), glob( WP_CONTENT_DIR . '/aura-backups/snapshots/path-*.lock.d*' ), 'nothing left behind' );
 	}
 
+	public function test_without_flock_a_holder_whose_proc_record_cannot_be_read_is_not_declared_dead(): void {
+		// Codex #100 round-4 P1: open_basedir / hidepid make /proc/<pid>/stat
+		// unreadable for a LIVE process. Unreadable is unknown; only the kernel
+		// (posix_kill) may say dead.
+		if ( ! function_exists( 'posix_kill' ) ) {
+			$this->markTestSkipped( 'no posix_kill() to fall back to here' );
+		}
+		$file  = WP_CONTENT_DIR . '/hidepid.php';
+		$snaps = new class extends Aura_Worker_Snapshots {
+			protected function link_available() {
+				return false;
+			}
+			protected function lock_available() {
+				return false;
+			}
+			protected function target_lock_tries() {
+				return 3;
+			}
+			protected function proc_start_time( $pid ) {
+				return null; // every record unreadable, ours included
+			}
+		};
+		$dir = WP_CONTENT_DIR . '/aura-backups/snapshots/path-' . sha1( $file ) . '.lock.d';
+		$snaps->snapshot_option( 'aura_probe' );
+		mkdir( $dir, 0700 );
+		file_put_contents( $dir . '/tok', getmypid() . ':' ); // this process, no start time known
+		touch( $dir, time() - Aura_Worker_Snapshots::LOCK_STALE_AFTER - 60 );
+
+		$res = $snaps->create_file( $file, "x\n" );
+
+		$this->assertSame( 'locked', $res['error'], 'posix_kill says the holder is alive; /proc silence is not death' );
+		$this->assertDirectoryExists( $dir );
+		unlink( $dir . '/tok' );
+		rmdir( $dir );
+
+		file_put_contents( WP_CONTENT_DIR . '/aura-backups/snapshots/.keep', '' );
+		mkdir( $dir, 0700 );
+		file_put_contents( $dir . '/tok', '4194301:' ); // a process that is not there: ESRCH
+		touch( $dir, time() - Aura_Worker_Snapshots::LOCK_STALE_AFTER - 60 );
+		$this->assertTrue( $snaps->create_file( $file, "x\n" )['success'], 'ESRCH is a positive answer: dead, broken' );
+	}
+
+	public function test_overwrite_and_restore_recheck_the_path_under_the_lock(): void {
+		// Codex #100 round-4 P2: the symlink / regular-file checks ran before the
+		// lock; while this request waited, the path could become a symlink and
+		// the rename would replace the link. The checks run again under the lock.
+		$file = WP_CONTENT_DIR . '/swapped.php';
+		$real = WP_CONTENT_DIR . '/swap-destination.php';
+		file_put_contents( $file, "<?php // v1\n" );
+		file_put_contents( $real, "destination\n" );
+		$snaps = new class extends Aura_Worker_Snapshots {
+			public $swap = false;
+			protected function after_target_lock( $path ) {
+				if ( $this->swap ) {
+					unlink( $path );
+					symlink( WP_CONTENT_DIR . '/swap-destination.php', $path ); // what happened while we waited
+				}
+			}
+		};
+		$rec = $snaps->overwrite_file( $file, "<?php // v2\n" )['snapshot']; // a regular file: fine
+
+		$snaps->swap = true;
+		$res = $snaps->overwrite_file( $file, "<?php // v3\n" );
+		$this->assertFalse( $res['success'] );
+		$this->assertStringContainsString( 'symlink', $res['error'] );
+		$this->assertTrue( is_link( $file ), 'the link is not replaced' );
+		$this->assertSame( "destination\n", file_get_contents( $real ), 'nothing written through it' );
+		$this->assertCount( 1, $snaps->list_snapshots(), 'no snapshot of the destination was taken' );
+
+		unlink( $file );
+		file_put_contents( $file, "<?php // v4\n" ); // a regular file again for the pre-lock check
+		$res = $snaps->restore( $rec['id'] ); // the seam swaps the link back in under the lock
+		$this->assertFalse( $res['success'] );
+		$this->assertStringContainsString( 'symlink', $res['error'] );
+		$this->assertTrue( is_link( $file ) );
+		$this->assertSame( "destination\n", file_get_contents( $real ) );
+	}
+
 	public function test_without_flock_a_broken_holder_cannot_release_the_replacement_lock(): void {
 		// Codex #100 round-1 P1: the directory holds its owner's token, so a
 		// rmdir() by a holder that was broken as stale fails on the replacement's.

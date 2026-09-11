@@ -207,18 +207,17 @@ class Aura_Worker_Snapshots {
 		if ( ! is_string( $path ) || '' === $path || ! is_string( $content ) ) {
 			return array( 'success' => false, 'error' => 'overwrite_file: path and content must be strings.' );
 		}
-		if ( ! self::path_present( $path ) ) {
-			return array( 'success' => false, 'error' => 'File not found: ' . $path );
-		}
-		if ( is_link( $path ) ) {
-			return array( 'success' => false, 'error' => 'Target is a symlink: ' . $path );
-		}
-		if ( ! is_file( $path ) ) {
-			return array( 'success' => false, 'error' => 'Target is not a regular file: ' . $path );
+		$refused = $this->refuse_at_path( $path, true );
+		if ( null !== $refused ) {
+			return $refused;
 		}
 		$out = $this->with_target_lock(
 			$path,
 			function () use ( $path, $content ) {
+				$refused = $this->refuse_at_path( $path, true ); // again, under the lock
+				if ( null !== $refused ) {
+					return $refused;
+				}
 				$snap = $this->snapshot_file( $path );
 				if ( empty( $snap['success'] ) ) {
 					return $snap;
@@ -881,7 +880,47 @@ class Aura_Worker_Snapshots {
 	 * @return mixed $work's return, or null when the lock could not be taken.
 	 */
 	private function with_target_lock( $path, $work ) {
-		return $this->with_lock( 'path-' . sha1( (string) $path ), $work, $this->target_lock_tries() );
+		return $this->with_lock(
+			'path-' . sha1( (string) $path ),
+			function () use ( $path, $work ) {
+				$this->after_target_lock( $path );
+				return $work();
+			},
+			$this->target_lock_tries()
+		);
+	}
+
+	/**
+	 * Seam: the moment the target lock is held, before the work. Nothing in
+	 * production; a test models what changed at the path while we waited.
+	 *
+	 * @param string $path Target path.
+	 */
+	protected function after_target_lock( $path ) {
+	}
+
+	/**
+	 * What overwrite_file() and the existing-file restore refuse at a path:
+	 * nothing there, a symlink (a rename would replace the LINK, and the
+	 * snapshot would hold its destination's bytes), not a regular file.
+	 * Asked before the lock for a cheap answer and AGAIN under it — the path
+	 * can change while this request waits (Codex #100 round-4 P2).
+	 *
+	 * @param string $path         Path.
+	 * @param bool   $must_exist   Whether an absent path is a refusal.
+	 * @return array|null { success: false, error } or null when acceptable.
+	 */
+	private function refuse_at_path( $path, $must_exist ) {
+		if ( ! self::path_present( $path ) ) {
+			return $must_exist ? array( 'success' => false, 'error' => 'File not found: ' . $path ) : null;
+		}
+		if ( is_link( $path ) ) {
+			return array( 'success' => false, 'error' => 'Target is a symlink: ' . $path );
+		}
+		if ( ! is_file( $path ) ) {
+			return array( 'success' => false, 'error' => 'Target is not a regular file: ' . $path );
+		}
+		return null;
 	}
 
 	/**
@@ -1230,18 +1269,19 @@ class Aura_Worker_Snapshots {
 	 */
 	protected function holder_identity() {
 		$pid   = (int) getmypid();
-		$start = self::proc_start_time( $pid );
+		$start = $this->proc_start_time( $pid );
 		return $pid . ':' . ( null === $start ? '' : $start );
 	}
 
 	/**
 	 * A process's start time from /proc/<pid>/stat (field 22), or null where
-	 * /proc does not answer.
+	 * /proc does not answer — absent process OR unreadable record; the caller
+	 * never reads null as "gone". Seam: a test models an unreadable /proc.
 	 *
 	 * @param int $pid Process id.
 	 * @return string|null
 	 */
-	private static function proc_start_time( $pid ) {
+	protected function proc_start_time( $pid ) {
 		$stat = @file_get_contents( '/proc/' . (int) $pid . '/stat' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Not a URL; absent off Linux, which is an answer.
 		if ( ! is_string( $stat ) ) {
 			return null;
@@ -1281,7 +1321,7 @@ class Aura_Worker_Snapshots {
 			return array();
 		}
 		foreach ( $tokens as $token ) {
-			$alive = self::holder_alive( (string) @file_get_contents( $token ) ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- A token this class wrote; unreadable is "unknown".
+			$alive = $this->holder_alive( (string) @file_get_contents( $token ) ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- A token this class wrote; unreadable is "unknown".
 			if ( true === $alive ) {
 				return null; // a slow holder, not a dead one
 			}
@@ -1292,25 +1332,44 @@ class Aura_Worker_Snapshots {
 	/**
 	 * Ask the kernel whether a token's holder is still running.
 	 *
+	 * Seam: a test models a host that cannot read another process's record.
+	 *
 	 * @param string $identity "pid:starttime" as holder_identity() wrote it.
 	 * @return bool|null true alive, false dead, null unknowable here.
 	 */
-	private static function holder_alive( $identity ) {
+	protected function holder_alive( $identity ) {
 		$parts = explode( ':', $identity, 2 );
 		$pid   = (int) $parts[0];
 		if ( $pid <= 0 ) {
 			return null;
 		}
 		$start = isset( $parts[1] ) ? (string) $parts[1] : '';
-		$now   = self::proc_start_time( $pid );
-		if ( is_dir( '/proc' ) ) {
-			if ( null === $now ) {
-				return false; // /proc answers here and has no such process
-			}
-			return '' === $start || $now === $start; // a recycled pid has a different start time
+		$now   = $this->proc_start_time( $pid );
+		if ( is_string( $now ) ) {
+			return '' === $start || $now === $start; // /proc answered: alive, unless a recycled pid (different start time)
 		}
+		// /proc did not answer for this pid: the process may be gone, or its
+		// record unreadable here (open_basedir, hidepid, another user's pool).
+		// Only a positive answer counts (Codex #100 round-4 P1): posix_kill(0)
+		// says alive; EPERM says alive-and-not-ours; ESRCH says gone; anything
+		// else — and no posix at all — is unknown, and age decides.
 		if ( function_exists( 'posix_kill' ) ) {
-			return (bool) @posix_kill( $pid, 0 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Signal 0 sends nothing; a refusal means no such process (or not ours — treated as dead, age already stale).
+			if ( @posix_kill( $pid, 0 ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Signal 0 sends nothing; the errno below is the answer.
+				return true;
+			}
+			$errno = function_exists( 'posix_get_last_error' ) ? (int) posix_get_last_error() : 0;
+			if ( 1 === $errno ) { // EPERM: it exists, under another user
+				return true;
+			}
+			if ( 3 === $errno ) { // ESRCH: no such process
+				return false;
+			}
+			return null;
+		}
+		// No posix. /proc can establish absence only where it shows other
+		// processes at all (hidepid hides them): pid 1 is always there.
+		if ( is_dir( '/proc/1' ) && ! @file_exists( '/proc/' . $pid ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Under open_basedir this is a refusal, read as unknown below.
+			return is_readable( '/proc/1/stat' ) ? false : null;
 		}
 		return null;
 	}
@@ -1835,12 +1894,17 @@ class Aura_Worker_Snapshots {
 		if ( '' === $target ) {
 			return array( 'success' => false, 'error' => 'Snapshot record carries no target.' );
 		}
-		if ( is_link( $target ) ) {
-			return array( 'success' => false, 'error' => 'Target is a symlink: ' . $target );
+		$refused = $this->refuse_at_path( $target, false );
+		if ( null !== $refused ) {
+			return $refused;
 		}
 		$out = $this->with_target_lock(
 			$target,
 			function () use ( $target, $bytes ) {
+				$refused = $this->refuse_at_path( $target, false ); // again, under the lock
+				if ( null !== $refused ) {
+					return $refused;
+				}
 				$replaced = $this->replace_in_place( $target, $bytes );
 				return true === $replaced
 					? array( 'success' => true )
