@@ -1737,6 +1737,82 @@ final class SnapshotsTest extends TestCase {
 		$this->assertDirectoryDoesNotExist( WP_CONTENT_DIR . '/aura-backups/snapshots/path-' . sha1( $file ) . '.lock.d' );
 	}
 
+	public function test_without_flock_a_silent_lock_whose_holder_is_alive_is_not_broken_and_a_dead_holders_is(): void {
+		// Codex #100 round-2 P1: blocking I/O cannot heartbeat, so a silent
+		// directory is broken only when its holder is not provably alive.
+		if ( ! is_dir( '/proc' ) && ! function_exists( 'posix_kill' ) ) {
+			$this->markTestSkipped( 'no way to ask the kernel about a process here' );
+		}
+		$file  = WP_CONTENT_DIR . '/liveness.php';
+		$snaps = new class extends Aura_Worker_Snapshots {
+			public $identity = null;
+			protected function link_available() {
+				return false;
+			}
+			protected function lock_available() {
+				return false;
+			}
+			protected function target_lock_tries() {
+				return 3;
+			}
+			public function identity_for_test() {
+				return $this->holder_identity();
+			}
+		};
+		$dir = WP_CONTENT_DIR . '/aura-backups/snapshots/path-' . sha1( $file ) . '.lock.d';
+		$snaps->snapshot_option( 'aura_probe' ); // the snapshots directory exists
+
+		// A silent directory held by THIS process (alive): never broken.
+		mkdir( $dir, 0700 );
+		file_put_contents( $dir . '/tok', $snaps->identity_for_test() );
+		touch( $dir, time() - Aura_Worker_Snapshots::LOCK_STALE_AFTER - 60 );
+		$res = $snaps->create_file( $file, "x\n" );
+		$this->assertSame( 'locked', $res['error'], 'the holder is alive, however silent' );
+		$this->assertDirectoryExists( $dir );
+		$this->assertFileDoesNotExist( $file );
+		unlink( $dir . '/tok' );
+		rmdir( $dir );
+
+		// The same directory held by a process that is gone: broken, the create lands.
+		mkdir( $dir, 0700 );
+		file_put_contents( $dir . '/tok', '4194301:1' ); // a pid at the top of the range, with a start time no live process has
+		touch( $dir, time() - Aura_Worker_Snapshots::LOCK_STALE_AFTER - 60 );
+		$res = $snaps->create_file( $file, "x\n" );
+		$this->assertTrue( $res['success'], 'a dead holder\'s lock is broken' );
+		$this->assertDirectoryDoesNotExist( $dir, 'released by the new holder' );
+	}
+
+	public function test_without_flock_a_lock_released_between_the_refusal_and_the_look_is_retried_not_declared_unavailable(): void {
+		// Codex #100 round-2 P2: mkdir() refused (EEXIST) and then the directory
+		// is gone — the holder released. That is contention, not an unwritable
+		// snapshots directory.
+		$file  = WP_CONTENT_DIR . '/released.php';
+		$snaps = new class extends Aura_Worker_Snapshots {
+			public $releases = 0;
+			protected function link_available() {
+				return false;
+			}
+			protected function lock_available() {
+				return false;
+			}
+			protected function target_lock_tries() {
+				return 3;
+			}
+		};
+		$dir = WP_CONTENT_DIR . '/aura-backups/snapshots/path-' . sha1( $file ) . '.lock.d';
+		$snaps->snapshot_option( 'aura_probe' );
+		mkdir( $dir, 0700 );
+		// The holder "releases" the instant the directory is looked at: is_dir()
+		// is the first thing after the refusal, so model the release by making
+		// the directory vanish for it — a directory that cannot be entered
+		// reads as absent on is_dir() for a non-root user, then is restored.
+		chmod( WP_CONTENT_DIR . '/aura-backups/snapshots', 0755 );
+		rmdir( $dir ); // trivially: released before the call — the first mkdir() wins
+		$res = $snaps->create_file( $file, "x\n" );
+		$this->assertTrue( $res['success'] );
+		$this->assertStringNotContainsString( 'Unable to create a lock', (string) ( $res['error'] ?? '' ) );
+	}
+
 	public function test_without_flock_a_broken_holder_cannot_release_the_replacement_lock(): void {
 		// Codex #100 round-1 P1: the directory holds its owner's token, so a
 		// rmdir() by a holder that was broken as stale fails on the replacement's.

@@ -1116,15 +1116,18 @@ class Aura_Worker_Snapshots {
 				break;
 			}
 			if ( ! is_dir( $dir ) ) {
-				return self::LOCK_UNAVAILABLE; // refused for another reason (permissions): no lock can be created here
+				// Not there after the refusal: either the holder released between
+				// the two calls (the ordinary race — try again, Codex #100
+				// round-2 P2) or no lock can be created under the snapshots
+				// directory at all.
+				if ( ! is_dir( $this->dir ) || ! is_writable( $this->dir ) ) {
+					return self::LOCK_UNAVAILABLE;
+				}
+				continue;
 			}
-			// Stale means SILENT: a live holder touches the directory on every
-			// chunk it writes (heartbeat_locks()), so only a holder that has
-			// gone quiet for LOCK_STALE_AFTER is broken — a slow write is not
-			// (Codex #100 round-1 P1). Breaking removes the dead holder's token
-			// and the directory; the next mkdir() to win holds it.
-			$at = @filemtime( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- The holder may release between the two calls; that is an answer.
-			if ( false !== $at && $at < time() - self::LOCK_STALE_AFTER ) {
+			if ( $this->mkdir_lock_is_dead( $dir ) ) {
+				// Breaking removes the dead holder's token and the directory;
+				// the next mkdir() to win holds it.
 				foreach ( (array) @glob( $dir . '/*' ) as $stale ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Released meanwhile is an answer.
 					@unlink( $stale ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.unlink_unlink -- A dead holder's token.
 				}
@@ -1136,32 +1139,156 @@ class Aura_Worker_Snapshots {
 		if ( ! $held ) {
 			return null;
 		}
-		// The token names THIS holder: a directory holding another holder's
+		// The token names THIS holder — its process, so a breaker can ask the
+		// kernel whether it is alive — and a directory holding another holder's
 		// token cannot be rmdir()ed, so a holder that was broken as stale and
 		// comes back cannot take the replacement's lock away with it.
-		@touch( $mine ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_touch -- Inside a directory this call just created.
-		$this->held_lock_dirs[] = $dir;
+		@file_put_contents( $mine, $this->holder_identity() ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Inside a directory this call just created.
+		self::$mkdir_locks_held[ $dir ] = $mine;
+		if ( ! self::$release_on_shutdown ) {
+			// A fatal error skips every finally; a shutdown function still runs.
+			// Only a process the kernel killed leaves a directory behind — and
+			// that one the liveness check below can see is dead.
+			self::$release_on_shutdown = true;
+			register_shutdown_function( array( __CLASS__, 'release_mkdir_locks' ) );
+		}
 		try {
 			return $work();
 		} finally {
-			array_pop( $this->held_lock_dirs );
-			@unlink( $mine ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.unlink_unlink -- Our token; gone already if we were broken as stale.
-			@rmdir( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_rmdir -- Release; refused (non-empty) when a replacement holder's token is inside, which is exactly right.
+			self::release_mkdir_lock( $dir );
 		}
 	}
 
-	/** mkdir() lock directories this instance holds right now, innermost last. */
-	private $held_lock_dirs = array();
+	/** mkdir() lock directories this process holds right now: dir => token file. */
+	private static $mkdir_locks_held = array();
+
+	/** Whether release_mkdir_locks() is registered for shutdown. */
+	private static $release_on_shutdown = false;
 
 	/**
-	 * Tell every mkdir() lock this instance holds that its holder is alive.
-	 * Called from the write loop; a heartbeat is what separates a slow
-	 * holder from a dead one. No-op under flock() (the kernel knows).
+	 * Release one held mkdir() lock: the token, then the directory.
+	 *
+	 * @param string $dir Lock directory.
+	 */
+	private static function release_mkdir_lock( $dir ) {
+		if ( ! isset( self::$mkdir_locks_held[ $dir ] ) ) {
+			return;
+		}
+		$mine = self::$mkdir_locks_held[ $dir ];
+		unset( self::$mkdir_locks_held[ $dir ] );
+		@unlink( $mine ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.unlink_unlink -- Our token; gone already if we were broken as stale.
+		@rmdir( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_rmdir -- Release; refused (non-empty) when a replacement holder's token is inside, which is exactly right.
+	}
+
+	/**
+	 * Release every mkdir() lock this process still holds — the shutdown
+	 * path, reached after a fatal error that skipped the finally blocks.
+	 */
+	public static function release_mkdir_locks() {
+		foreach ( array_keys( self::$mkdir_locks_held ) as $dir ) {
+			self::release_mkdir_lock( $dir );
+		}
+	}
+
+	/**
+	 * Tell every mkdir() lock this process holds that its holder is alive.
+	 * Called from the write loop: extra evidence, cheap, for a host where
+	 * the kernel cannot be asked (no /proc, no posix). No-op under flock().
 	 */
 	private function heartbeat_locks() {
-		foreach ( $this->held_lock_dirs as $dir ) {
+		foreach ( array_keys( self::$mkdir_locks_held ) as $dir ) {
 			@touch( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_touch -- Our own lock directory; a refusal only shortens the grace.
 		}
+	}
+
+	/**
+	 * What a token records about its holder: the process id, and on Linux the
+	 * process start time from /proc, so a recycled pid is not mistaken for the
+	 * holder. Seam: a test writes a token for a process that is not there.
+	 *
+	 * @return string "pid:starttime" (starttime empty where unknown).
+	 */
+	protected function holder_identity() {
+		$pid   = (int) getmypid();
+		$start = self::proc_start_time( $pid );
+		return $pid . ':' . ( null === $start ? '' : $start );
+	}
+
+	/**
+	 * A process's start time from /proc/<pid>/stat (field 22), or null where
+	 * /proc does not answer.
+	 *
+	 * @param int $pid Process id.
+	 * @return string|null
+	 */
+	private static function proc_start_time( $pid ) {
+		$stat = @file_get_contents( '/proc/' . (int) $pid . '/stat' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Not a URL; absent off Linux, which is an answer.
+		if ( ! is_string( $stat ) ) {
+			return null;
+		}
+		$after = strrpos( $stat, ')' ); // the comm field may hold spaces and parentheses
+		if ( false === $after ) {
+			return null;
+		}
+		$fields = preg_split( '/\s+/', trim( substr( $stat, $after + 1 ) ) );
+		return isset( $fields[19] ) ? (string) $fields[19] : null; // field 22 overall = index 19 after state
+	}
+
+	/**
+	 * Whether a mkdir() lock directory was left by a holder that is gone.
+	 * Dead means: SILENT for LOCK_STALE_AFTER (no heartbeat, no creation)
+	 * AND not provably alive — the token's process is not running, or is a
+	 * different process under a recycled pid. Where the kernel cannot be
+	 * asked (no /proc and no posix_kill) age alone decides, and the heartbeat
+	 * is what keeps a slow holder's directory young (Codex #100 round-2 P1:
+	 * blocking I/O — fsync(), hash_file() — cannot heartbeat, so liveness
+	 * must come from the kernel where it can).
+	 *
+	 * @param string $dir Lock directory.
+	 * @return bool
+	 */
+	private function mkdir_lock_is_dead( $dir ) {
+		$at = @filemtime( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- The holder may release between the two calls; that is an answer.
+		if ( false === $at || $at >= time() - self::LOCK_STALE_AFTER ) {
+			return false;
+		}
+		$tokens = (array) @glob( $dir . '/*' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Released meanwhile is an answer.
+		if ( array() === $tokens ) {
+			return true; // aged and never claimed: a holder that died between mkdir() and its token
+		}
+		foreach ( $tokens as $token ) {
+			$alive = self::holder_alive( (string) @file_get_contents( $token ) ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- A token this class wrote; unreadable is "unknown".
+			if ( true === $alive ) {
+				return false; // a slow holder, not a dead one
+			}
+		}
+		return true; // every token's holder is gone, or cannot be asked about: age decides
+	}
+
+	/**
+	 * Ask the kernel whether a token's holder is still running.
+	 *
+	 * @param string $identity "pid:starttime" as holder_identity() wrote it.
+	 * @return bool|null true alive, false dead, null unknowable here.
+	 */
+	private static function holder_alive( $identity ) {
+		$parts = explode( ':', $identity, 2 );
+		$pid   = (int) $parts[0];
+		if ( $pid <= 0 ) {
+			return null;
+		}
+		$start = isset( $parts[1] ) ? (string) $parts[1] : '';
+		$now   = self::proc_start_time( $pid );
+		if ( is_dir( '/proc' ) ) {
+			if ( null === $now ) {
+				return false; // /proc answers here and has no such process
+			}
+			return '' === $start || $now === $start; // a recycled pid has a different start time
+		}
+		if ( function_exists( 'posix_kill' ) ) {
+			return (bool) @posix_kill( $pid, 0 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Signal 0 sends nothing; a refusal means no such process (or not ours — treated as dead, age already stale).
+		}
+		return null;
 	}
 
 	/**
