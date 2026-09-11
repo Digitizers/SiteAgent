@@ -312,12 +312,22 @@ class Aura_Worker_Snapshots {
 		// inode was verified, so the truth is ours to restore: put the hash
 		// back and lift the void. If even that fails the create still happened
 		// — say so instead of pretending it did not.
-		$out     = array( 'success' => true, 'published' => $this->last_publish_mode );
-		$current = $this->get( $record['id'] );
-		if ( is_array( $current ) && ! empty( $current['voided'] ) ) {
-			if ( ! $this->reinstate_record( $record['id'], $sha ) ) {
-				$out['warning'] = 'the record was voided by a concurrent sweep during a long publish and could not be repaired; restore will refuse it';
+		$out      = array( 'success' => true, 'published' => $this->last_publish_mode );
+		$id       = $record['id'];
+		$repaired = $this->with_record_lock(
+			$id,
+			function () use ( $id, $sha ) {
+				$current = $this->get( $id );
+				if ( is_array( $current ) && ! empty( $current['voided'] ) ) {
+					return $this->reinstate_record( $id, $sha );
+				}
+				return true;
 			}
+		);
+		if ( true !== $repaired ) {
+			$out['warning'] = null === $repaired
+				? 'the record could not be locked after a long publish; a concurrent sweep may have voided it — restore may refuse it'
+				: 'the record was voided by a concurrent sweep during a long publish and could not be repaired; restore will refuse it';
 		}
 
 		// The PERSISTED record keeps `staged` — prune_older_than()'s sweep reads
@@ -640,15 +650,22 @@ class Aura_Worker_Snapshots {
 	}
 
 	/**
-	 * How a create publishes on this host: 'link' (one atomic hard link) or
+	 * How a create publishes on this host: 'link' (one atomic hard link),
 	 * 'write' (exclusive create, bytes written into the owned handle — a
-	 * reader can see the file grow). Reported by audit_agent_code so the
-	 * fleet knows which sites create with the empty→complete jump.
+	 * reader can see the file grow), or null when neither can land a create:
+	 * no link() AND a configured create mode with execute bits, which fopen()
+	 * cannot recreate (Codex #97 round-6 P2). Reported by audit_agent_code so
+	 * the fleet knows which sites can create at all, and how.
 	 *
-	 * @return string
+	 * @param int|null $mode The create mode; null = FS_CHMOD_FILE (0644).
+	 * @return string|null
 	 */
-	public static function publish_mode() {
-		return function_exists( 'link' ) ? 'link' : 'write';
+	public static function publish_mode( $mode = null ) {
+		if ( function_exists( 'link' ) ) {
+			return 'link';
+		}
+		$mode = null === $mode ? ( defined( 'FS_CHMOD_FILE' ) ? (int) FS_CHMOD_FILE : 0644 ) : (int) $mode;
+		return 0 === ( $mode & 0111 ) ? 'write' : null;
 	}
 
 	/**
@@ -793,6 +810,46 @@ class Aura_Worker_Snapshots {
 	}
 
 	/**
+	 * Run $work holding this record's lock, or say the lock could not be had.
+	 * The sweeper's hash-then-void and the publisher's check-then-reinstate
+	 * are read/write sequences on the same record; without one lock across
+	 * each, a void can commit after the publisher's check (Codex #97 round-6
+	 * P2). The lock is a sibling `<id>.lock` file under flock(); it is taken
+	 * non-blocking with a bounded retry so no request ever hangs on it —
+	 * a caller that cannot get it treats its section as contended and says
+	 * so (the sweeper leaves the stage for the next pass; the publisher
+	 * reports a warning).
+	 *
+	 * @param string   $id   Snapshot id.
+	 * @param callable $work Runs under the lock; its return is returned.
+	 * @return mixed $work's return, or null when the lock could not be taken.
+	 */
+	private function with_record_lock( $id, $work ) {
+		$lock = $this->dir . basename( (string) $id ) . '.lock';
+		$fh   = @fopen( $lock, 'cb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- A lock file this class owns; a refusal is answered, not surfaced.
+		if ( false === $fh ) {
+			return null;
+		}
+		$held = false;
+		for ( $i = 0; $i < 50 && ! $held; $i++ ) {
+			$held = flock( $fh, LOCK_EX | LOCK_NB );
+			if ( ! $held ) {
+				usleep( 20000 );
+			}
+		}
+		if ( ! $held ) {
+			fclose( $fh ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+			return null;
+		}
+		try {
+			return $work();
+		} finally {
+			flock( $fh, LOCK_UN );
+			fclose( $fh ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+		}
+	}
+
+	/**
 	 * Lift a void a concurrent sweep put on a record whose publish did land:
 	 * the expected hash goes back, `voided` and `interrupted` go.
 	 *
@@ -842,6 +899,10 @@ class Aura_Worker_Snapshots {
 		if ( file_exists( $meta_path ) ) {
 			wp_delete_file( $meta_path );
 		}
+		$lock = $this->dir . basename( (string) $id ) . '.lock';
+		if ( file_exists( $lock ) ) {
+			wp_delete_file( $lock );
+		}
 	}
 
 	/**
@@ -883,16 +944,31 @@ class Aura_Worker_Snapshots {
 		if ( ! is_array( $rec ) || empty( $rec['id'] ) ) {
 			return true;
 		}
-		$target   = (string) ( $rec['target'] ?? '' );
-		$expected = (string) ( $rec['expected_sha256'] ?? '' );
-		if ( '' === $target || '' === $expected || ! is_file( $target ) ) {
+		$id     = (string) $rec['id'];
+		$target = (string) ( $rec['target'] ?? '' );
+		if ( '' === $target ) {
 			return true;
 		}
-		$actual = hash_file( 'sha256', $target );
-		if ( is_string( $actual ) && hash_equals( $expected, $actual ) ) {
-			return true; // published; only the stage cleanup was lost
-		}
-		return $this->void_record_in_place( (string) $rec['id'], array( 'interrupted' => true ) );
+		// Hash and void under the record's lock: a publisher landing right now
+		// re-checks its record under the same lock, so the void can never
+		// commit after that check (Codex #97 round-6 P2). Contended → keep the
+		// stage; the next pass decides.
+		$done = $this->with_record_lock(
+			$id,
+			function () use ( $id, $target ) {
+				$current  = $this->get( $id );
+				$expected = is_array( $current ) ? (string) ( $current['expected_sha256'] ?? '' ) : '';
+				if ( '' === $expected || ! is_file( $target ) ) {
+					return true;
+				}
+				$actual = hash_file( 'sha256', $target );
+				if ( is_string( $actual ) && hash_equals( $expected, $actual ) ) {
+					return true; // published; only the stage cleanup was lost
+				}
+				return $this->void_record_in_place( $id, array( 'interrupted' => true ) );
+			}
+		);
+		return true === $done;
 	}
 
 	/**

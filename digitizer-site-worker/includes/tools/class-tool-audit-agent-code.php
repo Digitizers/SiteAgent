@@ -452,9 +452,10 @@ class Aura_Tool_Audit_Agent_Code extends Aura_Tool_Base {
 			'fs_write'       => (bool) $env['fs_write'],
 			'wp_cli'         => (bool) $env['wp_cli'],
 			// How a write_file CREATE lands on this host (SiteAgent#96): 'link'
-			// (one atomic hard link) or 'write' (exclusive create, bytes written
-			// into the owned handle — a reader can see the file grow); null only
-			// when the engine is not loaded at all.
+			// (one atomic hard link), 'write' (exclusive create, bytes written
+			// into the owned handle — a reader can see the file grow), or null
+			// when no create can land here: no link() and FS_CHMOD_FILE carries
+			// execute bits fopen() cannot recreate (or the engine is not loaded).
 			'create_publish' => $this->create_publish(),
 		);
 	}

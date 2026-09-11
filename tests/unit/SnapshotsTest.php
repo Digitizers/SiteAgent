@@ -1173,8 +1173,10 @@ final class SnapshotsTest extends TestCase {
 		$this->assertSame( array(), $snaps->list_snapshots() );
 	}
 
-	public function test_publish_mode_names_link_or_write(): void {
+	public function test_publish_mode_names_link_or_write_and_null_when_the_create_mode_has_execute_bits(): void {
 		$this->assertSame( function_exists( 'link' ) ? 'link' : 'write', Aura_Worker_Snapshots::publish_mode() );
+		$this->assertSame( function_exists( 'link' ) ? 'link' : 'write', Aura_Worker_Snapshots::publish_mode( 0644 ) );
+		$this->assertSame( function_exists( 'link' ) ? 'link' : null, Aura_Worker_Snapshots::publish_mode( 0755 ), 'without link() a create mode with execute bits cannot land at all' );
 	}
 
 	public function test_an_interrupted_link_less_write_is_reconciled_by_the_sweep_the_record_voided_and_the_file_never_deleted(): void {
@@ -1324,6 +1326,69 @@ final class SnapshotsTest extends TestCase {
 		$this->assertTrue( $res['success'] );
 		$this->assertSame( 'link', $res['published'] );
 		$this->assertSame( 0755, fileperms( $file ) & 0777 );
+	}
+
+	public function test_the_sweeper_leaves_a_stage_alone_while_the_record_is_locked_and_the_publisher_warns_when_it_cannot_lock(): void {
+		// Codex #97 round-6 P2: the sweeper's hash-then-void and the
+		// publisher's check-then-reinstate run under one per-record lock.
+		// Modelled by holding that lock from the outside: neither side hangs;
+		// the sweeper keeps the stage for the next pass, the publisher lands
+		// and says the record could not be verified.
+		$file  = WP_CONTENT_DIR . '/locked.php';
+		$snaps = new class extends Aura_Worker_Snapshots {
+			protected function link_available() {
+				return false;
+			}
+			protected function write_all( $fh, $src ) {
+				fwrite( $fh, fread( $src, 5 ) );
+				throw new RuntimeException( 'simulated kill mid-write' );
+			}
+		};
+		try {
+			$snaps->create_file( $file, "<?php // whole file\n" );
+		} catch ( RuntimeException $e ) {
+			// expected
+		}
+		$recs   = $snaps->list_snapshots();
+		$staged = $recs[0]['staged'];
+		touch( $staged, time() - 2 * HOUR_IN_SECONDS );
+		$lock = WP_CONTENT_DIR . '/aura-backups/snapshots/' . $recs[0]['id'] . '.lock';
+		$held = fopen( $lock, 'cb' );
+		$this->assertTrue( flock( $held, LOCK_EX | LOCK_NB ) );
+
+		$snaps->prune_older_than( 30, Aura_Worker_Snapshots::DOOR_KINDS );
+
+		$this->assertFileExists( $staged, 'contended: the stage stays for the next pass' );
+		$this->assertArrayNotHasKey( 'voided', $snaps->get( $recs[0]['id'] ) );
+		flock( $held, LOCK_UN );
+		fclose( $held );
+
+		$snaps->prune_older_than( 30, Aura_Worker_Snapshots::DOOR_KINDS );
+		$this->assertFileDoesNotExist( $staged );
+		$this->assertTrue( $snaps->get( $recs[0]['id'] )['voided'] );
+
+		// The publisher side: land a create while its record's lock is held.
+		$file2  = WP_CONTENT_DIR . '/locked2.php';
+		$plain  = new class extends Aura_Worker_Snapshots {
+			public $lock_holder = null;
+			protected function link_available() {
+				return false;
+			}
+			protected function during_write( $path ) {
+				foreach ( $this->list_snapshots() as $rec ) {
+					if ( ( $rec['target'] ?? '' ) === $path ) {
+						$this->lock_holder = fopen( WP_CONTENT_DIR . '/aura-backups/snapshots/' . $rec['id'] . '.lock', 'cb' );
+						flock( $this->lock_holder, LOCK_EX | LOCK_NB );
+					}
+				}
+			}
+		};
+		$res = $plain->create_file( $file2, "x\n" );
+		flock( $plain->lock_holder, LOCK_UN );
+		fclose( $plain->lock_holder );
+		$this->assertTrue( $res['success'] );
+		$this->assertStringContainsString( 'could not be locked', $res['warning'] );
+		$this->assertSame( "x\n", file_get_contents( $file2 ) );
 	}
 
 	public function test_a_completed_publish_whose_stage_cleanup_was_lost_keeps_its_record(): void {
