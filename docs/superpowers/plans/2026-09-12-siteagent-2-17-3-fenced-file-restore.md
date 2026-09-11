@@ -416,6 +416,81 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 		$this->assertSame( 0600, fileperms( $file ) & 0777, 'a private file is never widened by a restore' );
 	}
 
+	public function test_an_overwrite_whose_write_never_lands_retires_its_record(): void {
+		// Codex #101 round-5 P1: the record asserts the file holds
+		// replaced_with_sha256. If the write failed, it never did — and a later
+		// writer who lands exactly those bytes would be overwritten by this
+		// stale payload on a restore that passes the fence.
+		$file  = WP_CONTENT_DIR . '/never-landed.php';
+		file_put_contents( $file, "<?php // original\n" );
+		$snaps = new class extends Aura_Worker_Snapshots {
+			protected function stage( $dir, $name, $content, $mode = null ) {
+				return array( 'success' => false, 'error' => 'Short write while staging (disk full?): ' . $dir );
+			}
+		};
+
+		$res = $snaps->overwrite_file( $file, "<?php // written\n" );
+
+		$this->assertFalse( $res['success'] );
+		$this->assertSame( "<?php // original\n", file_get_contents( $file ), 'the target never changed' );
+		$this->assertSame( array(), ( new Aura_Worker_Snapshots() )->list_snapshots(), 'no fenced record survives a write that did not land' );
+	}
+
+	public function test_without_link_a_short_restore_write_clears_its_entry_and_puts_the_file_back(): void {
+		// Codex #101 round-5 P1: write_exclusively() leaves an empty or partial
+		// entry at the path, which put_claim_back()'s exclusive create cannot
+		// replace — the healthy file stayed aside and the answer claimed
+		// "changed since" while the site was actually broken.
+		$file  = WP_CONTENT_DIR . '/short-restore.php';
+		file_put_contents( $file, "<?php // original\n" );
+		$plain = new Aura_Worker_Snapshots();
+		$rec   = $plain->overwrite_file( $file, "<?php // written\n" )['snapshot'];
+
+		$snaps = new class extends Aura_Worker_Snapshots {
+			protected function link_available() {
+				return false;
+			}
+			protected function write_all( $fh, $src ) {
+				fwrite( $fh, '<?php // half' ); // a short write
+				return false;
+			}
+		};
+		$out = $snaps->restore( $rec['id'] );
+
+		$this->assertFalse( $out['success'] );
+		$this->assertArrayNotHasKey( 'code', $out, 'our own failure is a 500, not a changed-since 409' );
+		$this->assertSame( "<?php // written\n", file_get_contents( $file ), 'the file we claimed is back at its path' );
+		$this->assertSame( array(), glob( WP_CONTENT_DIR . '/.aura-restore-*' ), 'nothing left aside' );
+	}
+
+	public function test_a_partial_restore_write_that_cannot_be_cleared_keeps_the_file_aside_and_says_so(): void {
+		// The other half of round-5 P1: when our damaged entry cannot be
+		// removed, the healthy file stays under its claim name and the answer
+		// names it, rather than reporting a tidy refusal.
+		$file  = WP_CONTENT_DIR . '/stuck-restore.php';
+		file_put_contents( $file, "<?php // original\n" );
+		$plain = new Aura_Worker_Snapshots();
+		$rec   = $plain->overwrite_file( $file, "<?php // written\n" )['snapshot'];
+
+		$snaps = new class extends Aura_Worker_Snapshots {
+			protected function link_available() {
+				return false;
+			}
+			protected function write_all( $fh, $src ) {
+				return false;
+			}
+			protected function remove_own_entry( $fh, $target, $mine ) {
+				return false; // the entry cannot be unlinked
+			}
+		};
+		$out = $snaps->restore( $rec['id'] );
+
+		$this->assertFalse( $out['success'] );
+		$this->assertArrayHasKey( 'moved_aside', $out );
+		$this->assertFileExists( $out['moved_aside'] );
+		$this->assertSame( "<?php // written\n", file_get_contents( $out['moved_aside'] ), 'the healthy file is the one kept' );
+	}
+
 	public function test_a_chmod_that_lands_after_the_claim_is_the_mode_that_is_restored(): void {
 		// Codex #101 round-4 P1: a chmod leaves the content alone, so the
 		// authoritative hash still passes; republishing at the mode read before
@@ -634,15 +709,45 @@ And REPLACE the existing `test_file_snapshot_and_restore_roundtrip` (line 44) �
 
 - [ ] **Step 3: Run the new and changed tests to verify they fail**
 
-Run: `vendor/bin/phpunit --filter 'overwrite_restore|unfenced|bare_file_snapshot|external_write_after_the_claim|directory_or_symlink_at_the_path|descriptor_opened_before_the_claim|failed_stage_never_removes|restored_file_keeps_its_restrictive_mode|chmod_that_lands_after_the_claim|dangling_symlink_that_takes_the_path' tests/unit/SnapshotsTest.php`
+Run: `vendor/bin/phpunit --filter 'overwrite_restore|unfenced|bare_file_snapshot|external_write_after_the_claim|directory_or_symlink_at_the_path|descriptor_opened_before_the_claim|failed_stage_never_removes|restored_file_keeps_its_restrictive_mode|chmod_that_lands_after_the_claim|dangling_symlink_that_takes_the_path|write_never_lands_retires|short_restore_write_clears|partial_restore_write_that_cannot_be_cleared' tests/unit/SnapshotsTest.php`
 Expected: FAIL — today's restore writes the payload back unconditionally, so the fenced, `already`, coded and claim tests all fail.
 
-- [ ] **Step 4: Pass the record into the file restore**
+- [ ] **Step 4: Pass the record into the file restore, and retire a record whose write never landed**
 
 In `restore()`'s `case 'file':`, the final line becomes:
 
 ```php
 				return $this->restore_existing_file( (string) $record['target'], $bytes, $record );
+```
+
+And in `overwrite_file()`'s locked closure, the `replace_in_place()` failure branch stops leaving the record behind:
+
+```php
+				$replaced_ok = $this->replace_in_place( $path, $content );
+				if ( true !== $replaced_ok ) {
+					// A FENCED RECORD FOR A WRITE THAT NEVER LANDED IS A LOADED
+					// GUN (Codex #101 round-5 P1). Until 2.17.3 this record was
+					// deliberately kept as "an extra restore point", which was
+					// harmless while a restore wrote unconditionally. Now the
+					// record ASSERTS that the file holds `replaced_with_sha256`
+					// — bytes that never reached the target. A later writer who
+					// legitimately puts exactly those bytes at this path would
+					// pass the fence and have them replaced by this stale
+					// payload. So retire it: delete it, and when the record lock
+					// is contended, void it in place. (We hold the TARGET lock
+					// here, and the target lock is taken before the record lock
+					// everywhere in this class.)
+					if ( ! $this->delete( $snap['snapshot']['id'] ) ) {
+						$this->void_record_in_place( $snap['snapshot']['id'], array( 'interrupted' => true ) );
+					}
+					return array( 'success' => false, 'error' => $replaced_ok );
+				}
+```
+
+`void_record_in_place()` must drop the fence key too, or a voided record still looks restorable:
+
+```php
+		unset( $record['expected_sha256'], $record['staged'], $record['replaced_with_sha256'] ); // the overwrite fence goes with the create's (Codex #101 round-5 P1)
 ```
 
 - [ ] **Step 5: Fence the restore — in-place for the no-write answers, claim-and-publish to write**
@@ -697,6 +802,15 @@ Replace the body of `restore_existing_file()` and add its helpers:
 	 * @return array { success, already?, code?, error?, detail?, moved_aside? }
 	 */
 	private function restore_existing_file_locked( $target, $bytes, array $record ) {
+		if ( ! empty( $record['voided'] ) ) {
+			// Retired because its write never landed (Codex #101 round-5 P1):
+			// a designated refusal, not an unfenced record.
+			return array(
+				'success' => false,
+				'code'    => 'aura_snapshot_voided',
+				'error'   => 'The rollback record for this write was retired because the write did not land.',
+			);
+		}
 		$replaced = isset( $record['replaced_with_sha256'] ) ? (string) $record['replaced_with_sha256'] : '';
 		if ( '' === $replaced ) {
 			return array(
@@ -829,14 +943,14 @@ Replace the body of `restore_existing_file()` and add its helpers:
 				// Something took the path while we held the file: never clobber it.
 				return $this->changed_since( 'another file took the path while the restore was in flight', array( 'moved_aside' => $claim ) );
 			}
-			// The put-back's answer is KEPT WHOLE, including its code (Codex
-			// #101 round-4 P2): a racer that drops a DANGLING symlink at the
-			// path makes publish() answer 'unsupported_filesystem' rather than
-			// 'exists' (it tests file_exists(), false for a dangling link), and
-			// overwriting the code with null turned that designated
-			// changed-since refusal into a 500. Only the detail is appended.
-			$out           = $this->put_claim_back( $claim, $target, 'the old bytes could not be published' );
-			$out['detail'] = ( isset( $out['detail'] ) ? $out['detail'] . '; ' : '' ) . 'Failed to write file: ' . $target . ' (' . (string) $published . ')';
+			// OUR OWN FAILURE IS NOT A CHANGED-SINCE REFUSAL (Codex #101
+			// round-5 P1). The write path above has already cleared any entry
+			// it created, so the put-back can land; the answer is an execution
+			// failure (no code → 500), because nothing about the file changed
+			// — this restore simply could not write. `put_claim_back()`'s
+			// refusal shape is asked for only when a RACER took the path.
+			$out           = $this->put_claim_back( $claim, $target, 'the old bytes could not be published', false );
+			$out['error']  = 'Failed to write file: ' . $target . ' (' . (string) $published . ')';
 			return $out;
 		}
 		$this->discard_stage( $tmp ); // in link mode the stage is a second name of the published inode
@@ -879,9 +993,67 @@ Replace the body of `restore_existing_file()` and add its helpers:
 		if ( false === $src ) {
 			return 'the staged bytes could not be read back';
 		}
-		$landed = $this->write_exclusively( $target, $src, $mode );
+		$mode = ( null === $mode ? $this->create_mode() : (int) $mode ) & 0666; // execute bits are refused before this path
+		$was  = umask( 0777 & ~$mode );
+		$fh   = @fopen( $target, 'xb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- 'x' is the no-clobber claim; EEXIST is the expected refusal.
+		umask( $was );
+		if ( false === $fh ) {
+			fclose( $src ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+			return self::path_present( $target ) ? 'exists' : 'the target could not be created';
+		}
+		$mine = fstat( $fh );
+		$real = is_array( $mine ) ? ( (int) $this->mode_of( $fh, $mine ) & 0777 ) : -1;
+		if ( $real !== $mode ) {
+			$this->remove_own_entry( $fh, $target, $mine );
+			fclose( $fh ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+			fclose( $src ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+			return sprintf( 'the created entry has mode %o, not the %o asked for (a default ACL?)', $real, $mode );
+		}
+		$ok = $this->write_all( $fh, $src ) && fflush( $fh ) && ( function_exists( 'fsync' ) ? (bool) fsync( $fh ) : true );
 		fclose( $src ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
-		return $landed;
+		if ( ! $ok ) {
+			// THE RESTORE CLEARS ITS OWN DAMAGE (Codex #101 round-5 P1). The
+			// create path deliberately leaves its empty entry at the target —
+			// it has nothing else to put there. A RESTORE does: it is holding
+			// the healthy file under the claim, and that file cannot go back
+			// while an empty or half-written entry of ours occupies the path.
+			// The entry is emptied and then unlinked, by name, only while the
+			// name still resolves to the inode we created.
+			$this->truncate_to_empty( $fh );
+			$removed = $this->remove_own_entry( $fh, $target, $mine );
+			fclose( $fh ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+			return $removed
+				? 'the write into the restored target was short; the path was cleared so the file could be put back'
+				: 'partial';
+		}
+		fclose( $fh ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+		$now = @stat( $target ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Gone is an answer.
+		if ( ! is_array( $mine ) || ! is_array( $now ) || $now['ino'] !== $mine['ino'] || $now['dev'] !== $mine['dev'] ) {
+			return self::path_present( $target ) ? 'exists' : 'the target was removed during the write';
+		}
+		return true;
+	}
+
+	/**
+	 * Unlink an entry THIS call created, by name and only while the name still
+	 * resolves to that inode — never a racer's replacement (the rule
+	 * write_exclusively() states: nothing addresses the path by name once it
+	 * is claimed, except under an inode check).
+	 *
+	 * Protected so a test can model a refusal.
+	 *
+	 * @param resource   $fh     Our open handle.
+	 * @param string     $target The path.
+	 * @param array|false $mine  fstat() of our handle.
+	 * @return bool True when the path is clear of our entry.
+	 */
+	protected function remove_own_entry( $fh, $target, $mine ) {
+		$now = @stat( $target ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Gone is an answer.
+		if ( ! is_array( $mine ) || ! is_array( $now ) || $now['ino'] !== $mine['ino'] || $now['dev'] !== $mine['dev'] ) {
+			return false; // not ours any more
+		}
+		wp_delete_file( $target );
+		return ! self::path_present( $target );
 	}
 
 	/**
@@ -889,40 +1061,49 @@ Replace the body of `restore_existing_file()` and add its helpers:
 	 * no-clobber; without it the claim is copied back by exclusive create. A
 	 * put-back that cannot land leaves the file aside, named.
 	 *
-	 * @param string $claim  The claimed file.
-	 * @param string $target Its path.
-	 * @param string $detail Why the restore is being abandoned.
+	 * @param string $claim   The claimed file.
+	 * @param string $target  Its path.
+	 * @param string $detail  Why the restore is being abandoned.
+	 * @param bool   $refusal True → a designated changed-since refusal (409);
+	 *                        false → an execution failure (500), for a write of
+	 *                        OURS that failed while the file itself never
+	 *                        changed (Codex #101 round-5 P1).
 	 * @return array
 	 */
-	private function put_claim_back( $claim, $target, $detail ) {
+	private function put_claim_back( $claim, $target, $detail, $refusal = true ) {
+		$answer = function ( array $extra = array() ) use ( $detail, $refusal ) {
+			return $refusal
+				? $this->changed_since( $detail, $extra )
+				: array_merge( array( 'success' => false, 'error' => $detail, 'detail' => $detail ), $extra );
+		};
 		if ( $this->link_available() ) {
 			if ( @link( $claim, $target ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- EEXIST is the expected refusal, classified below.
 				wp_delete_file( $claim );
 				return file_exists( $claim )
-					? $this->changed_since( $detail, array( 'moved_aside' => $claim ) )
-					: $this->changed_since( $detail );
+					? $answer( array( 'moved_aside' => $claim ) )
+					: $answer();
 			}
-			return $this->changed_since( $detail, array( 'moved_aside' => $claim ) );
+			return $answer( array( 'moved_aside' => $claim ) );
 		}
 		if ( true !== $this->put_back_by_write( $claim, $target ) ) {
-			return $this->changed_since( $detail, array( 'moved_aside' => $claim ) );
+			return $answer( array( 'moved_aside' => $claim ) );
 		}
 		$a = hash_file( 'sha256', $claim );
 		$b = hash_file( 'sha256', $target );
 		if ( ! is_string( $a ) || ! is_string( $b ) || ! hash_equals( $a, $b ) ) {
-			return $this->changed_since( $detail . '; the copy at its path may be behind the file kept aside', array( 'moved_aside' => $claim ) );
+			return $answer( array( 'moved_aside' => $claim, 'detail' => $detail . '; the copy at its path may be behind the file kept aside' ) );
 		}
 		wp_delete_file( $claim );
 		return file_exists( $claim )
-			? $this->changed_since( $detail, array( 'moved_aside' => $claim ) )
-			: $this->changed_since( $detail );
+			? $answer( array( 'moved_aside' => $claim ) )
+			: $answer();
 	}
 ```
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
-Run: `vendor/bin/phpunit --filter 'overwrite_restore|unfenced|bare_file_snapshot|external_write_after_the_claim|directory_or_symlink_at_the_path|descriptor_opened_before_the_claim|failed_stage_never_removes|restored_file_keeps_its_restrictive_mode|chmod_that_lands_after_the_claim|dangling_symlink_that_takes_the_path' tests/unit/SnapshotsTest.php`
-Expected: PASS (13 tests).
+Run: `vendor/bin/phpunit --filter 'overwrite_restore|unfenced|bare_file_snapshot|external_write_after_the_claim|directory_or_symlink_at_the_path|descriptor_opened_before_the_claim|failed_stage_never_removes|restored_file_keeps_its_restrictive_mode|chmod_that_lands_after_the_claim|dangling_symlink_that_takes_the_path|write_never_lands_retires|short_restore_write_clears|partial_restore_write_that_cannot_be_cleared' tests/unit/SnapshotsTest.php`
+Expected: PASS (16 tests).
 
 - [ ] **Step 7: Run the whole suite and the linter**
 
