@@ -316,9 +316,15 @@ class Aura_Worker_Snapshots {
 		$id       = $record['id'];
 		$repaired = $this->with_record_lock(
 			$id,
-			function () use ( $id, $sha ) {
+			function () use ( $id, $sha, $record ) {
 				$current = $this->get( $id );
-				if ( is_array( $current ) && ! empty( $current['voided'] ) ) {
+				if ( ! is_array( $current ) ) {
+					// Retired by a sweep that saw no target while we were paused
+					// before the claim (Codex #97 round-8 P2): the publish did
+					// land, so the record is written back as it was.
+					return $this->reinstate_record( $id, $sha, $record );
+				}
+				if ( ! empty( $current['voided'] ) ) {
 					return $this->reinstate_record( $id, $sha );
 				}
 				return true;
@@ -327,7 +333,7 @@ class Aura_Worker_Snapshots {
 		if ( true !== $repaired ) {
 			$out['warning'] = null === $repaired
 				? 'the record could not be locked after a long publish; a concurrent sweep may have voided it — restore may refuse it'
-				: 'the record was voided by a concurrent sweep during a long publish and could not be repaired; restore will refuse it';
+				: 'the record was voided or retired by a concurrent sweep during a long publish and could not be repaired; this create has no rollback record';
 		}
 
 		// The PERSISTED record keeps `staged` — prune_older_than()'s sweep reads
@@ -561,7 +567,17 @@ class Aura_Worker_Snapshots {
 		if ( false === $fh ) {
 			return self::path_present( $path ) ? 'exists' : 'the target could not be claimed';
 		}
-		$mine    = fstat( $fh );
+		$mine = fstat( $fh );
+		// A default POSIX ACL on the directory makes the kernel ignore the umask:
+		// the entry can come out MORE permissive than asked (0666 for a 0600
+		// file). The handle's real mode is checked before a byte is written;
+		// a mismatch is a refusal, and the empty entry we own stays behind
+		// (Codex #97 round-8 P1).
+		$real = is_array( $mine ) ? ( (int) $this->mode_of( $fh, $mine ) & 0777 ) : -1;
+		if ( $real !== $mode ) {
+			fclose( $fh ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+			return sprintf( 'the created entry has mode %o, not the %o asked for (a default ACL?); an empty file remains at %s', $real, $mode, $path );
+		}
 		$written = $this->write_all( $fh, $src );
 		$synced  = $written && fflush( $fh ) && ( function_exists( 'fsync' ) ? (bool) fsync( $fh ) : true );
 		$this->during_write( $path );
@@ -600,6 +616,18 @@ class Aura_Worker_Snapshots {
 	 */
 	protected function truncate_to_empty( $fh ) {
 		return (bool) ftruncate( $fh, 0 ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_ftruncate
+	}
+
+	/**
+	 * The real mode of an inode we just created. Seam: a test models a
+	 * directory whose default ACL overrides the umask.
+	 *
+	 * @param resource $fh   Open handle.
+	 * @param array    $stat Its fstat().
+	 * @return int
+	 */
+	protected function mode_of( $fh, array $stat ) {
+		return (int) $stat['mode'];
 	}
 
 	/**
@@ -873,15 +901,22 @@ class Aura_Worker_Snapshots {
 	 * Lift a void a concurrent sweep put on a record whose publish did land:
 	 * the expected hash goes back, `voided` and `interrupted` go.
 	 *
-	 * @param string $id  Snapshot id.
-	 * @param string $sha The published content's sha256.
+	 * @param string     $id       Snapshot id.
+	 * @param string     $sha      The published content's sha256.
+	 * @param array|null $original The record as persisted, for one that was
+	 *                             retired (its file is gone) and must be
+	 *                             written back whole.
 	 * @return bool
 	 */
-	private function reinstate_record( $id, $sha ) {
+	private function reinstate_record( $id, $sha, $original = null ) {
 		$meta_path = $this->dir . basename( (string) $id ) . '.json';
 		$record    = $this->get( $id );
 		if ( ! is_array( $record ) ) {
-			return false;
+			if ( ! is_array( $original ) ) {
+				return false;
+			}
+			$record = $original;
+			unset( $record['meta_path'], $record['payload_path'] );
 		}
 		unset( $record['voided'], $record['interrupted'] );
 		$record['expected_sha256'] = $sha;
@@ -1412,6 +1447,20 @@ class Aura_Worker_Snapshots {
 		// Either way the changed file stays aside and the answer says where.
 		if ( true !== $this->put_back_by_write( $claim, $target ) ) {
 			$out['moved_aside'] = $claim;
+			return $out;
+		}
+		// The claim is a COPY's source, not a second name to the same inode: a
+		// process that opened the file before the claim can still be writing
+		// to it. The copy at the path is only the file if the claim reads the
+		// same after the copy as the target does; otherwise the claim stays,
+		// named, and the answer says the copy may be behind (Codex #97
+		// round-8 P1). Writes after this check are the residual of a
+		// link()-less host and are why the claim name is reported at all.
+		$a = hash_file( 'sha256', $claim );
+		$b = hash_file( 'sha256', $target );
+		if ( ! is_string( $a ) || ! is_string( $b ) || ! hash_equals( $a, $b ) ) {
+			$out['moved_aside'] = $claim;
+			$out['detail']      = 'the file changed while it was being put back; the copy at its path may be behind the file kept aside';
 			return $out;
 		}
 		wp_delete_file( $claim ); // the bytes are back at their path; the claim copy goes

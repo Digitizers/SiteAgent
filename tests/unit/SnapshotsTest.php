@@ -1433,6 +1433,85 @@ final class SnapshotsTest extends TestCase {
 		$this->assertSame( array(), glob( WP_CONTENT_DIR . '/aura-backups/snapshots/*.lock' ), 'no lock files without flock()' );
 	}
 
+	public function test_without_link_a_created_entry_whose_real_mode_differs_from_the_asked_one_is_refused(): void {
+		// Codex #97 round-8 P1: a default POSIX ACL makes the kernel ignore the
+		// umask; a 0600 file could come out 0666. The real mode of the owned
+		// handle is checked before a byte is written.
+		$file  = WP_CONTENT_DIR . '/acl.php';
+		$snaps = new class extends Aura_Worker_Snapshots {
+			protected function link_available() {
+				return false;
+			}
+			protected function mode_of( $fh, array $stat ) {
+				return 0100666; // what a default ACL would hand back
+			}
+		};
+
+		$res = $snaps->create_file( $file, "secret\n" );
+
+		$this->assertFalse( $res['success'] );
+		$this->assertSame( 'unsupported_filesystem', $res['error'] );
+		$this->assertStringContainsString( 'mode 666, not the 644 asked for', $res['detail'] );
+		$this->assertSame( '', file_get_contents( $file ), 'not a byte was written into the too-permissive entry' );
+		$this->assertSame( array(), $snaps->list_snapshots() );
+	}
+
+	public function test_without_link_a_changed_file_still_being_written_is_kept_aside_after_the_copy(): void {
+		// Codex #97 round-8 P1: the claim is a copy's source; a writer holding
+		// the inode open can add bytes after we reached EOF. The claim goes
+		// only when it still reads the same as the target.
+		$file  = WP_CONTENT_DIR . '/still-writing.log';
+		$snaps = new class extends Aura_Worker_Snapshots {
+			public $allow_link = true;
+			protected function link_available() {
+				return $this->allow_link;
+			}
+			protected function during_write( $path ) {
+				foreach ( glob( WP_CONTENT_DIR . '/.aura-restore-*' ) as $claim ) {
+					file_put_contents( $claim, "late line\n", FILE_APPEND ); // the open writer strikes after EOF
+				}
+			}
+		};
+		$rec = $snaps->create_file( $file, "a\n" )['snapshot'];
+		file_put_contents( $file, "edited\n" );
+		$snaps->allow_link = false;
+
+		$restore = $snaps->restore( $rec['id'] );
+
+		$this->assertSame( 'file_changed_since', $restore['error'] );
+		$this->assertArrayHasKey( 'moved_aside', $restore );
+		$this->assertStringContainsString( 'may be behind', $restore['detail'] );
+		$this->assertSame( "edited\nlate line\n", file_get_contents( $restore['moved_aside'] ), 'the late bytes live in the kept file' );
+		$this->assertSame( "edited\n", file_get_contents( $file ), 'the copy at the path is what was read' );
+	}
+
+	public function test_a_record_retired_by_a_sweep_while_the_publish_was_in_flight_is_written_back(): void {
+		// Codex #97 round-8 P2: a sweep that saw no target retired the record
+		// while the publisher was paused before its claim; the publish then
+		// lands and must not report success with no rollback record.
+		$file  = WP_CONTENT_DIR . '/retired-inflight.php';
+		$snaps = new class extends Aura_Worker_Snapshots {
+			protected function link_available() {
+				return false;
+			}
+			protected function during_write( $path ) {
+				foreach ( glob( WP_CONTENT_DIR . '/aura-backups/snapshots/*.json' ) as $meta ) {
+					unlink( $meta ); // what the retirement did
+				}
+			}
+		};
+
+		$res = $snaps->create_file( $file, "x\n" );
+
+		$this->assertTrue( $res['success'] );
+		$this->assertArrayNotHasKey( 'warning', $res );
+		$rec = $snaps->get( $res['snapshot']['id'] );
+		$this->assertIsArray( $rec, 'the record is back' );
+		$this->assertSame( hash( 'sha256', "x\n" ), $rec['expected_sha256'] );
+		$this->assertTrue( $snaps->restore( $rec['id'] )['success'] );
+		$this->assertFileDoesNotExist( $file );
+	}
+
 	public function test_a_completed_publish_whose_stage_cleanup_was_lost_keeps_its_record(): void {
 		$file  = WP_CONTENT_DIR . '/lost-cleanup.php';
 		$snaps = new class extends Aura_Worker_Snapshots {
