@@ -4,7 +4,7 @@
 
 **Goal:** Ship SiteAgent 2.17.3 — the site half of Aura#520: an overwrite record that records what replaced it (`replaced_with_sha256`), a restore of that record that writes only while the file still holds exactly those bytes, a per-target `write_seq` that orders two writes to one file, and a designated refusal code on every file-restore refusal so Aura can map them to 409 instead of guessing at a 500.
 
-**Architecture:** Everything lands in one class, `Aura_Worker_Snapshots`, behind the per-path lock 2.17.2 introduced — the fence is checked and the write happens under the same `with_target_lock()` section, so nothing can change at the path between the check and the rename. `write_seq` is a small sidecar file beside that lock (`path-<sha1>.seq`), read and written under it. No REST change is needed: `restore_after_admission()` already maps "the answer carries a `code`" to HTTP 409, so the four new codes arrive as designated refusals for free.
+**Architecture:** Everything lands in one class, `Aura_Worker_Snapshots`. The per-path lock 2.17.2 introduced serialises SiteAgent's own writers, and **nothing else** — a plugin, an administrator over SFTP or any other process can write the target while we hold it (Codex #101 round-1 P1). So the fence does not rest on the lock: when the restore is about to write, it CLAIMS the path with an atomic `rename()` to an opaque `.aura-restore-<hex>` and verifies the file it now holds, exactly as the created-file restore has since 2.17.0 — what is verified and what is replaced are then the same inode, and whatever arrives at the path afterwards is never touched. `write_seq` is a small sidecar file beside that lock (`path-<sha1>.seq`), read and written under it. No REST change is needed: `restore_after_admission()` already maps "the answer carries a `code`" to HTTP 409, so the four new codes arrive as designated refusals for free.
 
 **Tech Stack:** PHP 7.4+ (CI matrix 7.4 / 8.1 / 8.2), WordPress 6.2+, PHPUnit (`composer test`, or `vendor/bin/phpunit --filter <name>`), PHPCS (`composer lint`). The test harness stubs WordPress — `tests/bootstrap.php`, no WordPress loaded — and writes real files under `WP_CONTENT_DIR`.
 
@@ -19,6 +19,9 @@
 - **No hash, no restore.** A `kind: file` record with `existed !== false` and no `replaced_with_sha256` answers `aura_snapshot_unfenced` and writes nothing. Records taken by a direct `snapshot_file()` (REST `POST /aura/v2/snapshot`, an old Power Pack's fallback path) are unfenced by construction and are refused — a deliberate behaviour change, called out in the changelog (spec §2 Q3: fail closed).
 - **`write_seq` is taken under the target lock, before the record is persisted**, as `max(previous + 1, now in microseconds)` with `previous` from the sidecar `path-<sha1>.seq`, and the sidecar is written back before the record (spec §3.1).
 - **A `write_seq` that cannot be established is ABSENT, never guessed.** An unreadable or non-decimal sidecar, a sidecar that cannot be written, or a 32-bit build (`PHP_INT_SIZE < 8`, where microseconds overflow) leaves the record without the key; the write itself still proceeds. Aura mirrors such a row unfenced (spec §3.1).
+- **A code is ADDED to a refusal; its `error` text never changes.** Thirty-odd existing assertions read `error` (`'locked'`, `'file_changed_since'`, `'symlink'`, `'not a regular file'`), and they must all keep passing: every change in this plan adds a `code` key (and sometimes `detail`) beside the wording that is already there.
+- **`refuse_at_path()` itself is NOT touched.** It is shared with the WRITE paths, where a symlink refusal is not a "changed since" fact and must not become a 409. The restore path wraps it — `restore_refusal()` — so only a restore's refusals gain `aura_file_changed_since` (Codex #101 round-1 P1).
+- **The path is claimed before it is written, never merely checked.** A hash taken in place decides only the answers that write NOTHING (`already`, a refusal); once the restore intends to write, it claims the path by `rename()` and re-verifies the claimed file, so an external writer arriving between the check and the write is never clobbered (Codex #101 round-1 P1).
 - **Hash comparisons use `hash_equals()`**, never `===`, matching every existing comparison in this class.
 - **Nothing is written outside the lock.** Every new check that decides whether to write runs inside the `with_target_lock()` closure, after the existing under-lock `refuse_at_path()` re-check.
 - Coding conventions: tabs; `if ( ! defined( 'ABSPATH' ) ) { exit; }` guard; `Aura_Worker_*` prefixes; `composer lint` green — `WordPress.WP.AlternativeFunctions` and `WordPress.PHP.NoSilencedErrors` are on, so every `@`, `fopen`, `rename` and `unlink` carries the line-level `phpcs:ignore` the file already uses nearby.
@@ -33,7 +36,7 @@
 | File | Responsibility |
 |---|---|
 | `digitizer-site-worker/includes/class-aura-worker-snapshots.php` | Every code change in this plan: `next_write_seq()`, `snapshot_file()`'s extra meta, `overwrite_file()`'s recorded hash, the fenced `restore_existing_file()`, the codes on the create-restore and lock paths |
-| `tests/unit/SnapshotsTest.php` | Tasks 1–3: engine tests. One EXISTING test changes behaviour — `test_file_snapshot_and_restore_roundtrip` (line 44), which restores a bare `snapshot_file()` record and must now assert the `aura_snapshot_unfenced` refusal, with a new roundtrip through `overwrite_file()` beside it |
+| `tests/unit/SnapshotsTest.php` | Tasks 1–3: engine tests. TWO existing tests change behaviour: `test_file_snapshot_and_restore_roundtrip` (line 44), which restores a bare `snapshot_file()` record and must now assert the `aura_snapshot_unfenced` refusal; and `test_restoring_an_existing_file_snapshot_replaces_by_stage_and_rename_under_the_target_lock` (line 2166), whose stage-failure half restores onto a target it has just changed to `v3` — the fence now refuses that before `stage()` is ever called (Codex #101 round-1 P2) |
 | `tests/unit/SnapshotsRestoreCodesTest.php` (new) | Task 4: the REST surface — each code answered 409, and the pin that a file restore opens no door-log entry |
 | `digitizer-site-worker/includes/class-aura-worker-api.php` | Task 5: one line — the restore response statement is written twice on line 1540, the second copy unreachable (a defect already on `main`, folded in on the owner's instruction) |
 | `digitizer-site-worker/digitizer-site-worker.php`, `digitizer-site-worker/readme.txt`, `README.md` | Task 6: 2.17.3 |
@@ -161,7 +164,18 @@ In `class-aura-worker-snapshots.php`, beside `with_target_lock()`:
 			if ( ! is_string( $raw ) || 1 !== preg_match( '/^[0-9]+$/', trim( $raw ) ) ) {
 				return null; // present but unreadable: never invent an order
 			}
-			$prev = (int) trim( $raw );
+			$digits = ltrim( trim( $raw ), '0' );
+			// DECIMAL IS NOT THE SAME AS IN RANGE (Codex #101 round-1 P2). A
+			// value above PHP_INT_MAX saturates on the cast, `$prev + 1` then
+			// becomes a FLOAT, the record gets a non-integer `write_seq`, and
+			// the sidecar is rewritten in exponent notation — unreadable on the
+			// next write. Compare as decimal strings before casting anything,
+			// and refuse the value that cannot be incremented as an int.
+			$max = (string) PHP_INT_MAX;
+			if ( strlen( $digits ) > strlen( $max ) || ( strlen( $digits ) === strlen( $max ) && strcmp( $digits, $max ) >= 0 ) ) {
+				return null;
+			}
+			$prev = (int) $digits;
 		}
 		$now = $this->now_micros();
 		$seq = $prev >= $now ? $prev + 1 : $now;
@@ -278,13 +292,22 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 ### Task 2: the fenced overwrite restore
 
 **Files:**
-- Modify: `digitizer-site-worker/includes/class-aura-worker-snapshots.php` — `restore()`'s `case 'file'` (~line 2345) passes the record; `restore_existing_file()` (~line 2007) gains the fence and a locked half
-- Modify: `tests/unit/SnapshotsTest.php` — `test_file_snapshot_and_restore_roundtrip` (line 44) changes behaviour
+- Modify: `digitizer-site-worker/includes/class-aura-worker-snapshots.php` — `restore()`'s `case 'file'` (~line 2345) passes the record; `restore_existing_file()` (~line 2007) gains the fence, a locked half and a coded-refusal wrapper
+- Modify: `tests/unit/SnapshotsTest.php` — TWO existing tests change (lines 44 and 2166)
 - Test: `tests/unit/SnapshotsTest.php`
 
 **Interfaces:**
 - Consumes: Task 1's records (`replaced_with_sha256` is written by `overwrite_file()`).
-- Produces: `restore()` of an overwrite record answers one of `{ success: true }`, `{ success: true, already: true }`, `{ success: false, code: 'aura_snapshot_unfenced', error }`, `{ success: false, code: 'aura_file_changed_since', error: 'file_changed_since', detail }`.
+- Produces: `restore()` of an overwrite record answers one of `{ success: true }`, `{ success: true, already: true }`, `{ success: false, code: 'aura_snapshot_unfenced', error }`, `{ success: false, code: 'aura_file_changed_since', error: 'file_changed_since', detail?, moved_aside? }`, or a path refusal carrying its existing wording plus `code: 'aura_file_changed_since'`.
+- Produces: `private function restore_refusal( array $refused ): array` — `refuse_at_path()`'s answer with `code: 'aura_file_changed_since'` added.
+
+**The shape, and why it is not a simple stage-and-rename.** `with_target_lock()` serialises SiteAgent's writers only; a plugin or an administrator can write the target while we hold it. Hashing the file and then renaming a stage over it would clobber an edit that lands in between — the exact thing the fence exists to prevent (Codex #101 round-1 P1). So:
+
+1. an in-place hash decides every answer that **writes nothing** — `already`, and both refusals;
+2. when the restore intends to **write**, it claims the path by `rename()` to `.aura-restore-<hex>`, re-verifies the file it now holds, and publishes the payload into the freed path with the no-clobber `publish()` — `link()` where available, an exclusive-create write where not;
+3. anything that arrives at the path after the claim is never touched, and a claimed file that turns out to be changed is put back by the same primitives the created-file restore uses.
+
+**One documented residual.** On a host without `link()`, an **executable** target cannot be republished at all: `publish_by_write()` and `put_back_by_write()` both refuse execute bits, because `fopen()` cannot create them (SiteAgent#96, #97). Claiming such a file would strand it aside. So for that case only — no `link()` AND the target is executable — the restore verifies in place and replaces with `replace_in_place()`, keeping the 2.17.2 behaviour and its narrow window. This mirrors the created-file restore's own executable branch, which 2.17.2 added for the same reason.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -300,9 +323,10 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 		$this->assertTrue( $out['success'] );
 		$this->assertArrayNotHasKey( 'already', $out );
 		$this->assertSame( "<?php // original\n", file_get_contents( $file ) );
+		$this->assertSame( array(), glob( WP_CONTENT_DIR . '/.aura-restore-*' ), 'the claim is cleaned up' );
 	}
 
-	public function test_an_overwrite_restore_of_a_file_edited_since_is_refused_and_touches_nothing(): void {
+	public function test_an_overwrite_restore_of_a_file_edited_since_is_refused_and_claims_nothing(): void {
 		$snaps = new Aura_Worker_Snapshots();
 		$file  = WP_CONTENT_DIR . '/edited.php';
 		file_put_contents( $file, "<?php // original\n" );
@@ -315,6 +339,30 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 		$this->assertSame( 'aura_file_changed_since', $out['code'] );
 		$this->assertSame( 'file_changed_since', $out['error'] );
 		$this->assertSame( "<?php // a human edited this\n", file_get_contents( $file ), 'nothing was written' );
+		$this->assertSame( array(), glob( WP_CONTENT_DIR . '/.aura-restore-*' ), 'a refusal never moves the file aside' );
+	}
+
+	public function test_an_external_write_after_the_claim_is_never_clobbered(): void {
+		// Codex #101 round-1 P1: the lock holds only SiteAgent's own writers.
+		// after_claim() models the editor that lands the instant we claim.
+		$snaps = new class extends Aura_Worker_Snapshots {
+			public $fired = false;
+			protected function after_claim( $claim, $target ) {
+				if ( ! $this->fired ) {
+					$this->fired = true;
+					file_put_contents( $claim, "<?php // edited under us\n" ); // the claimed inode changes
+				}
+			}
+		};
+		$file = WP_CONTENT_DIR . '/raced.php';
+		file_put_contents( $file, "<?php // original\n" );
+		$rec = $snaps->overwrite_file( $file, "<?php // written\n" )['snapshot'];
+
+		$out = $snaps->restore( $rec['id'] );
+
+		$this->assertFalse( $out['success'] );
+		$this->assertSame( 'aura_file_changed_since', $out['code'] );
+		$this->assertSame( "<?php // edited under us\n", file_get_contents( $file ), 'the edit is back at its path, not overwritten' );
 	}
 
 	public function test_an_overwrite_restore_run_twice_is_already_and_writes_nothing(): void {
@@ -333,6 +381,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 		$this->assertTrue( $again['already'] );
 		clearstatcache();
 		$this->assertSame( $mtime, filemtime( $file ), 'the file was not rewritten' );
+		$this->assertSame( array(), glob( WP_CONTENT_DIR . '/.aura-restore-*' ), 'an already-restored file is never claimed' );
 	}
 
 	public function test_an_overwrite_restore_of_a_file_that_is_gone_is_refused(): void {
@@ -347,6 +396,25 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 		$this->assertFalse( $out['success'] );
 		$this->assertSame( 'aura_file_changed_since', $out['code'] );
 		$this->assertFileDoesNotExist( $file, 'a deleted file is never re-created by a restore' );
+	}
+
+	public function test_a_directory_or_symlink_at_the_path_is_refused_with_the_changed_code(): void {
+		// Codex #101 round-1 P1: these refusals carried no code, so the REST
+		// layer answered 500 for what is a designated changed-since refusal.
+		$snaps = new Aura_Worker_Snapshots();
+		$file  = WP_CONTENT_DIR . '/swapped.php';
+		file_put_contents( $file, "<?php // original\n" );
+		$rec = $snaps->overwrite_file( $file, "<?php // written\n" )['snapshot'];
+
+		unlink( $file );
+		file_put_contents( WP_CONTENT_DIR . '/elsewhere-2.php', "real\n" );
+		symlink( WP_CONTENT_DIR . '/elsewhere-2.php', $file );
+		$out = $snaps->restore( $rec['id'] );
+
+		$this->assertFalse( $out['success'] );
+		$this->assertSame( 'aura_file_changed_since', $out['code'] );
+		$this->assertStringContainsString( 'symlink', $out['error'], 'the wording a reader already knows is kept' );
+		$this->assertSame( "real\n", file_get_contents( WP_CONTENT_DIR . '/elsewhere-2.php' ), 'nothing written through the link' );
 	}
 
 	public function test_a_record_taken_without_the_replacing_hash_is_refused_as_unfenced(): void {
@@ -388,12 +456,33 @@ And REPLACE the existing `test_file_snapshot_and_restore_roundtrip` (line 44) �
 	}
 ```
 
-- [ ] **Step 2: Run them to verify they fail**
+- [ ] **Step 2: Fix the second existing test, whose stage-failure half the fence now refuses first**
 
-Run: `vendor/bin/phpunit --filter 'overwrite_restore|unfenced|bare_file_snapshot' tests/unit/SnapshotsTest.php`
-Expected: FAIL — today's restore writes the payload back unconditionally, so the "edited since", "already" and "unfenced" tests all fail.
+`test_restoring_an_existing_file_snapshot_replaces_by_stage_and_rename_under_the_target_lock` (line 2166) restores `$rec` — fenced to `v2` — after putting `v3` at the path, and expects `stage()`'s failure to surface as `Short write`. Under the fence the restore refuses before `stage()` is reached (Codex #101 round-1 P2). Give that half a FRESH fenced overwrite whose replacement still matches the target. Replace the block from `// A short stage write on the restore leaves the target as it was.` down to (but not including) `// A symlink at the path is refused rather than replaced.` with:
 
-- [ ] **Step 3: Pass the record into the file restore**
+```php
+		// A short stage write on the restore leaves the target as it was. The
+		// record must be a FRESH overwrite, so the fence passes and the restore
+		// actually reaches stage() (Codex #101 round-1 P2).
+		$fresh = $snaps->overwrite_file( $file, "<?php // v3\n" )['snapshot'];
+		$short = new class extends Aura_Worker_Snapshots {
+			protected function stage( $dir, $name, $content, $mode = null ) {
+				return array( 'success' => false, 'error' => 'Short write while staging (disk full?): ' . $dir );
+			}
+		};
+		$res = $short->restore( $fresh['id'] );
+		$this->assertFalse( $res['success'] );
+		$this->assertStringContainsString( 'Short write', $res['error'] );
+		$this->assertSame( "<?php // v3\n", file_get_contents( $file ), 'the target is put back as it was' );
+		$this->assertSame( array(), glob( WP_CONTENT_DIR . '/.aura-restore-*' ), 'the claim is not left behind' );
+```
+
+- [ ] **Step 3: Run the new and changed tests to verify they fail**
+
+Run: `vendor/bin/phpunit --filter 'overwrite_restore|unfenced|bare_file_snapshot|external_write_after_the_claim|directory_or_symlink_at_the_path' tests/unit/SnapshotsTest.php`
+Expected: FAIL — today's restore writes the payload back unconditionally, so the fenced, `already`, coded and claim tests all fail.
+
+- [ ] **Step 4: Pass the record into the file restore**
 
 In `restore()`'s `case 'file':`, the final line becomes:
 
@@ -401,9 +490,9 @@ In `restore()`'s `case 'file':`, the final line becomes:
 				return $this->restore_existing_file( (string) $record['target'], $bytes, $record );
 ```
 
-- [ ] **Step 4: Fence the restore, under the lock**
+- [ ] **Step 5: Fence the restore — in-place for the no-write answers, claim-and-publish to write**
 
-Replace the body of `restore_existing_file()` and add its locked half:
+Replace the body of `restore_existing_file()` and add its helpers:
 
 ```php
 	private function restore_existing_file( $target, $bytes, array $record = array() ) {
@@ -412,7 +501,7 @@ Replace the body of `restore_existing_file()` and add its locked half:
 		}
 		$refused = $this->refuse_at_path( $target, false );
 		if ( null !== $refused ) {
-			return $refused;
+			return $this->restore_refusal( $refused );
 		}
 		$out = $this->with_target_lock(
 			$target,
@@ -424,15 +513,33 @@ Replace the body of `restore_existing_file()` and add its locked half:
 	}
 
 	/**
-	 * The fenced restore proper, under the target's lock (Aura#520 §3.1): the
-	 * old bytes go back only while the file still holds exactly what the write
-	 * left there. The check and the rename are one locked section, so nothing
-	 * can change at the path in between.
+	 * A path refusal, on the RESTORE path, is a designated "changed since"
+	 * refusal: the file the record was taken from is not what is at the path
+	 * now. `refuse_at_path()` itself is left alone — it is shared with the
+	 * write paths, where a symlink is not a changed-since fact and must not
+	 * become a 409 (Codex #101 round-1 P1). The wording is kept exactly as it
+	 * is; only the code is added.
+	 *
+	 * @param array $refused refuse_at_path()'s answer.
+	 * @return array
+	 */
+	private function restore_refusal( array $refused ) {
+		$refused['code'] = 'aura_file_changed_since';
+		return $refused;
+	}
+
+	/**
+	 * The fenced restore proper, under the target's lock (Aura#520 §3.1).
+	 *
+	 * An in-place hash settles every answer that writes nothing. To WRITE, the
+	 * path is claimed by rename() and the claimed file is re-verified — the
+	 * lock holds SiteAgent's writers only, so the bytes that are verified and
+	 * the bytes that are replaced must be one inode (Codex #101 round-1 P1).
 	 *
 	 * @param string $target The path.
 	 * @param string $bytes  The snapshot's payload — what goes back.
 	 * @param array  $record The record, for its fence.
-	 * @return array { success, already?, code?, error?, detail? }
+	 * @return array { success, already?, code?, error?, detail?, moved_aside? }
 	 */
 	private function restore_existing_file_locked( $target, $bytes, array $record ) {
 		$replaced = isset( $record['replaced_with_sha256'] ) ? (string) $record['replaced_with_sha256'] : '';
@@ -445,50 +552,152 @@ Replace the body of `restore_existing_file()` and add its locked half:
 		}
 		$refused = $this->refuse_at_path( $target, false ); // again, under the lock
 		if ( null !== $refused ) {
-			return $refused;
+			return $this->restore_refusal( $refused );
 		}
 		$current = is_file( $target ) ? hash_file( 'sha256', $target ) : false;
 		if ( ! is_string( $current ) ) {
-			return array(
-				'success' => false,
-				'code'    => 'aura_file_changed_since',
-				'error'   => 'file_changed_since',
-				'detail'  => 'the file is gone, or is no longer a regular file',
-			);
+			return $this->changed_since( 'the file is gone, or is no longer a regular file' );
 		}
 		if ( hash_equals( hash( 'sha256', $bytes ), $current ) ) {
-			return array( 'success' => true, 'already' => true ); // already back; write nothing
+			return array( 'success' => true, 'already' => true ); // already back; nothing claimed, nothing written
 		}
 		if ( ! hash_equals( $replaced, $current ) ) {
-			return array(
+			return $this->changed_since( 'the file no longer holds the content this write left there' );
+		}
+		// An executable on a host without link() cannot be republished at all
+		// (fopen() cannot create execute bits — SiteAgent#96/#97), and claiming
+		// it would strand it aside. The in-place hash above IS its verification;
+		// it is replaced the 2.17.2 way, with that window as the documented
+		// residual. Every other case claims first.
+		$perms = @fileperms( $target ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- The file is there (hashed above); a false reads as "no execute bits".
+		if ( ! $this->link_available() && false !== $perms && 0 !== ( $perms & 0111 ) ) {
+			$done = $this->replace_in_place( $target, $bytes );
+			return true === $done
+				? array( 'success' => true )
+				: array( 'success' => false, 'error' => 'Failed to write file: ' . $target . ' (' . $done . ')' );
+		}
+		return $this->publish_restored_bytes( $target, $bytes, $replaced );
+	}
+
+	/** The changed-since refusal, in one place. */
+	private function changed_since( $detail, array $extra = array() ) {
+		return array_merge(
+			array(
 				'success' => false,
 				'code'    => 'aura_file_changed_since',
 				'error'   => 'file_changed_since',
-				'detail'  => 'the file no longer holds the content this write left there',
-			);
+				'detail'  => $detail,
+			),
+			$extra
+		);
+	}
+
+	/**
+	 * Claim the path, re-verify what we hold, and publish the old bytes into
+	 * it — no-clobber, so a file that arrives after the claim is never
+	 * replaced. The claimed file is put back on every refusal, by the same
+	 * primitives restore_created_file_locked() uses.
+	 *
+	 * @param string $target   The path.
+	 * @param string $bytes    The payload to put back.
+	 * @param string $replaced The hash the file must still have.
+	 * @return array
+	 */
+	private function publish_restored_bytes( $target, $bytes, $replaced ) {
+		try {
+			$suffix = bin2hex( random_bytes( 8 ) );
+		} catch ( \Exception $e ) {
+			$suffix = substr( md5( uniqid( '', true ) ), 0, 16 );
 		}
-		$replaced_ok = $this->replace_in_place( $target, $bytes );
-		return true === $replaced_ok
-			? array( 'success' => true )
-			: array( 'success' => false, 'error' => 'Failed to write file: ' . $target . ' (' . $replaced_ok . ')' );
+		$claim = dirname( $target ) . '/.aura-restore-' . $suffix; // opaque, never a .php name
+		if ( ! @rename( $target, $claim ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.rename_rename -- The claim IS the point: atomic, inode-preserving.
+			return self::path_present( $target )
+				? array( 'success' => false, 'error' => 'Unable to claim file for restore: ' . $target )
+				: $this->changed_since( 'the file was removed while the restore was being prepared' );
+		}
+		$this->after_claim( $claim, $target );
+
+		// THE authoritative check: the file we hold, not the name we read.
+		$actual = hash_file( 'sha256', $claim );
+		if ( ! is_string( $actual ) || ! hash_equals( $replaced, $actual ) ) {
+			return $this->put_claim_back( $claim, $target, 'the file changed as the restore claimed it' );
+		}
+
+		$mode = @fileperms( $claim ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- We hold this file; a false falls back to the create mode.
+		$tmp  = $this->stage( dirname( $target ), basename( $target ), $bytes, false === $mode ? null : ( $mode & 0777 ) );
+		if ( is_array( $tmp ) ) {
+			$out = $this->put_claim_back( $claim, $target, 'nothing was staged' );
+			return array_merge( $out, array( 'error' => (string) $tmp['error'], 'code' => null ) );
+		}
+		$published = $this->publish( $tmp, $target );
+		if ( true !== $published ) {
+			$this->discard_stage( $tmp );
+			if ( 'exists' === $published ) {
+				// Something took the path while we held the file: never clobber it.
+				return $this->changed_since( 'another file took the path while the restore was in flight', array( 'moved_aside' => $claim ) );
+			}
+			$out = $this->put_claim_back( $claim, $target, 'the old bytes could not be published' );
+			return array_merge( $out, array( 'error' => 'Failed to write file: ' . $target . ' (' . (string) $published . ')', 'code' => null ) );
+		}
+		$this->discard_stage( $tmp ); // in link mode the stage is a second name of the published inode
+		wp_delete_file( $claim );
+		$out = array( 'success' => true );
+		if ( file_exists( $claim ) ) {
+			$out['moved_aside'] = $claim; // `.aura-restore-*` is never swept: say where it is
+		}
+		return $out;
+	}
+
+	/**
+	 * Put a claimed file back at its path and answer changed-since. link() is
+	 * no-clobber; without it the claim is copied back by exclusive create. A
+	 * put-back that cannot land leaves the file aside, named.
+	 *
+	 * @param string $claim  The claimed file.
+	 * @param string $target Its path.
+	 * @param string $detail Why the restore is being abandoned.
+	 * @return array
+	 */
+	private function put_claim_back( $claim, $target, $detail ) {
+		if ( $this->link_available() ) {
+			if ( @link( $claim, $target ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- EEXIST is the expected refusal, classified below.
+				wp_delete_file( $claim );
+				return file_exists( $claim )
+					? $this->changed_since( $detail, array( 'moved_aside' => $claim ) )
+					: $this->changed_since( $detail );
+			}
+			return $this->changed_since( $detail, array( 'moved_aside' => $claim ) );
+		}
+		if ( true !== $this->put_back_by_write( $claim, $target ) ) {
+			return $this->changed_since( $detail, array( 'moved_aside' => $claim ) );
+		}
+		$a = hash_file( 'sha256', $claim );
+		$b = hash_file( 'sha256', $target );
+		if ( ! is_string( $a ) || ! is_string( $b ) || ! hash_equals( $a, $b ) ) {
+			return $this->changed_since( $detail . '; the copy at its path may be behind the file kept aside', array( 'moved_aside' => $claim ) );
+		}
+		wp_delete_file( $claim );
+		return file_exists( $claim )
+			? $this->changed_since( $detail, array( 'moved_aside' => $claim ) )
+			: $this->changed_since( $detail );
 	}
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [ ] **Step 6: Run the tests to verify they pass**
 
-Run: `vendor/bin/phpunit --filter 'overwrite_restore|unfenced|bare_file_snapshot' tests/unit/SnapshotsTest.php`
-Expected: PASS (6 tests).
+Run: `vendor/bin/phpunit --filter 'overwrite_restore|unfenced|bare_file_snapshot|external_write_after_the_claim|directory_or_symlink_at_the_path' tests/unit/SnapshotsTest.php`
+Expected: PASS (8 tests).
 
-- [ ] **Step 6: Run the whole suite and the linter**
+- [ ] **Step 7: Run the whole suite and the linter**
 
-Run: `composer test` — expected: green. Any OTHER test that fails here is restoring a bare `snapshot_file()` record; the only one on `main` is the roundtrip replaced in Step 1. Do not weaken the fence to keep a test green — update the test to go through `overwrite_file()`.
+Run: `composer test` — expected: green. The two tests named above are the only existing ones this changes; every other assertion reads `error` wording that is deliberately unchanged. If a THIRD test fails, do not weaken the fence to keep it green — read what it asserts and fix the test, or report it as a finding against this plan.
 Run: `composer lint`.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add digitizer-site-worker/includes/class-aura-worker-snapshots.php tests/unit/SnapshotsTest.php
-git commit -m "feat(snapshots): an overwrite records what replaced the file, and its restore writes only while the file still holds exactly that
+git commit -m "feat(snapshots): an overwrite records what replaced the file, and its restore claims the path before it writes so only those exact bytes are replaced
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 ```
@@ -518,6 +727,23 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 		$this->assertTrue( $out['success'] );
 		$this->assertTrue( $out['already'] );
+	}
+
+	public function test_a_directory_at_the_created_path_answers_the_changed_code(): void {
+		// Codex #101 round-1 P1: this refusal had no code, so the REST layer
+		// answered 500 for a designated changed-since refusal.
+		$snaps = new Aura_Worker_Snapshots();
+		$file  = WP_CONTENT_DIR . '/created-dir.php';
+		$rec   = $snaps->create_file( $file, "<?php // new\n" )['snapshot'];
+		unlink( $file );
+		mkdir( $file, 0755 );
+
+		$out = $snaps->restore( $rec['id'] );
+
+		$this->assertFalse( $out['success'] );
+		$this->assertSame( 'aura_file_changed_since', $out['code'] );
+		$this->assertStringContainsString( 'not a regular file', $out['error'] );
+		$this->assertDirectoryExists( $file, 'the directory is untouched' );
 	}
 
 	public function test_a_created_file_edited_since_answers_the_changed_code(): void {
@@ -613,6 +839,18 @@ the voided record's answer gains its code:
 				'success' => false,
 				'code'    => 'aura_snapshot_voided',
 				'error'   => 'Snapshot record carries no expected hash; the rollback record for this create is gone.',
+			);
+		}
+```
+
+the not-a-regular-file branch (~line 2074), which today refuses a directory or a dangling symlink with no code at all and so reaches Aura as a 500 (Codex #101 round-1 P1) — the wording stays, exactly as `test_a_dangling_symlink_at_the_created_path_is_reported_never_treated_as_gone` asserts it:
+
+```php
+		if ( ! is_file( $target ) ) {
+			return array(
+				'success' => false,
+				'code'    => 'aura_file_changed_since',
+				'error'   => 'Target is not a regular file: ' . $target,
 			);
 		}
 ```
