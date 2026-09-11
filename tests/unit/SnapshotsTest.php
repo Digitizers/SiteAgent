@@ -2037,6 +2037,67 @@ final class SnapshotsTest extends TestCase {
 		rmdir( $dir );
 	}
 
+	public function test_the_interrupted_transition_takes_the_record_lock_and_leaves_the_record_alone_when_it_cannot(): void {
+		// Codex #100 round-6 P2: the post-publish mismatch voided the record
+		// without its lock; a delete() in between would be undone by the rewrite.
+		$file  = WP_CONTENT_DIR . '/held-interrupted.php';
+		$snaps = new class extends Aura_Worker_Snapshots {
+			public $holder = null;
+			protected function link_available() {
+				return false;
+			}
+			protected function during_write( $path ) {
+				file_put_contents( $path, "// tail\n", FILE_APPEND ); // the mismatch
+				foreach ( $this->list_snapshots() as $rec ) {
+					if ( ( $rec['target'] ?? '' ) === $path ) {
+						$this->holder = fopen( WP_CONTENT_DIR . '/aura-backups/snapshots/' . $rec['id'] . '.lock', 'cb' );
+						flock( $this->holder, LOCK_EX | LOCK_NB ); // someone holds the record right now
+					}
+				}
+			}
+		};
+
+		$res = $snaps->create_file( $file, "<?php // whole\n" );
+		flock( $snaps->holder, LOCK_UN );
+		fclose( $snaps->holder );
+
+		$this->assertSame( 'interrupted', $res['error'] );
+		$this->assertStringContainsString( 'could not be locked', $res['detail'] );
+		$rec = $snaps->get( $res['stale_record'] );
+		$this->assertArrayNotHasKey( 'voided', $rec, 'left as it was — not rewritten under someone else\'s lock' );
+		$this->assertFalse( $snaps->restore( $rec['id'] )['success'], 'and its hash refuses the altered file anyway' );
+		$this->assertFileExists( $file );
+	}
+
+	public function test_a_record_whose_unlink_is_refused_keeps_its_lock_file_while_it_is_voided_in_place(): void {
+		// Codex #100 round-6 P2: unlinking the lock file while the record stays
+		// (and is rewritten) would let a newcomer lock a fresh inode meanwhile.
+		$file  = WP_CONTENT_DIR . '/kept-lock.php';
+		$snaps = new class( $file ) extends Aura_Worker_Snapshots {
+			private $race;
+			public function __construct( $race ) {
+				parent::__construct();
+				$this->race = $race;
+			}
+			protected function publish( $tmp, $path ) {
+				file_put_contents( $this->race, "mine\n" ); // a winner landed first
+				$GLOBALS['_wp_delete_file_fail'] = WP_CONTENT_DIR . '/aura-backups/snapshots/' . $this->list_snapshots()[0]['id'] . '.json'; // and our record's unlink is refused
+				return parent::publish( $tmp, $path );
+			}
+		};
+
+		$res = $snaps->create_file( $file, "mine\n" );
+		unset( $GLOBALS['_wp_delete_file_fail'] );
+
+		$this->assertSame( 'exists', $res['error'] );
+		$recs = $snaps->list_snapshots();
+		$this->assertTrue( $recs[0]['voided'] );
+		$this->assertFileExists( WP_CONTENT_DIR . '/aura-backups/snapshots/' . $recs[0]['id'] . '.lock', 'the lock file stays with a record that stays' );
+
+		$this->assertTrue( $snaps->delete( $recs[0]['id'] ) );
+		$this->assertFileDoesNotExist( WP_CONTENT_DIR . '/aura-backups/snapshots/' . $recs[0]['id'] . '.lock', 'and goes only once the record is gone' );
+	}
+
 	public function test_without_flock_a_broken_holder_cannot_release_the_replacement_lock(): void {
 		// Codex #100 round-1 P1: the directory holds its owner's token, so a
 		// rmdir() by a holder that was broken as stale fails on the replacement's.

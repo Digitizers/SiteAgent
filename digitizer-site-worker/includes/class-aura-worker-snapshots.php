@@ -861,9 +861,22 @@ class Aura_Worker_Snapshots {
 	 */
 	private function interrupted_create( $id, $tmp, $error, $detail ) {
 		$out = array( 'success' => false, 'error' => $error, 'detail' => (string) $detail, 'stale_record' => $id );
-		if ( $this->void_record_in_place( $id, array( 'interrupted' => true ) ) ) {
+		// Under the record's lock (Codex #100 round-6 P2): a delete() that ran
+		// between the read and the rewrite would otherwise be undone by the
+		// rewrite. Contended → the record stays as it is, and the answer says
+		// so; its hash does not match the file (that is why we are here), so a
+		// restore refuses it either way.
+		$voided = $this->with_record_lock(
+			$id,
+			function () use ( $id ) {
+				return $this->void_record_in_place( $id, array( 'interrupted' => true ) );
+			}
+		);
+		if ( true === $voided ) {
 			$out['detail'] .= '; record ' . $id . ' voided and marked interrupted, '
 				. ( is_string( $tmp ) ? 'staged bytes kept at ' . $tmp : 'the intended content could not be kept' );
+		} elseif ( null === $voided ) {
+			$out['detail'] .= '; record ' . $id . ' could not be locked and was left as it is — its hash does not match the file, so restore refuses it';
 		}
 		return $out;
 	}
@@ -1026,12 +1039,10 @@ class Aura_Worker_Snapshots {
 	 *              still restorable and the caller must say so.
 	 */
 	private function void_create_record( $id ) {
-		$meta_path = $this->dir . basename( (string) $id ) . '.json';
-		$this->delete_record_file( $id );
-		if ( ! file_exists( $meta_path ) ) {
+		if ( $this->delete_record_file( $id ) ) {
 			return true;
 		}
-		return $this->void_record_in_place( $id );
+		return $this->void_record_in_place( $id ); // the lock file is still in place for this
 	}
 
 	/**
@@ -1488,24 +1499,34 @@ class Aura_Worker_Snapshots {
 
 	/**
 	 * Remove a record file by id whether or not it decodes — delete() reads
-	 * the record first and cannot remove one that failed to read back.
+	 * the record first and cannot remove one that failed to read back. Callers
+	 * hold the record's lock.
 	 *
 	 * @param string $id Snapshot id.
+	 * @return bool True when the record file is gone (and its lock with it).
 	 */
 	private function delete_record_file( $id ) {
 		$meta_path = $this->dir . basename( (string) $id ) . '.json';
 		if ( file_exists( $meta_path ) ) {
 			wp_delete_file( $meta_path );
 		}
+		if ( file_exists( $meta_path ) ) {
+			// The record is still there: whatever the caller does next (void it
+			// in place) happens under a lock that must stay reachable by name,
+			// so the lock file STAYS (Codex #100 round-6 P2).
+			return false;
+		}
 		// The flock file goes with the record — safe ONLY because every caller
-		// holds this record's lock and with_lock() re-checks the inode after
-		// acquiring (Codex #100 round-1 P1). A mkdir() lock directory is not
-		// touched here: its holder releases it, and a crashed holder's is
-		// broken by the next taker.
+		// holds this record's lock, with_lock() re-checks the inode after
+		// acquiring (Codex #100 round-1 P1), and nothing about this record is
+		// written after this point. A mkdir() lock directory is not touched
+		// here: its holder releases it, and a crashed holder's is broken by
+		// the next taker.
 		$lock = $this->dir . basename( (string) $id ) . '.lock';
 		if ( file_exists( $lock ) ) {
 			wp_delete_file( $lock );
 		}
+		return true;
 	}
 
 	/**
@@ -2643,8 +2664,7 @@ class Aura_Worker_Snapshots {
 				if ( ! empty( $record['payload_path'] ) && file_exists( $record['payload_path'] ) ) {
 					wp_delete_file( $record['payload_path'] );
 				}
-				$this->delete_record_file( $id ); // the record AND its lock file
-				return true;
+				return $this->delete_record_file( $id ); // the record, and its lock file only once the record is gone
 			}
 		);
 		return true === $done;
