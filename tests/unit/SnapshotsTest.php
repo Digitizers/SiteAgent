@@ -3125,6 +3125,67 @@ final class SnapshotsTest extends TestCase {
 		$this->assertSame( array(), glob( WP_CONTENT_DIR . '/.aura-restore-*' ), 'the claim copy is gone' );
 	}
 
+	public function test_a_writer_that_edits_the_target_during_a_link_less_restore_keeps_the_claim(): void {
+		// Codex #102 round-2 P1: an INODE check is not a CONTENT check. The
+		// link()-less publish streams into an inode that is visible at the path
+		// the whole time, so a writer holding that path can change a region
+		// already written while later ones are still being written — and
+		// ino/dev still matches, because the ENTRY was never replaced. Calling
+		// that success reported a file the restore never produced AND deleted
+		// the claim, the only copy of what the restore was undoing.
+		$file  = WP_CONTENT_DIR . '/raced-write.php';
+		file_put_contents( $file, "<?php // original\n" );
+		$snaps = new class extends Aura_Worker_Snapshots {
+			public $armed = '';
+			protected function link_available() {
+				return false;
+			}
+			protected function write_all( $fh, $src ) {
+				$ok = parent::write_all( $fh, $src );
+				if ( '' !== $this->armed ) {
+					// An external writer, BY NAME: the same inode, truncated and
+					// rewritten. Nothing is replaced, so the inode check passes.
+					file_put_contents( $this->armed, "tampered by another writer\n" );
+				}
+				return $ok;
+			}
+		};
+		$rec = $snaps->overwrite_file( $file, "<?php // written\n" )['snapshot'];
+
+		$snaps->armed = $file; // arm only for the restore's own write
+		$out          = $snaps->restore( $rec['id'] );
+
+		$this->assertFalse( $out['success'] );
+		$this->assertSame( 'aura_file_changed_since', $out['code'] );
+		$this->assertArrayHasKey( 'moved_aside', $out, 'the claim is kept, not deleted' );
+		$this->assertFileExists( $out['moved_aside'] );
+		$this->assertSame( "<?php // written\n", file_get_contents( $out['moved_aside'] ), 'the pre-restore file survives' );
+		$this->assertSame( "tampered by another writer\n", file_get_contents( $file ), "the other writer's bytes are not clobbered" );
+	}
+
+	public function test_an_unfenced_record_says_so_even_when_a_symlink_took_the_path(): void {
+		// Codex #102 round-2 P2: a record with no fence can NEVER be restored,
+		// whatever is at the path now. Answering aura_file_changed_since for a
+		// symlink there told the caller to look again at a file, when the fact
+		// it needs is that THE RECORD is unusable.
+		$file = WP_CONTENT_DIR . '/unfenced-symlink.php';
+		file_put_contents( $file, "original\n" );
+		$snaps = new Aura_Worker_Snapshots();
+		$rec   = $snaps->snapshot_file( $file )['snapshot']; // a direct snapshot carries no fence
+		$this->assertArrayNotHasKey( 'replaced_with_sha256', $snaps->get( $rec['id'] ) );
+
+		unlink( $file );
+		file_put_contents( WP_CONTENT_DIR . '/elsewhere-unfenced.php', "real\n" );
+		symlink( WP_CONTENT_DIR . '/elsewhere-unfenced.php', $file );
+
+		$out = $snaps->restore( $rec['id'] );
+
+		$this->assertFalse( $out['success'] );
+		$this->assertSame( 'aura_snapshot_unfenced', $out['code'], 'the record, not the path, is what is wrong' );
+		$this->assertTrue( is_link( $file ), 'the link is untouched' );
+		$this->assertSame( "real\n", file_get_contents( WP_CONTENT_DIR . '/elsewhere-unfenced.php' ), 'nothing written through it' );
+	}
+
 	public function test_a_fence_stamp_that_fails_leaves_the_record_whole_and_readable(): void {
 		// Codex #102 round-1 P2: the caller treats a failed stamp as a safely
 		// UNFENCED record — which assumes the record still EXISTS.

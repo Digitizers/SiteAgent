@@ -2197,6 +2197,17 @@ class Aura_Worker_Snapshots {
 		if ( '' === $target ) {
 			return array( 'success' => false, 'error' => 'Snapshot record carries no target.' );
 		}
+		// THE RECORD IS JUDGED BEFORE THE PATH IS (Codex #102 round-2 P2). A
+		// voided or unfenced record can never be restored, whatever is at the
+		// path now — so answering `aura_file_changed_since` for a symlink or a
+		// directory there told the caller to look again at a file, when the
+		// fact it needs is that THE RECORD is unusable. These checks read the
+		// record only and need no lock; the locked function re-applies them as
+		// the authority once it holds one.
+		$unusable = $this->record_refusal( $record );
+		if ( null !== $unusable ) {
+			return $unusable;
+		}
 		$refused = $this->refuse_at_path( $target, false );
 		if ( null !== $refused ) {
 			return $this->restore_refusal( $refused );
@@ -2227,6 +2238,37 @@ class Aura_Worker_Snapshots {
 	}
 
 	/**
+	 * The refusal a RECORD earns on its own, before anything at the path is
+	 * looked at: retired because its write never landed, or carrying no fence
+	 * to prove the file is unchanged. Both are permanent properties of the
+	 * record — no state of the target makes either restorable — so they are
+	 * decided first and never dressed up as a changed-since fact (Codex #102
+	 * round-2 P2).
+	 *
+	 * @param array $record The file record.
+	 * @return array|null The refusal, or null when the record is usable.
+	 */
+	private function record_refusal( array $record ) {
+		if ( ! empty( $record['voided'] ) ) {
+			// Retired because its write never landed (Codex #101 round-5 P1):
+			// a designated refusal, not an unfenced record.
+			return array(
+				'success' => false,
+				'code'    => 'aura_snapshot_voided',
+				'error'   => 'The rollback record for this write was retired because the write did not land.',
+			);
+		}
+		if ( '' === ( isset( $record['replaced_with_sha256'] ) ? (string) $record['replaced_with_sha256'] : '' ) ) {
+			return array(
+				'success' => false,
+				'code'    => 'aura_snapshot_unfenced',
+				'error'   => 'This snapshot does not record what replaced the file, so a restore cannot prove the file is unchanged; nothing was written.',
+			);
+		}
+		return null;
+	}
+
+	/**
 	 * The fenced restore proper, under the target's lock (Aura#520 §3.1).
 	 *
 	 * An in-place hash settles every answer that writes nothing. To WRITE, the
@@ -2240,24 +2282,12 @@ class Aura_Worker_Snapshots {
 	 * @return array { success, already?, code?, error?, detail?, moved_aside? }
 	 */
 	private function restore_existing_file_locked( $target, $bytes, array $record ) {
-		if ( ! empty( $record['voided'] ) ) {
-			// Retired because its write never landed (Codex #101 round-5 P1):
-			// a designated refusal, not an unfenced record.
-			return array(
-				'success' => false,
-				'code'    => 'aura_snapshot_voided',
-				'error'   => 'The rollback record for this write was retired because the write did not land.',
-			);
+		$unusable = $this->record_refusal( $record );
+		if ( null !== $unusable ) {
+			return $unusable; // re-applied under the lock; the caller checked it first
 		}
-		$replaced = isset( $record['replaced_with_sha256'] ) ? (string) $record['replaced_with_sha256'] : '';
-		if ( '' === $replaced ) {
-			return array(
-				'success' => false,
-				'code'    => 'aura_snapshot_unfenced',
-				'error'   => 'This snapshot does not record what replaced the file, so a restore cannot prove the file is unchanged; nothing was written.',
-			);
-		}
-		$refused = $this->refuse_at_path( $target, false ); // again, under the lock
+		$replaced = (string) $record['replaced_with_sha256'];
+		$refused  = $this->refuse_at_path( $target, false ); // again, under the lock
 		if ( null !== $refused ) {
 			return $this->restore_refusal( $refused );
 		}
@@ -2401,6 +2431,18 @@ class Aura_Worker_Snapshots {
 		$published = $this->link_available()
 			? $this->publish( $tmp, $target ) // link() preserves the stage's mode, set from the claim just above
 			: $this->publish_restored_by_write( $tmp, $target, false === $claimed_mode ? ( false === $mode ? null : ( $mode & 0777 ) ) : $claimed_mode );
+		if ( 'raced' === $published ) {
+			// The write landed, but not intact: a concurrent writer edited the
+			// target while it was being written (Codex #102 round-2 P1). The
+			// path holds neither the old file nor cleanly the restored one, so
+			// putting the claim back would clobber that writer's edits. Keep
+			// the claim, say where it is, and refuse.
+			$this->discard_stage( $tmp );
+			return $this->changed_since(
+				'another writer changed the file while the restore was writing it; the file it replaced is kept aside',
+				array( 'moved_aside' => $claim )
+			);
+		}
 		if ( true !== $published ) {
 			$this->discard_stage( $tmp );
 			// 'exists' OR (in link mode only) the path is occupied by anything
@@ -2514,6 +2556,20 @@ class Aura_Worker_Snapshots {
 		$now = @stat( $target ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Gone is an answer.
 		if ( ! is_array( $mine ) || ! is_array( $now ) || $now['ino'] !== $mine['ino'] || $now['dev'] !== $mine['dev'] ) {
 			return self::path_present( $target ) ? 'exists' : 'the target was removed during the write';
+		}
+		// AN INODE CHECK IS NOT A CONTENT CHECK (Codex #102 round-2 P1). Unlike
+		// the link() publish, which lands a COMPLETE stage in one atomic call,
+		// this branch streams into an inode that is visible at the path the
+		// whole time — so a writer holding that path can change a region we
+		// have already written while we are still writing later ones, and
+		// ino/dev still matches, because the ENTRY was never replaced. Calling
+		// that a success would report a file the restore never produced AND
+		// let the caller delete the claim, which is the only copy of what the
+		// restore was undoing. Verify the bytes we meant to land.
+		$want = hash_file( 'sha256', $tmp );
+		$got  = hash_file( 'sha256', $target );
+		if ( ! is_string( $want ) || ! is_string( $got ) || ! hash_equals( $want, $got ) ) {
+			return 'raced';
 		}
 		return true;
 	}
