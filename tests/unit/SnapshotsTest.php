@@ -3316,6 +3316,25 @@ final class SnapshotsTest extends TestCase {
 		$this->assertSame( "theirs\n", file_get_contents( $dir . '/fifo-taken' ), "the other writer's file is untouched" );
 		$this->assertSame( 'fifo', filetype( $fifo2 ), 'the node stays aside, named' );
 		unlink( $fifo2 );
+
+		// The mode survives the umask (Codex #102 round-11 P2). posix_mkfifo()
+		// takes the umask exactly as mkdir() and fopen() do, so a 0666 FIFO
+		// under the common 0022 umask would come back 0644 — silently removing
+		// the write access its clients need — and the original would then be
+		// deleted and reported restored exactly.
+		$fifo3 = $dir . '/.aura-restore-f1f3';
+		$this->assertTrue( posix_mkfifo( $fifo3, 0666 ) );
+		chmod( $fifo3, 0666 ); // posix_mkfifo() masked it on the way in too
+		$this->assertSame( 0666, fileperms( $fifo3 ) & 0777, 'the fixture really is 0666' );
+		$was = umask( 0022 );
+		try {
+			$this->assertTrue( $snaps->put_back( $fifo3, $dir . '/fifo-mode' ) );
+		} finally {
+			umask( $was );
+		}
+		$this->assertSame( 'fifo', filetype( $dir . '/fifo-mode' ) );
+		$this->assertSame( 0666, fileperms( $dir . '/fifo-mode' ) & 0777, 'the mode it had, not what the umask allowed' );
+		unlink( $dir . '/fifo-mode' );
 	}
 
 	public function test_a_symlink_claim_is_kept_when_a_racer_takes_the_path_before_cleanup(): void {

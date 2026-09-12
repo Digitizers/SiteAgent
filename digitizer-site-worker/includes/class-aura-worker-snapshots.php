@@ -2852,8 +2852,27 @@ class Aura_Worker_Snapshots {
 				if ( 'fifo' === $type && function_exists( 'posix_mkfifo' ) ) {
 					$perms = @fileperms( $aside ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- A false takes the create default.
 					$mode  = false === $perms ? $this->create_mode() : ( $perms & 0777 );
-					if ( ! @posix_mkfifo( $target, $mode ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- EEXIST is the refusal this call is chosen FOR.
+					// posix_mkfifo() TAKES THE UMASK, exactly as mkdir() and
+					// fopen() do (Codex #102 round-11 P2). A 0666 FIFO under the
+					// common 0022 umask would come back 0644 — silently removing
+					// the write access its clients need — and we would then
+					// delete the original and report it restored exactly. Set
+					// the umask around the call, the way stage() and
+					// publish_restored_by_write() already do, and VERIFY.
+					$was  = umask( 0777 & ~$mode );
+					$made = @posix_mkfifo( $target, $mode ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- EEXIST is the refusal this call is chosen FOR.
+					umask( $was );
+					if ( ! $made ) {
 						return false; // the path is taken; the node stays aside, named
+					}
+					if ( ! $this->node_wears_mode( $target, $mode ) ) {
+						// A default ACL can widen it past the umask. The node we
+						// made is not the node we held, so it goes and the
+						// original stays aside rather than being replaced by a
+						// lesser one — the rule publish_restored_by_write()
+						// follows for the same reason.
+						$this->remove_own_node( $target );
+						return false;
 					}
 					wp_delete_file( $aside );
 					return true;
@@ -3183,6 +3202,48 @@ class Aura_Worker_Snapshots {
 	 * @param string $path The path.
 	 * @return string|false
 	 */
+	/**
+	 * Is the node at $path a FIFO wearing exactly $mode? Read back rather than
+	 * assumed: the umask is not the only thing that can change a created node's
+	 * permissions — a default POSIX ACL ignores it entirely, which is the same
+	 * fact stage() guards against for regular files.
+	 *
+	 * @param string $path The path.
+	 * @param int    $mode The mode it must wear.
+	 * @return bool
+	 */
+	private function node_wears_mode( $path, $mode ) {
+		clearstatcache( true, $path );
+		if ( 'fifo' !== @filetype( $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Gone is an answer.
+			return false;
+		}
+		$perms = @fileperms( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Unreadable is an answer.
+		if ( false !== $perms && ( $perms & 0777 ) === ( $mode & 0777 ) ) {
+			return true;
+		}
+		if ( ! function_exists( 'chmod' ) || ! @chmod( $path, $mode ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Our own node; a refusal is answered.
+			return false;
+		}
+		clearstatcache( true, $path );
+		$perms = @fileperms( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Unreadable is an answer.
+		return false !== $perms && ( $perms & 0777 ) === ( $mode & 0777 );
+	}
+
+	/**
+	 * Remove a FIFO this call created, while the path still holds one. Used
+	 * when the node could not be given the mode it must have: a lesser node at
+	 * the path is worse than none, because the original is still held aside
+	 * and can be reported.
+	 *
+	 * @param string $path The path.
+	 */
+	private function remove_own_node( $path ) {
+		clearstatcache( true, $path );
+		if ( 'fifo' === @filetype( $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Gone is an answer.
+			wp_delete_file( $path );
+		}
+	}
+
 	private function hash_regular_file( $path ) {
 		clearstatcache( true, $path );
 		if ( is_link( $path ) || 'file' !== @filetype( $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- An absent path is an answer, not a warning.
