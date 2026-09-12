@@ -384,6 +384,41 @@ class Aura_Worker_Snapshots {
 	 */
 	const CALLER_META_KEYS = array( 'write_seq' );
 
+	/** Forget any cleanup note from an earlier call: one restore at a time. */
+	private function reset_cleanup_notes() {
+		$this->stranded       = '';
+		$this->displaced_lost = false;
+	}
+
+	/**
+	 * Fold whatever this restore's cleanup displaced into its answer, and
+	 * forget it.
+	 *
+	 * EVERY restore path must pass its answer through here (Codex #102 round-27
+	 * P1). The create restore reached remove_own_entry() only once the put-back
+	 * gained its identity-safe cleanup one round earlier, and until then this
+	 * fold lived inside publish_restored_bytes() alone — so a file that restore
+	 * displaced was recorded and then silently dropped.
+	 *
+	 * @param array $out The answer.
+	 * @return array
+	 */
+	private function fold_cleanup_notes( $out ) {
+		if ( ! is_array( $out ) ) {
+			$this->reset_cleanup_notes();
+			return $out;
+		}
+		if ( '' !== $this->stranded ) {
+			$out['stranded'] = $this->stranded;
+		}
+		if ( $this->displaced_lost ) {
+			$note          = "another writer's file was displaced by this restore's cleanup and destroyed by a third writer before it could be put back";
+			$out['detail'] = isset( $out['detail'] ) ? $out['detail'] . '; ' . $note : $note;
+		}
+		$this->reset_cleanup_notes();
+		return $out;
+	}
+
 	/** A staged file this old with no create in flight is a crash's leftover. */
 	const STAGE_MAX_AGE = 3600; // one hour — a literal, so the class needs no WordPress constant at load
 
@@ -2325,13 +2360,14 @@ class Aura_Worker_Snapshots {
 		if ( '' === $target ) {
 			return array( 'success' => true ); // already gone
 		}
+		$this->reset_cleanup_notes();
 		$out = $this->with_target_lock(
 			$target,
 			function () use ( $record, $target ) {
 				return $this->restore_created_file_locked( $record, $target );
 			}
 		);
-		return $this->locked_answer( $out, $target );
+		return $this->fold_cleanup_notes( $this->locked_answer( $out, $target ) );
 	}
 
 	/**
@@ -2494,21 +2530,8 @@ class Aura_Worker_Snapshots {
 	 * @return array
 	 */
 	private function publish_restored_bytes( $target, $bytes, $replaced ) {
-		$this->stranded       = ''; // one restore at a time; never carry another's
-		$this->displaced_lost = false;
-		$out            = $this->publish_restored_bytes_inner( $target, $bytes, $replaced );
-		if ( '' !== $this->stranded && is_array( $out ) ) {
-			// Every exit of the inner call passes through here, so no branch can
-			// forget to report a displaced file (Codex #102 round-9 P1).
-			$out['stranded'] = $this->stranded;
-		}
-		if ( $this->displaced_lost && is_array( $out ) ) {
-			$note           = "another writer's file was displaced by this restore's cleanup and destroyed by a third writer before it could be put back";
-			$out['detail']  = isset( $out['detail'] ) ? $out['detail'] . '; ' . $note : $note;
-		}
-		$this->stranded       = '';
-		$this->displaced_lost = false;
-		return $out;
+		$this->reset_cleanup_notes();
+		return $this->fold_cleanup_notes( $this->publish_restored_bytes_inner( $target, $bytes, $replaced ) );
 	}
 
 	/**

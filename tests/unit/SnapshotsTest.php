@@ -3287,6 +3287,47 @@ final class SnapshotsTest extends TestCase {
 		$this->assertNotSame( $out['stranded'], isset( $out['moved_aside'] ) ? $out['moved_aside'] : null, 'distinct from our own claim' );
 	}
 
+	public function test_a_created_file_restore_reports_a_file_its_cleanup_displaced(): void {
+		// Codex #102 round-27 P1: the create restore reached remove_own_entry()
+		// only once the put-back gained its identity-safe cleanup one round
+		// earlier — and until now the fold that reports a displaced file lived
+		// inside publish_restored_bytes() alone, which this path never calls.
+		// So the file was recorded and then silently dropped from the answer.
+		$file  = WP_CONTENT_DIR . '/created-displaced.php';
+		$snaps = new class extends Aura_Worker_Snapshots {
+			public $armed = '';
+			protected function link_available() {
+				return false; // the host where the copy fallback is reached
+			}
+			public $fail_write = false;
+			protected function write_all( $fh, $src ) {
+				$ok = parent::write_all( $fh, $src );
+				return $this->fail_write ? false : $ok; // short only for the put-back's copy
+			}
+			protected function before_entry_removal( $target ) {
+				if ( '' !== $this->armed ) {
+					// A racer replaces our entry with an EXECUTABLE file of
+					// theirs, which the copy fallback cannot recreate.
+					unlink( $target );
+					file_put_contents( $target, "#!/bin/sh\necho theirs\n" );
+					chmod( $target, 0755 );
+					$this->armed = '';
+				}
+			}
+		};
+		$rec = $snaps->create_file( $file, "agent\n" )['snapshot'];
+		file_put_contents( $file, "edited\n" ); // not the agent's bytes: a put-back, never a delete
+		$snaps->armed      = $file;
+		$snaps->fail_write = true;
+
+		$restore = $snaps->restore( $rec['id'] );
+
+		$this->assertFalse( $restore['success'] );
+		$this->assertArrayHasKey( 'stranded', $restore, "the other writer's file is named on THIS path too" );
+		$this->assertMatchesRegularExpression( '/\/\.aura-restore-[0-9a-f]{16}$/', $restore['stranded'] );
+		$this->assertSame( "#!/bin/sh\necho theirs\n", file_get_contents( $restore['stranded'] ), 'their bytes, intact' );
+	}
+
 	public function test_a_put_back_refused_by_a_wide_acl_leaves_the_path_free(): void {
 		// Codex #102 round-26 P1: a default ACL can make the exclusively created
 		// recovery copy come out wider than asked, which write_exclusively()
