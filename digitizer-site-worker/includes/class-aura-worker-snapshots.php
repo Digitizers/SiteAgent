@@ -2674,6 +2674,17 @@ class Aura_Worker_Snapshots {
 			$out['detail']      = 'the replaced file was written to while the restore ran and was kept aside rather than deleted';
 			return $out;
 		}
+		// AND NO NAME GAME DEFENDS THE LAST SLIVER (Codex #102 round-20 P1,
+		// declined with this reasoning). A write landing between the hash above
+		// and this unlink is lost. Every other race in this class was beaten by
+		// operating on NAMES — rename to claim, stat to prove identity, link to
+		// publish without clobbering — but the writer here holds an open
+		// DESCRIPTOR on the inode, and no rename, stat or link affects a file
+		// descriptor. The only defence is to never delete the claim, which
+		// would leave an `.aura-restore-*` this engine never sweeps, plus a
+		// meaningless `moved_aside`, beside EVERY successful restore. That
+		// trade was weighed and refused here and on the plan review before it.
+		// This is the plan's residual (a), and it is where it bottoms out.
 		wp_delete_file( $claim );
 		if ( file_exists( $claim ) ) {
 			$out['moved_aside'] = $claim; // `.aura-restore-*` is never swept: say where it is
