@@ -3163,6 +3163,77 @@ final class SnapshotsTest extends TestCase {
 		$this->assertSame( "tampered by another writer\n", file_get_contents( $file ), "the other writer's bytes are not clobbered" );
 	}
 
+	public function test_a_no_clobber_shape_is_put_back_without_the_checked_rename(): void {
+		// Codex #102 round-3 P1: check-then-rename is a race — rename() CLOBBERS
+		// on POSIX, so a writer arriving between the check and the rename is
+		// destroyed. Verified on this platform: rename( symlink, existing file )
+		// replaces the file, while symlink() onto an existing path refuses. So a
+		// symlink and a regular file go back with a primitive that REFUSES an
+		// occupied path, and never reach the checked rename at all — which is
+		// what the seam below proves, because it fires only on that branch.
+		$dir   = WP_CONTENT_DIR;
+		$snaps = new class extends Aura_Worker_Snapshots {
+			public $seam_fired = 0;
+			protected function before_non_file_put_back( $aside, $target ) {
+				++$this->seam_fired;
+			}
+			public function put_back( $aside, $target ) {
+				return $this->put_back_no_clobber( $aside, $target );
+			}
+		};
+
+		// (a) a symlink: recreated with symlink(), no checked rename.
+		file_put_contents( $dir . '/pb-dest.txt', "dest\n" );
+		symlink( $dir . '/pb-dest.txt', $dir . '/.aura-restore-aaaa' );
+		$this->assertTrue( $snaps->put_back( $dir . '/.aura-restore-aaaa', $dir . '/pb-link.txt' ) );
+		$this->assertTrue( is_link( $dir . '/pb-link.txt' ), 'back as a link, not as a copy' );
+		$this->assertSame( $dir . '/pb-dest.txt', readlink( $dir . '/pb-link.txt' ), 'pointing where it pointed' );
+		$this->assertFileDoesNotExist( $dir . '/.aura-restore-aaaa' );
+		$this->assertSame( 0, $snaps->seam_fired, 'a symlink never reaches the checked rename' );
+
+		// (b) a regular file: linked back, no checked rename.
+		file_put_contents( $dir . '/.aura-restore-bbbb', "mine\n" );
+		$this->assertTrue( $snaps->put_back( $dir . '/.aura-restore-bbbb', $dir . '/pb-file.txt' ) );
+		$this->assertSame( "mine\n", file_get_contents( $dir . '/pb-file.txt' ) );
+		$this->assertSame( 0, $snaps->seam_fired, 'a regular file never reaches the checked rename either' );
+
+		// (c) an occupied path is REFUSED, not replaced — the entry stays aside.
+		file_put_contents( $dir . '/pb-taken.txt', "theirs\n" );
+		symlink( $dir . '/pb-dest.txt', $dir . '/.aura-restore-cccc' );
+		$this->assertFalse( $snaps->put_back( $dir . '/.aura-restore-cccc', $dir . '/pb-taken.txt' ) );
+		$this->assertSame( "theirs\n", file_get_contents( $dir . '/pb-taken.txt' ), "the other writer's file is untouched" );
+		$this->assertTrue( is_link( $dir . '/.aura-restore-cccc' ), 'the link stays aside, named' );
+	}
+
+	public function test_a_directory_put_back_refuses_a_path_a_racer_took_in_the_window(): void {
+		// A DIRECTORY has no no-clobber move in PHP, so it keeps the checked
+		// rename and the seam fires. The exposure is narrower than it looks,
+		// and this pins why: rename() of a directory FAILS onto a regular file
+		// (verified on this platform), so a racer's FILE survives even when it
+		// lands inside the window. Only an empty directory could be replaced —
+		// the residual the plan documents.
+		$dir   = WP_CONTENT_DIR;
+		$snaps = new class extends Aura_Worker_Snapshots {
+			public $racer = '';
+			protected function before_non_file_put_back( $aside, $target ) {
+				if ( '' !== $this->racer ) {
+					file_put_contents( $this->racer, "theirs\n" ); // lands INSIDE the window
+				}
+			}
+			public function put_back( $aside, $target ) {
+				return $this->put_back_no_clobber( $aside, $target );
+			}
+		};
+
+		mkdir( $dir . '/.aura-restore-dddd' );
+		file_put_contents( $dir . '/.aura-restore-dddd/inside.txt', "x\n" );
+		$snaps->racer = $dir . '/pb-dir';
+
+		$this->assertFalse( $snaps->put_back( $dir . '/.aura-restore-dddd', $dir . '/pb-dir' ) );
+		$this->assertSame( "theirs\n", file_get_contents( $dir . '/pb-dir' ), "the racer's file is not replaced" );
+		$this->assertFileExists( $dir . '/.aura-restore-dddd/inside.txt', 'the directory stays aside, whole' );
+	}
+
 	public function test_an_unfenced_record_says_so_even_when_a_symlink_took_the_path(): void {
 		// Codex #102 round-2 P2: a record with no fence can NEVER be restored,
 		// whatever is at the path now. Answering aura_file_changed_since for a

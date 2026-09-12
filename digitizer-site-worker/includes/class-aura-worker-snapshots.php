@@ -2383,10 +2383,7 @@ class Aura_Worker_Snapshots {
 			// second writer who took the path after our claim would be
 			// destroyed by an unconditional put-back. When the path is taken,
 			// the entry stays under its claim name and the answer says where.
-			if ( self::path_present( $target ) ) {
-				return $this->changed_since( 'something that is not a regular file took the path, and another file took it again before it could be put back', array( 'moved_aside' => $claim ) );
-			}
-			return @rename( $claim, $target ) // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.rename_rename -- Putting a racer's entry back; the path was free a statement ago and a refusal is answered below.
+			return $this->put_back_no_clobber( $claim, $target )
 				? $this->changed_since( 'something that is not a regular file took the path while the restore was being prepared' )
 				: $this->changed_since( 'something that is not a regular file took the path and could not be put back', array( 'moved_aside' => $claim ) );
 		}
@@ -2611,16 +2608,15 @@ class Aura_Worker_Snapshots {
 		}
 		$moved = @stat( $aside ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Gone is an answer.
 		if ( ! is_array( $moved ) || $moved['ino'] !== $mine['ino'] || $moved['dev'] !== $mine['dev'] ) {
-			// We moved somebody else's file. Put it back — but ONLY while the
-			// path is still free (Codex #101 round-8 P1): a SECOND writer can
+			// We moved somebody else's file. Put it back with a primitive that
+			// REFUSES an occupied path rather than one that clobbers it
+			// (Codex #101 round-8 P1, #102 round-3 P1): a SECOND writer can
 			// take the target after our claim, and rename() would destroy that
 			// file too. When the path is taken, the entry stays under its
 			// `.aura-restore-*` name, which this engine never sweeps, rather
 			// than clobbering a file that is not ours. Either way this is "not
 			// cleared", and the caller keeps its own claim aside and says so.
-			if ( ! self::path_present( $target ) ) {
-				@rename( $aside, $target ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.rename_rename -- A best-effort put-back onto a path that was free a statement ago.
-			}
+			$this->put_back_no_clobber( $aside, $target );
 			return false;
 		}
 		wp_delete_file( $aside );
@@ -2634,6 +2630,64 @@ class Aura_Worker_Snapshots {
 	 * @param string $target The path.
 	 */
 	protected function before_entry_removal( $target ) {
+	}
+
+	/**
+	 * Seam between finding the path free and putting a non-regular entry back.
+	 * Nothing in production; a test models a racer taking the path here.
+	 *
+	 * @param string $aside  The entry held aside.
+	 * @param string $target The path.
+	 */
+	protected function before_non_file_put_back( $aside, $target ) {
+	}
+
+	/**
+	 * Put an entry this engine moved aside back where it came from, without
+	 * replacing anything that took the path meanwhile.
+	 *
+	 * `rename()` CLOBBERS on POSIX, so check-then-rename is a race: a writer
+	 * arriving between the two destroys that writer's entry (Codex #102
+	 * round-3 P1). Two of the three shapes have a primitive that refuses an
+	 * existing path outright, and those are used instead of the check:
+	 *
+	 * - a SYMLINK is recreated with symlink(), which fails EEXIST — verified:
+	 *   rename( symlink, existing file ) replaces the file, symlink() onto an
+	 *   existing path does not.
+	 * - a REGULAR FILE is linked back with link(), the same no-clobber
+	 *   primitive put_claim_back() uses.
+	 * - a DIRECTORY has no such primitive in PHP, and rename() stays. The
+	 *   exposure there is narrower than it looks: rename() of a directory
+	 *   FAILS onto a regular file and onto a non-empty directory, so the only
+	 *   entry it can replace is an EMPTY directory a racer created inside the
+	 *   window. Stranding somebody's whole directory under a name nothing
+	 *   sweeps is the worse harm, so the check-then-rename is kept for this
+	 *   shape alone, and it is the residual the plan documents.
+	 *
+	 * @param string $aside  The entry held aside.
+	 * @param string $target Where it belongs.
+	 * @return bool True when the path holds it again.
+	 */
+	protected function put_back_no_clobber( $aside, $target ) {
+		if ( is_link( $aside ) ) {
+			$dest = @readlink( $aside ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- An unreadable link is answered false below.
+			if ( ! is_string( $dest ) || ! @symlink( $dest, $target ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- EEXIST is the refusal this call is chosen FOR.
+				return false;
+			}
+			wp_delete_file( $aside ); // the link is back at its path; its held name goes
+			return true;
+		}
+		if ( ! is_dir( $aside ) && $this->link_available() && $this->link_into_place( $aside, $target ) ) {
+			wp_delete_file( $aside );
+			return true;
+		}
+		// A directory, or a host without link(): the checked rename, with the
+		// window documented above.
+		$this->before_non_file_put_back( $aside, $target );
+		if ( self::path_present( $target ) ) {
+			return false;
+		}
+		return (bool) @rename( $aside, $target ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.rename_rename -- No no-clobber move exists for this shape; a refusal is answered.
 	}
 
 	/**
