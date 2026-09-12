@@ -4,7 +4,7 @@ Tags: ai, automation, maintenance, updates, wordpress management
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.17.2
+Stable tag: 2.17.3
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -252,6 +252,11 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 7. Connections: provider connections (Cloudways, Cloudflare, Bunny, Hostinger, Vultr, xCloud) with resource counts, status, and credential-rotation reminders.
 
 == Changelog ==
+
+= 2.17.3 =
+* Snapshots: an `overwrite_file()` record now stores the sha256 of the content it wrote (`replaced_with_sha256`), and restoring that record puts the old bytes back ONLY while the file still holds exactly what the write left there. A file edited since is refused untouched (`aura_file_changed_since`); a file already holding the old bytes answers `already` and is not rewritten; a record taken without that hash — a direct `POST /aura/v2/snapshot`, or a Power Pack older than 0.2.5 — is refused as unfenced (`aura_snapshot_unfenced`), because nothing proves what it would be writing over.
+* Snapshots: every engine write to a path records a `write_seq`, taken under that path's lock and strictly increasing per target, so two writes to one file can be ordered after the fact — Aura rolls a run back in that order.
+* Snapshots: a file restore that cannot act says why with a code instead of a bare failure — `aura_file_changed_since`, `aura_snapshot_unfenced`, `aura_snapshot_voided` (the create's rollback record is gone) and `aura_path_locked` (another write to the path is in progress) — each answered as an HTTP 409 refusal rather than a 500. Restoring a created file that is already gone answers `already`.
 
 = 2.17.2 =
 * Snapshots: every engine write to a path — `create_file()`, the new `overwrite_file()`, and the restore of a created file — runs under a per-path lock, so two agent writes racing one new file can no longer interleave in the same inode (a concurrent in-place overwrite passed the inode check). After a publish the target must hash to the recorded content, else the record is voided as `interrupted` and the staged bytes kept.

@@ -17,7 +17,7 @@
   </a>
   <img src="https://img.shields.io/badge/WordPress-6.2%E2%80%937.1-21759b?logo=wordpress" alt="WordPress" />
   <img src="https://img.shields.io/badge/PHP-7.4%2B-777bb4?logo=php" alt="PHP" />
-  <img src="https://img.shields.io/badge/Stable-2.17.2-green" alt="Stable" />
+  <img src="https://img.shields.io/badge/Stable-2.17.3-green" alt="Stable" />
 </p>
 
 ---
@@ -238,6 +238,12 @@ These plug straight into **Aura's Fleet MCP Gateway**: read tools run on demand,
 ---
 
 ## Changelog
+
+### 2.17.3
+
+- **Snapshots: the overwrite restore is fenced.** An `overwrite_file()` record stores the sha256 of what it wrote (`replaced_with_sha256`), and its restore writes the old bytes back only while the file still hashes to exactly that (Aura#520). Edited since → `aura_file_changed_since`, untouched; already holding the old bytes → `already: true`, not rewritten; no hash in the record (a direct `POST /aura/v2/snapshot`, or Power Pack < 0.2.5) → `aura_snapshot_unfenced`, because nothing proves what the write would land on.
+- **Snapshots: a per-target `write_seq`.** Every engine write records a sequence taken under the target's lock and kept in a `path-<sha1>.seq` sidecar beside it — `max(previous + 1, now µs)`, so it increases per target whatever the clock does. Aura orders a run's rollback by it: nothing it observes does, since it validates the render after the site answers and stamps the action's finish time only then, which can invert two concurrent writes to one file. A sidecar it cannot read or write leaves the record without a sequence rather than inventing one.
+- **Snapshots: designated codes on the file-restore path.** `aura_file_changed_since`, `aura_snapshot_unfenced`, `aura_snapshot_voided`, `aura_path_locked` — each a 409 refusal rather than a 500 execution failure. Restoring a created file that is already gone answers `already: true`. A file restore still opens no door-log entry (now pinned by a test).
 
 ### 2.17.2
 
