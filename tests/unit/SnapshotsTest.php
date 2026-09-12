@@ -2750,6 +2750,13 @@ final class SnapshotsTest extends TestCase {
 		$out = $snaps->restore( $rec['id'] );
 
 		$this->assertFalse( $out['success'] );
+		// The damaged entry is OURS (this host has no link()), so a racer
+		// taking the path during our own failed cleanup is still OUR OWN
+		// failure to publish, not a changed-since refusal — no `code`, a 500
+		// (Codex #101 round-4 P2 fix: the widened publish-failure check is
+		// gated on link_available(), so it never reads OUR OWN debris as a
+		// racer's edit on this host).
+		$this->assertArrayNotHasKey( 'code', $out, 'our own failure is a 500, not a changed-since 409' );
 		$this->assertSame( "<?php // a racer's file\n", file_get_contents( $file ), "the racer's file is never deleted" );
 	}
 
@@ -2815,6 +2822,10 @@ final class SnapshotsTest extends TestCase {
 		$out = $snaps->restore( $rec['id'] );
 
 		$this->assertFalse( $out['success'] );
+		// Nothing about the file changed — this restore simply could not
+		// write (Codex #101 round-5 P1): our own failure is a 500, not a
+		// changed-since 409.
+		$this->assertArrayNotHasKey( 'code', $out, 'our own failure is a 500, not a changed-since 409' );
 		$this->assertArrayHasKey( 'moved_aside', $out );
 		$this->assertFileExists( $out['moved_aside'] );
 		$this->assertSame( "<?php // written\n", file_get_contents( $out['moved_aside'] ), 'the healthy file is the one kept' );

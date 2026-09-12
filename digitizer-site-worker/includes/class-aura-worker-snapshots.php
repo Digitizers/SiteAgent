@@ -2354,15 +2354,27 @@ class Aura_Worker_Snapshots {
 			: $this->publish_restored_by_write( $tmp, $target, false === $claimed_mode ? ( false === $mode ? null : ( $mode & 0777 ) ) : $claimed_mode );
 		if ( true !== $published ) {
 			$this->discard_stage( $tmp );
-			// 'exists' OR the path is occupied by anything at all (Codex #101
-			// round-4 P2): publish()'s own 'exists' vs 'unsupported_filesystem'
-			// classification trusts file_exists(), which reads false for a
-			// DANGLING symlink — a racer that took the path with one would
-			// otherwise fall to the "our own failure" branch below and answer
-			// a 500 for what is a designated changed-since refusal.
-			// path_present() is the check this engine already uses everywhere
-			// else for exactly this gap.
-			if ( 'exists' === $published || self::path_present( $target ) ) {
+			// 'exists' OR (in link mode only) the path is occupied by anything
+			// at all (Codex #101 round-4 P2): publish()'s own 'exists' vs
+			// 'unsupported_filesystem' classification trusts file_exists(),
+			// which reads false for a DANGLING symlink — a racer that took the
+			// path with one would otherwise fall to the "our own failure"
+			// branch below and answer a 500 for what is a designated
+			// changed-since refusal. path_present() is the check this engine
+			// already uses everywhere else for exactly this gap.
+			//
+			// The widened check is gated on link_available() because only the
+			// LINK branch's failure is guaranteed to have created nothing at
+			// the target: link() either lands (no failure reaches here) or
+			// refuses without writing a byte. The link()-less write branch can
+			// fail AFTER claiming the path — a short write, an ACL mode
+			// mismatch, a failed remove_own_entry() — and leave its OWN empty
+			// or partial entry there; without the gate, self::path_present()
+			// would then be true for OUR OWN debris and misreport it as a
+			// racer's edit (409) instead of our own failed write (500),
+			// making put_claim_back()'s "our own failure" shape unreachable on
+			// that branch — the exact thing the rule five lines below forbids.
+			if ( 'exists' === $published || ( $this->link_available() && self::path_present( $target ) ) ) {
 				// Something took the path while we held the file: never clobber it.
 				return $this->changed_since( 'another file took the path while the restore was in flight', array( 'moved_aside' => $claim ) );
 			}
@@ -2596,20 +2608,29 @@ class Aura_Worker_Snapshots {
 	 * @return array As restore_created_file().
 	 */
 	private function restore_created_file_locked( array $record, $target ) {
-		if ( ! empty( $record['voided'] ) ) {
-			// Retired because its write never landed (Codex #101 round-7 P2): a
-			// designated refusal, checked BEFORE the already-gone shortcut below
-			// — that shortcut used to run first, so a retired record whose
-			// target had since been removed reported a cheerful success and a
-			// rollback counted it as undone.
+		// A record voided because its write never landed (Codex #101 round-7
+		// P2) is unset of `expected_sha256` by void_record_in_place() — so
+		// "carries no expected hash" already IDENTIFIES a voided record, and
+		// is checked here BEFORE the already-gone shortcut below. That
+		// ordering is the fix: the shortcut used to run first, so a retired
+		// record whose target had since been removed reported a cheerful
+		// success and a rollback counted it as undone. Gating on a `voided`
+		// flag instead (rather than on the hash itself) would leave a record
+		// with no `expected_sha256` that is NOT flagged `voided` — the same
+		// dangerous shape — free to fall through to the shortcut and answer
+		// the same cheerful success this check exists to close off. The
+		// wording is UNCHANGED from the pre-existing refusal below; only the
+		// code is added.
+		$expected = isset( $record['expected_sha256'] ) ? (string) $record['expected_sha256'] : '';
+		if ( '' === $expected ) {
 			return array(
 				'success' => false,
 				'code'    => 'aura_snapshot_voided',
-				'error'   => 'The rollback record for this write was retired because the write did not land.',
+				'error'   => 'Snapshot record carries no expected hash.', // unchanged wording; only the code is added
 			);
 		}
 		if ( ! self::path_present( $target ) ) {
-			return array( 'success' => true ); // already gone
+			return array( 'success' => true, 'already' => true ); // already gone
 		}
 		// is_file() follows a symlink, so a DANGLING one reads as absent to
 		// file_exists() and as "not a file" here — it is a directory entry that
@@ -2617,10 +2638,6 @@ class Aura_Worker_Snapshots {
 		// (Codex #94 round-2 P2). It is reported, never deleted.
 		if ( ! is_file( $target ) ) {
 			return array( 'success' => false, 'error' => 'Target is not a regular file: ' . $target );
-		}
-		$expected = isset( $record['expected_sha256'] ) ? (string) $record['expected_sha256'] : '';
-		if ( '' === $expected ) {
-			return array( 'success' => false, 'error' => 'Snapshot record carries no expected hash.' );
 		}
 
 		if ( ! $this->link_available() ) {
