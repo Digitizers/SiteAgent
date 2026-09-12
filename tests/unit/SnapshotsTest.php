@@ -69,6 +69,37 @@ final class SnapshotsTest extends TestCase {
 		$this->assertStringContainsString( 'not found', $result['error'] );
 	}
 
+	public function test_snapshot_file_extra_cannot_override_the_records_identity(): void {
+		// Item 3 (final review): $extra is merged into the persisted record,
+		// so a caller could otherwise overwrite 'kind', 'target', 'bytes' or
+		// 'existed' — and an 'existed' => false would make a future restore()
+		// dispatch to restore_created_file(), which DELETES the file. The
+		// reserved identity keys must win; every other key in $extra (e.g.
+		// write_seq) must still land.
+		$snaps = new Aura_Worker_Snapshots();
+		$file  = WP_CONTENT_DIR . '/identity.php';
+		file_put_contents( $file, "<?php // original\n" );
+
+		$snap = $snaps->snapshot_file(
+			$file,
+			array(
+				'existed'   => false,
+				'kind'      => 'page',
+				'target'    => '/not/the/real/path.php',
+				'bytes'     => 999999,
+				'write_seq' => 7,
+			)
+		);
+
+		$this->assertTrue( $snap['success'] );
+		$rec = $snaps->get( $snap['snapshot']['id'] );
+		$this->assertSame( 'file', $rec['kind'], 'kind cannot be overridden' );
+		$this->assertSame( $file, $rec['target'], 'target cannot be overridden' );
+		$this->assertSame( strlen( "<?php // original\n" ), $rec['bytes'], 'bytes cannot be overridden' );
+		$this->assertArrayNotHasKey( 'existed', $rec, 'existed is dropped, never set to the caller\'s value' );
+		$this->assertSame( 7, $rec['write_seq'], 'a non-reserved key in $extra still lands' );
+	}
+
 	public function test_option_snapshot_and_restore_roundtrip(): void {
 		update_option( 'my_setting', array( 'mode' => 'safe', 'n' => 1 ) );
 		$snaps = new Aura_Worker_Snapshots();
@@ -2657,6 +2688,48 @@ final class SnapshotsTest extends TestCase {
 		$this->assertArrayNotHasKey( 'write_seq', $snaps->get( $out['snapshot']['id'] ), 'no sequence is invented' );
 	}
 
+	public function test_a_sequence_sidecar_above_php_int_max_leaves_the_record_without_write_seq(): void {
+		// Codex #101 round-1 P2: a decimal value above PHP_INT_MAX saturates on
+		// the cast, `$prev + 1` becomes a float, and the sidecar would be
+		// rewritten in exponent notation. The range check refuses it as an
+		// unreadable order rather than inventing one — the write itself still
+		// succeeds.
+		$snaps = new Aura_Worker_Snapshots();
+		$file  = WP_CONTENT_DIR . '/toobig.php';
+		file_put_contents( $file, "<?php // v0\n" );
+		$sidecar = WP_CONTENT_DIR . '/aura-backups/snapshots/path-' . sha1( $file ) . '.seq';
+		file_put_contents( $sidecar, str_repeat( '9', 25 ) ); // far above PHP_INT_MAX
+
+		$out = $snaps->overwrite_file( $file, "<?php // v1\n" );
+
+		$this->assertTrue( $out['success'], 'the write still lands' );
+		$this->assertArrayNotHasKey( 'write_seq', $snaps->get( $out['snapshot']['id'] ), 'no order is invented for a value that cannot be incremented as an int' );
+	}
+
+	public function test_a_sequence_sidecar_that_cannot_be_written_leaves_the_record_without_write_seq(): void {
+		// The sidecar's OWN write can fail (stage() answering an array, or its
+		// rename() failing) without touching the content write at all — the
+		// write still succeeds, it simply records no order.
+		$file = WP_CONTENT_DIR . '/seq-write-fails.php';
+		file_put_contents( $file, "<?php // v0\n" );
+		$snaps = new class extends Aura_Worker_Snapshots {
+			protected function stage( $dir, $name, $content, $mode = null ) {
+				// Fail ONLY the sidecar's own stage() call — a '.seq' name —
+				// and delegate to the real implementation for the content's,
+				// or this test would prove nothing about the sidecar seam.
+				if ( '.seq' === substr( $name, -4 ) ) {
+					return array( 'success' => false, 'error' => 'forced sidecar stage failure' );
+				}
+				return parent::stage( $dir, $name, $content, $mode );
+			}
+		};
+
+		$out = $snaps->overwrite_file( $file, "<?php // v1\n" );
+
+		$this->assertTrue( $out['success'], 'the write still lands' );
+		$this->assertArrayNotHasKey( 'write_seq', $snaps->get( $out['snapshot']['id'] ), 'no order is invented when the sidecar itself cannot be written' );
+	}
+
 	public function test_a_stale_sequence_stage_is_swept_from_the_snapshots_directory(): void {
 		// Codex #101 round-3 P2: a crash between stage() and rename() left a
 		// `.aura-create-*` in the snapshots directory that nothing swept.
@@ -2913,6 +2986,39 @@ final class SnapshotsTest extends TestCase {
 		$this->assertArrayHasKey( 'moved_aside', $out );
 		$this->assertFileExists( $out['moved_aside'] );
 		$this->assertSame( "<?php // written\n", file_get_contents( $out['moved_aside'] ), 'the healthy file is the one kept' );
+	}
+
+	public function test_a_chmod_refused_on_the_claimed_mode_is_our_own_failure_not_changed_since(): void {
+		// Item 1 (final review): chmod() refusing to set the CLAIMED file's own
+		// mode onto its replacement is OUR OWN failure — nothing about the
+		// target changed — so put_claim_back() must be called with
+		// $refusal = false. Before the fix the defaulted call routed this
+		// through changed_since(), answering a designated 409 for what is our
+		// own execution failure (a 500).
+		$file  = WP_CONTENT_DIR . '/mode-refused.php';
+		file_put_contents( $file, "<?php // original\n" );
+		$plain = new Aura_Worker_Snapshots();
+		$rec   = $plain->overwrite_file( $file, "<?php // written\n" )['snapshot'];
+
+		$snaps = new class extends Aura_Worker_Snapshots {
+			public $calls = 0;
+			protected function secure_stage( $tmp, $mode = null ) {
+				// Let the content stage — the FIRST secure_stage() call inside
+				// publish_restored_bytes() — succeed; fail only the SECOND
+				// call, which re-stages the mode read from the claimed file.
+				if ( 0 === $this->calls++ ) {
+					return parent::secure_stage( $tmp, $mode );
+				}
+				return false;
+			}
+		};
+
+		$out = $snaps->restore( $rec['id'] );
+
+		$this->assertFalse( $out['success'] );
+		$this->assertArrayNotHasKey( 'code', $out, 'our own chmod failure is a 500, not a changed-since 409' );
+		$this->assertSame( "<?php // written\n", file_get_contents( $file ), 'the file is put back with the bytes it held under the claim' );
+		$this->assertSame( array(), glob( WP_CONTENT_DIR . '/.aura-restore-*' ), 'no claim file left behind' );
 	}
 
 	public function test_a_chmod_that_lands_after_the_claim_is_the_mode_that_is_restored(): void {

@@ -162,6 +162,10 @@ class Aura_Worker_Snapshots {
 	 * @param string $path  Absolute path to the file.
 	 * @param array  $extra Extra meta keys merged into the record before it is
 	 *                      persisted (e.g. `write_seq` from an engine writer).
+	 *                      The record's identity keys (`kind`, `target`,
+	 *                      `bytes`, `existed`) are reserved: any of the same
+	 *                      name in $extra is ignored, never overriding what
+	 *                      this method establishes.
 	 * @return array { success: bool, snapshot?: array, error?: string }
 	 */
 	public function snapshot_file( $path, array $extra = array() ) {
@@ -174,14 +178,20 @@ class Aura_Worker_Snapshots {
 			return array( 'success' => false, 'error' => 'Unable to read file: ' . $path );
 		}
 
+		// The identity keys win: a caller-supplied 'kind', 'target', 'bytes'
+		// or 'existed' in $extra must never override what this method
+		// establishes — an 'existed' => false, for instance, would make a
+		// future restore() dispatch to restore_created_file(), which DELETES
+		// the file. This method never sets 'existed' itself, so the reserved
+		// key is simply dropped from $extra rather than given a value here.
 		$record = $this->persist(
 			array_merge(
+				array_diff_key( $extra, array_flip( array( 'kind', 'target', 'bytes', 'existed' ) ) ),
 				array(
 					'kind'   => 'file',
 					'target' => $path,
 					'bytes'  => strlen( $contents ),
-				),
-				$extra
+				)
 			),
 			$contents
 		);
@@ -1051,7 +1061,7 @@ class Aura_Worker_Snapshots {
 		$sidecar = $this->dir . 'path-' . sha1( (string) $path ) . '.seq';
 		$prev    = 0;
 		if ( file_exists( $sidecar ) ) {
-			$raw = @file_get_contents( $sidecar ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_file_get_contents -- A sidecar this class owns; an unreadable one is an answer (null), not a warning.
+			$raw = @file_get_contents( $sidecar ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- A sidecar this class owns; an unreadable one is an answer (null), not a warning.
 			if ( ! is_string( $raw ) || 1 !== preg_match( '/^[0-9]+$/', trim( $raw ) ) ) {
 				return null; // present but unreadable: never invent an order
 			}
@@ -2341,7 +2351,7 @@ class Aura_Worker_Snapshots {
 			}
 			if ( ! $this->secure_stage( $tmp, $claimed_mode ) ) {
 				$this->discard_stage( $tmp );
-				return $this->put_claim_back( $claim, $target, 'the mode the file now has could not be set on the replacement' );
+				return $this->put_claim_back( $claim, $target, 'the mode the file now has could not be set on the replacement', false );
 			}
 		}
 
