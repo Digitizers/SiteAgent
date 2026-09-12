@@ -2547,10 +2547,18 @@ class Aura_Worker_Snapshots {
 			// path holds neither the old file nor cleanly the restored one, so
 			// putting the claim back would clobber that writer's edits. Keep
 			// the claim, say where it is, and refuse.
+			// AND IT IS NOT A DESIGNATED REFUSAL (Codex #102 round-16 P1). A
+			// `code` means the SITE refused and NOTHING was written — the rule
+			// this whole path is built on. Here the restore DID write: the
+			// bytes went into the target before the racer's edit was detected,
+			// and the path may now hold a mixture. Answering 409 would tell
+			// Aura nothing was written when something was. No code, so 500.
 			$this->discard_stage( $tmp );
-			return $this->changed_since(
-				'another writer changed the file while the restore was writing it; the file it replaced is kept aside',
-				array( 'moved_aside' => $claim )
+			return array(
+				'success'     => false,
+				'error'       => 'Failed to write file: ' . $target . ' (another writer changed it while the restore was writing)',
+				'detail'      => 'the restore wrote to the file and a concurrent writer changed it inside the same window; the file it replaced is kept aside',
+				'moved_aside' => $claim,
 			);
 		}
 		if ( true !== $published ) {
@@ -2588,6 +2596,33 @@ class Aura_Worker_Snapshots {
 			$out           = $this->put_claim_back( $claim, $target, 'the old bytes could not be published', false );
 			$out['error']  = 'Failed to write file: ' . $target . ' (' . (string) $published . ')';
 			return $out;
+		}
+		// A PUBLISH THAT LANDED IS NOT A PUBLISH THAT SURVIVED (Codex #102
+		// round-16 P1). With link() the stage is a SECOND NAME for the
+		// published inode, so a racer replacing the target between the publish
+		// and this discard leaves that name holding the restored bytes — and
+		// dropping it while answering success would report a restore whose
+		// result is not at the path. The link()-less branch already proves this
+		// for itself before it returns true, so only this one needs the check.
+		//
+		// The answer carries NO code: the restore wrote, so it is our own
+		// execution failure, not the site refusing with nothing written.
+		if ( $this->link_available() ) {
+			clearstatcache( true, $tmp );
+			clearstatcache( true, $target );
+			$staged = @stat( $tmp ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Gone is an answer.
+			$landed = @stat( $target ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Gone is an answer.
+			if ( ! is_array( $staged ) || ! is_array( $landed ) || $landed['ino'] !== $staged['ino'] || $landed['dev'] !== $staged['dev'] ) {
+				// The stage is left for the sweeper rather than discarded: it is
+				// the restored bytes' remaining name, and those bytes are the
+				// snapshot's payload, which is still held either way.
+				return array(
+					'success'     => false,
+					'error'       => 'Failed to write file: ' . $target . ' (another writer replaced it immediately after the restore landed)',
+					'detail'      => 'the restore landed and was replaced before it could be confirmed; the file it replaced is kept aside',
+					'moved_aside' => $claim,
+				);
+			}
 		}
 		$this->discard_stage( $tmp ); // in link mode the stage is a second name of the published inode
 

@@ -3156,7 +3156,10 @@ final class SnapshotsTest extends TestCase {
 		$out          = $snaps->restore( $rec['id'] );
 
 		$this->assertFalse( $out['success'] );
-		$this->assertSame( 'aura_file_changed_since', $out['code'] );
+		// NOT a designated refusal: the restore DID write before the racer's
+		// edit was detected, and a `code` means the site refused with nothing
+		// written (Codex #102 round-16 P1).
+		$this->assertArrayNotHasKey( 'code', $out, 'we wrote, so this is our own failure — a 500, not a 409' );
 		$this->assertArrayHasKey( 'moved_aside', $out, 'the claim is kept, not deleted' );
 		$this->assertFileExists( $out['moved_aside'] );
 		$this->assertSame( "<?php // written\n", file_get_contents( $out['moved_aside'] ), 'the pre-restore file survives' );
@@ -3258,6 +3261,40 @@ final class SnapshotsTest extends TestCase {
 		$this->assertMatchesRegularExpression( '/\/\.aura-restore-[0-9a-f]{16}$/', $out['stranded'] );
 		$this->assertSame( "#!/bin/sh\necho theirs\n", file_get_contents( $out['stranded'] ), 'their bytes, intact' );
 		$this->assertNotSame( $out['stranded'], isset( $out['moved_aside'] ) ? $out['moved_aside'] : null, 'distinct from our own claim' );
+	}
+
+	public function test_a_racer_replacing_the_target_right_after_a_linked_publish_is_not_a_success(): void {
+		// Codex #102 round-16 P1. With link() the stage is a SECOND NAME for the
+		// published inode, so a racer replacing the target between the publish
+		// and the stage's discard leaves that name holding the restored bytes —
+		// and answering success would report a restore whose result is not at
+		// the path at all.
+		$file = WP_CONTENT_DIR . '/relinked-publish.php';
+		file_put_contents( $file, "<?php // original\n" );
+		$plain = new Aura_Worker_Snapshots();
+		$rec   = $plain->overwrite_file( $file, "<?php // written\n" )['snapshot'];
+
+		$snaps = new class extends Aura_Worker_Snapshots {
+			public $armed = '';
+			protected function publish( $tmp, $path ) {
+				$out = parent::publish( $tmp, $path );
+				if ( true === $out && '' !== $this->armed ) {
+					unlink( $path );                              // a racer replaces it
+					file_put_contents( $path, "newcomer\n" );     // right after our publish
+					$this->armed = '';
+				}
+				return $out;
+			}
+		};
+		$snaps->armed = $file;
+
+		$out = $snaps->restore( $rec['id'] );
+
+		$this->assertFalse( $out['success'], 'the restore is not at the path, so it did not succeed' );
+		$this->assertArrayNotHasKey( 'code', $out, 'we wrote, so this is our own failure — a 500, not a 409' );
+		$this->assertArrayHasKey( 'moved_aside', $out, 'the file it replaced is kept and named' );
+		$this->assertSame( "<?php // written\n", file_get_contents( $out['moved_aside'] ) );
+		$this->assertSame( "newcomer\n", file_get_contents( $file ), "the racer's file is untouched" );
 	}
 
 	public function test_a_special_node_is_kept_aside_and_never_copied_or_renamed(): void {
