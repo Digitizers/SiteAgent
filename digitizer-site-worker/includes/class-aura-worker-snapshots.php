@@ -2774,9 +2774,12 @@ class Aura_Worker_Snapshots {
 	 *   primitive put_claim_back() uses — and on a host WITHOUT link(), by the
 	 *   exclusive-create copy put_claim_back() falls back to. It never reaches
 	 *   the rename on either kind of host.
-	 * - a FIFO, socket or device node is never copied: fopen() on a FIFO
-	 *   blocks until the other end is opened, and there is nothing to copy out
-	 *   of such an entry anyway. It takes the rename, like a directory.
+	 * - a FIFO is never copied — fopen() on one blocks until the other end is
+	 *   opened, and there is nothing to copy out of it anyway — but it IS
+	 *   recreated, with posix_mkfifo(), which refuses an existing path. A FIFO
+	 *   is a node rather than content, so recreating it is exact.
+	 * - a SOCKET or DEVICE NODE has no primitive at all and is kept aside,
+	 *   named. Stranding one costs little, unlike a directory.
 	 * - a DIRECTORY has no such primitive in PHP, and rename() stays. The
 	 *   exposure there is narrower than it looks: rename() of a directory
 	 *   FAILS onto a regular file and onto a non-empty directory, so the only
@@ -2834,11 +2837,28 @@ class Aura_Worker_Snapshots {
 			// entry in any case, so it falls through to the rename below, which
 			// moves any shape in one call.
 			if ( ! is_file( $aside ) ) {
-				$this->before_non_file_put_back( $aside, $target );
-				if ( self::path_present( $target ) ) {
-					return false;
+				// A FIFO, socket or device node. Measured rather than assumed:
+				// rename( FIFO, existing file ) REPLACES the file, while
+				// posix_mkfifo() onto an existing path refuses. So a FIFO has a
+				// no-clobber primitive after all and takes it; nothing else
+				// does, and those are kept aside rather than renamed over a
+				// writer who took the path (Codex #102 round-10 P1).
+				//
+				// A FIFO is a NODE, not content — recreating it at the path is
+				// exact, not an approximation — and the cost of keeping a
+				// socket or device node aside is small, unlike a directory,
+				// which is why the balance lands differently here.
+				$type = @filetype( $aside ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- An unreadable type is answered below.
+				if ( 'fifo' === $type && function_exists( 'posix_mkfifo' ) ) {
+					$perms = @fileperms( $aside ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- A false takes the create default.
+					$mode  = false === $perms ? $this->create_mode() : ( $perms & 0777 );
+					if ( ! @posix_mkfifo( $target, $mode ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- EEXIST is the refusal this call is chosen FOR.
+						return false; // the path is taken; the node stays aside, named
+					}
+					wp_delete_file( $aside );
+					return true;
 				}
-				return (bool) @rename( $aside, $target ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.rename_rename -- No no-clobber move exists for this shape; a refusal is answered.
+				return false; // no no-clobber primitive exists for it: keep it, named
 			}
 			// fopen( 'xb' ) refuses an occupied path, so the copy can never
 			// replace a writer who took it — the same way put_claim_back()

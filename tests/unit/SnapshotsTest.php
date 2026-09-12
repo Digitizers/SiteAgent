@@ -3299,10 +3299,23 @@ final class SnapshotsTest extends TestCase {
 
 		$this->assertTrue( $snaps->put_back( $fifo, $dir . '/fifo-target' ) );
 		$this->assertFalse( $snaps->copy_attempted, 'a FIFO is never opened for copying' );
-		$this->assertSame( 1, $snaps->seam_fired, 'it takes the rename instead' );
-		$this->assertSame( 'fifo', filetype( $dir . '/fifo-target' ), 'and it is back at its path, still a FIFO' );
+		// It does not take the checked rename either (Codex #102 round-10 P1):
+		// posix_mkfifo() refuses an existing path, so the node is RECREATED
+		// no-clobber. A FIFO is a node rather than content, so that is exact.
+		$this->assertSame( 0, $snaps->seam_fired, 'and never the clobbering rename' );
+		$this->assertSame( 'fifo', filetype( $dir . '/fifo-target' ), 'it is back at its path, still a FIFO' );
+		$this->assertFileDoesNotExist( $fifo, 'and the entry aside is gone' );
 
 		unlink( $dir . '/fifo-target' );
+
+		// An occupied path is refused, never replaced.
+		$fifo2 = $dir . '/.aura-restore-f1f2';
+		$this->assertTrue( posix_mkfifo( $fifo2, 0600 ) );
+		file_put_contents( $dir . '/fifo-taken', "theirs\n" );
+		$this->assertFalse( $snaps->put_back( $fifo2, $dir . '/fifo-taken' ) );
+		$this->assertSame( "theirs\n", file_get_contents( $dir . '/fifo-taken' ), "the other writer's file is untouched" );
+		$this->assertSame( 'fifo', filetype( $fifo2 ), 'the node stays aside, named' );
+		unlink( $fifo2 );
 	}
 
 	public function test_a_symlink_claim_is_kept_when_a_racer_takes_the_path_before_cleanup(): void {
