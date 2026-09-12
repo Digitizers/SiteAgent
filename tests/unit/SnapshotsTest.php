@@ -3335,6 +3335,37 @@ final class SnapshotsTest extends TestCase {
 		$this->assertSame( 'fifo', filetype( $dir . '/fifo-mode' ) );
 		$this->assertSame( 0666, fileperms( $dir . '/fifo-mode' ) & 0777, 'the mode it had, not what the umask allowed' );
 		unlink( $dir . '/fifo-mode' );
+
+		// A racer replacing the node between its creation and its verification
+		// is not ours to chmod, accept, or unlink (Codex #102 round-12 P2).
+		$swapper = new class extends Aura_Worker_Snapshots {
+			public $armed = '';
+			protected function link_available() {
+				return false;
+			}
+			protected function before_node_verify( $target ) {
+				if ( '' !== $this->armed ) {
+					unlink( $target );
+					posix_mkfifo( $target, 0600 ); // THEIR node now holds the path
+					$this->armed = '';
+				}
+			}
+			public function put_back( $aside, $target ) {
+				return $this->put_back_no_clobber( $aside, $target );
+			}
+		};
+		$fifo4 = $dir . '/.aura-restore-f1f4';
+		$this->assertTrue( posix_mkfifo( $fifo4, 0666 ) );
+		chmod( $fifo4, 0666 );
+		$swapper->armed = $dir . '/fifo-swapped';
+
+		$this->assertFalse( $swapper->put_back( $fifo4, $dir . '/fifo-swapped' ) );
+		$this->assertSame( 'fifo', filetype( $fifo4 ), 'our original stays aside, named' );
+		$this->assertSame( 0666, fileperms( $fifo4 ) & 0777 );
+		$this->assertSame( 'fifo', filetype( $dir . '/fifo-swapped' ), "the racer's node is still there" );
+		$this->assertSame( 0600, fileperms( $dir . '/fifo-swapped' ) & 0777, "and was neither chmod'd nor unlinked by us" );
+		unlink( $fifo4 );
+		unlink( $dir . '/fifo-swapped' );
 	}
 
 	public function test_a_symlink_claim_is_kept_when_a_racer_takes_the_path_before_cleanup(): void {

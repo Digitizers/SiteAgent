@@ -2865,13 +2865,27 @@ class Aura_Worker_Snapshots {
 					if ( ! $made ) {
 						return false; // the path is taken; the node stays aside, named
 					}
-					if ( ! $this->node_wears_mode( $target, $mode ) ) {
+					// AND THE NODE WE MADE IS THE ONE WE ACT ON (Codex #102
+					// round-12 P2). Everything below addresses the path by NAME
+					// — a chmod, and an unlink on the failure path — and this
+					// engine's rule is that nothing does that after a claim
+					// except under an inode check. Without one, a racer who
+					// replaced our node with a FIFO of their own would be
+					// chmod'd by us and accepted, the original deleted and
+					// reported restored; or the cleanup would unlink theirs.
+					clearstatcache( true, $target );
+					$mine = @stat( $target ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Already gone is an answer.
+					if ( ! is_array( $mine ) ) {
+						return false; // the original stays aside, named
+					}
+					$this->before_node_verify( $target );
+					if ( ! $this->node_wears_mode( $target, $mode, $mine ) ) {
 						// A default ACL can widen it past the umask. The node we
 						// made is not the node we held, so it goes and the
 						// original stays aside rather than being replaced by a
 						// lesser one — the rule publish_restored_by_write()
 						// follows for the same reason.
-						$this->remove_own_node( $target );
+						$this->remove_own_node( $target, $mine );
 						return false;
 					}
 					wp_delete_file( $aside );
@@ -3210,23 +3224,50 @@ class Aura_Worker_Snapshots {
 	 *
 	 * @param string $path The path.
 	 * @param int    $mode The mode it must wear.
+	 * @param array  $mine stat() of the node this call created.
 	 * @return bool
 	 */
-	private function node_wears_mode( $path, $mode ) {
-		clearstatcache( true, $path );
-		if ( 'fifo' !== @filetype( $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Gone is an answer.
+	private function node_wears_mode( $path, $mode, array $mine ) {
+		$now = $this->same_node( $path, $mine );
+		if ( false === $now ) {
 			return false;
 		}
-		$perms = @fileperms( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Unreadable is an answer.
-		if ( false !== $perms && ( $perms & 0777 ) === ( $mode & 0777 ) ) {
+		if ( ( $now['mode'] & 0777 ) === ( $mode & 0777 ) ) {
 			return true;
 		}
-		if ( ! function_exists( 'chmod' ) || ! @chmod( $path, $mode ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Our own node; a refusal is answered.
+		if ( ! function_exists( 'chmod' ) || ! @chmod( $path, $mode ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Our own node, proved above; a refusal is answered.
 			return false;
 		}
+		$after = $this->same_node( $path, $mine );
+		return false !== $after && ( $after['mode'] & 0777 ) === ( $mode & 0777 );
+	}
+
+	/**
+	 * stat() of $path, but only while it still names the node $mine describes.
+	 * The mode comes back with it, so a caller reads the type and the
+	 * permissions off the same observation that proved the identity rather
+	 * than off a later, separately raceable one.
+	 *
+	 * @param string $path The path.
+	 * @param array  $mine stat() of the node this call created.
+	 * @return array|false
+	 */
+	private function same_node( $path, array $mine ) {
 		clearstatcache( true, $path );
-		$perms = @fileperms( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Unreadable is an answer.
-		return false !== $perms && ( $perms & 0777 ) === ( $mode & 0777 );
+		$now = @stat( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Gone is an answer.
+		if ( ! is_array( $now ) || $now['ino'] !== $mine['ino'] || $now['dev'] !== $mine['dev'] ) {
+			return false;
+		}
+		return $now;
+	}
+
+	/**
+	 * Seam between creating a node and verifying it. Nothing in production; a
+	 * test models a racer replacing the path here.
+	 *
+	 * @param string $target The path.
+	 */
+	protected function before_node_verify( $target ) {
 	}
 
 	/**
@@ -3237,9 +3278,8 @@ class Aura_Worker_Snapshots {
 	 *
 	 * @param string $path The path.
 	 */
-	private function remove_own_node( $path ) {
-		clearstatcache( true, $path );
-		if ( 'fifo' === @filetype( $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Gone is an answer.
+	private function remove_own_node( $path, array $mine ) {
+		if ( false !== $this->same_node( $path, $mine ) ) {
 			wp_delete_file( $path );
 		}
 	}
