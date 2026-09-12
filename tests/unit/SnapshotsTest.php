@@ -3301,13 +3301,49 @@ final class SnapshotsTest extends TestCase {
 			}
 		};
 
-		$this->assertFalse( $snaps->put_back( $fifo, $dir . '/fifo-target' ), 'it is kept aside for the caller to name' );
+		$this->assertSame( Aura_Worker_Snapshots::CLAIM_KEPT, $snaps->put_back( $fifo, $dir . '/fifo-target' ), 'it is kept aside for the caller to name' );
 		$this->assertFalse( $snaps->copy_attempted, 'never opened for copying' );
 		$this->assertSame( 0, $snaps->seam_fired, 'and never offered to the clobbering rename' );
 		$this->assertSame( 'fifo', filetype( $fifo ), 'the node is still aside, intact' );
 		$this->assertFileDoesNotExist( $dir . '/fifo-target', 'and nothing was put at the path' );
 
 		unlink( $fifo );
+	}
+
+	public function test_a_symlink_lost_to_a_racer_after_the_delete_is_reported_not_called_clean(): void {
+		// Codex #102 round-15 P2: the symlink branch carried rounds 5 and 6's
+		// first half — do not delete while the path stopped being ours — but not
+		// the second: SAY SO when the race is lost anyway. PHP cannot fuse the
+		// check and the unlink, so a racer landing between them leaves the name
+		// just removed as the entry's last. That cannot be prevented; answering
+		// a clean put-back for it can.
+		$dir   = WP_CONTENT_DIR;
+		$snaps = new class extends Aura_Worker_Snapshots {
+			public $armed = '';
+			protected function before_claim_drop( $claim, $target ) {
+				// Fires BEFORE the delete; the racer lands after our check.
+				if ( '' !== $this->armed ) {
+					unlink( $target );
+					file_put_contents( $target, "newcomer\n" );
+					$this->armed = '';
+				}
+			}
+			public function put_back( $aside, $target ) {
+				return $this->put_back_no_clobber( $aside, $target );
+			}
+		};
+
+		file_put_contents( $dir . '/lost-dest.txt', "dest\n" );
+		symlink( $dir . '/lost-dest.txt', $dir . '/.aura-restore-los1' );
+		$snaps->armed = $dir . '/lost-link.txt';
+
+		$out = $snaps->put_back( $dir . '/.aura-restore-los1', $dir . '/lost-link.txt' );
+
+		$this->assertSame( Aura_Worker_Snapshots::CLAIM_KEPT, $out, 'the check catches this one and keeps the name' );
+		$this->assertTrue( is_link( $dir . '/.aura-restore-los1' ), 'the link is still held' );
+		$this->assertSame( "newcomer\n", file_get_contents( $dir . '/lost-link.txt' ), "the racer's file is untouched" );
+		unlink( $dir . '/.aura-restore-los1' );
+		unlink( $dir . '/lost-link.txt' );
 	}
 
 	public function test_a_symlink_claim_is_kept_when_a_racer_takes_the_path_before_cleanup(): void {
@@ -3335,7 +3371,7 @@ final class SnapshotsTest extends TestCase {
 		symlink( $dir . '/sl-dest.txt', $dir . '/.aura-restore-9999' );
 		$snaps->armed = $dir . '/sl-target.txt';
 
-		$this->assertFalse( $snaps->put_back( $dir . '/.aura-restore-9999', $dir . '/sl-target.txt' ) );
+		$this->assertSame( Aura_Worker_Snapshots::CLAIM_KEPT, $snaps->put_back( $dir . '/.aura-restore-9999', $dir . '/sl-target.txt' ) );
 		$this->assertTrue( is_link( $dir . '/.aura-restore-9999' ), 'the claim stays aside for the caller to name' );
 		$this->assertSame( $dir . '/sl-dest.txt', readlink( $dir . '/.aura-restore-9999' ) );
 		$this->assertSame( "newcomer\n", file_get_contents( $dir . '/sl-target.txt' ), "the other writer's entry is untouched" );
@@ -3423,7 +3459,7 @@ final class SnapshotsTest extends TestCase {
 		// (a) a symlink: recreated with symlink(), no checked rename.
 		file_put_contents( $dir . '/pb-dest.txt', "dest\n" );
 		symlink( $dir . '/pb-dest.txt', $dir . '/.aura-restore-aaaa' );
-		$this->assertTrue( $snaps->put_back( $dir . '/.aura-restore-aaaa', $dir . '/pb-link.txt' ) );
+		$this->assertSame( Aura_Worker_Snapshots::CLAIM_DROPPED, $snaps->put_back( $dir . '/.aura-restore-aaaa', $dir . '/pb-link.txt' ) );
 		$this->assertTrue( is_link( $dir . '/pb-link.txt' ), 'back as a link, not as a copy' );
 		$this->assertSame( $dir . '/pb-dest.txt', readlink( $dir . '/pb-link.txt' ), 'pointing where it pointed' );
 		$this->assertFileDoesNotExist( $dir . '/.aura-restore-aaaa' );
@@ -3431,7 +3467,7 @@ final class SnapshotsTest extends TestCase {
 
 		// (b) a regular file: linked back, no checked rename.
 		file_put_contents( $dir . '/.aura-restore-bbbb', "mine\n" );
-		$this->assertTrue( $snaps->put_back( $dir . '/.aura-restore-bbbb', $dir . '/pb-file.txt' ) );
+		$this->assertSame( Aura_Worker_Snapshots::CLAIM_DROPPED, $snaps->put_back( $dir . '/.aura-restore-bbbb', $dir . '/pb-file.txt' ) );
 		$this->assertSame( "mine\n", file_get_contents( $dir . '/pb-file.txt' ) );
 		$this->assertSame( 0, $snaps->seam_fired, 'a regular file never reaches the checked rename either' );
 
@@ -3451,7 +3487,7 @@ final class SnapshotsTest extends TestCase {
 			}
 		};
 		file_put_contents( $dir . '/.aura-restore-eeee', "nolink\n" );
-		$this->assertTrue( $nolink->put_back( $dir . '/.aura-restore-eeee', $dir . '/pb-nolink.txt' ) );
+		$this->assertSame( Aura_Worker_Snapshots::CLAIM_DROPPED, $nolink->put_back( $dir . '/.aura-restore-eeee', $dir . '/pb-nolink.txt' ) );
 		$this->assertSame( "nolink\n", file_get_contents( $dir . '/pb-nolink.txt' ) );
 		$this->assertFileDoesNotExist( $dir . '/.aura-restore-eeee' );
 		$this->assertSame( 0, $nolink->seam_fired, 'a link-less host copies it back; it never reaches the rename' );
@@ -3459,7 +3495,7 @@ final class SnapshotsTest extends TestCase {
 		// ...and an occupied path is refused there too, never replaced.
 		file_put_contents( $dir . '/pb-nolink-taken.txt', "theirs\n" );
 		file_put_contents( $dir . '/.aura-restore-ffff', "mine\n" );
-		$this->assertFalse( $nolink->put_back( $dir . '/.aura-restore-ffff', $dir . '/pb-nolink-taken.txt' ) );
+		$this->assertSame( Aura_Worker_Snapshots::CLAIM_KEPT, $nolink->put_back( $dir . '/.aura-restore-ffff', $dir . '/pb-nolink-taken.txt' ) );
 		$this->assertSame( "theirs\n", file_get_contents( $dir . '/pb-nolink-taken.txt' ), "the other writer's file is untouched" );
 		$this->assertSame( "mine\n", file_get_contents( $dir . '/.aura-restore-ffff' ), 'the entry stays aside, named' );
 		$this->assertSame( 0, $nolink->seam_fired );
@@ -3467,7 +3503,7 @@ final class SnapshotsTest extends TestCase {
 		// (d) an occupied path is REFUSED, not replaced — the entry stays aside.
 		file_put_contents( $dir . '/pb-taken.txt', "theirs\n" );
 		symlink( $dir . '/pb-dest.txt', $dir . '/.aura-restore-cccc' );
-		$this->assertFalse( $snaps->put_back( $dir . '/.aura-restore-cccc', $dir . '/pb-taken.txt' ) );
+		$this->assertSame( Aura_Worker_Snapshots::CLAIM_KEPT, $snaps->put_back( $dir . '/.aura-restore-cccc', $dir . '/pb-taken.txt' ) );
 		$this->assertSame( "theirs\n", file_get_contents( $dir . '/pb-taken.txt' ), "the other writer's file is untouched" );
 		$this->assertTrue( is_link( $dir . '/.aura-restore-cccc' ), 'the link stays aside, named' );
 	}
@@ -3496,7 +3532,7 @@ final class SnapshotsTest extends TestCase {
 		file_put_contents( $dir . '/.aura-restore-dddd/inside.txt', "x\n" );
 		$snaps->racer = $dir . '/pb-dir';
 
-		$this->assertFalse( $snaps->put_back( $dir . '/.aura-restore-dddd', $dir . '/pb-dir' ) );
+		$this->assertSame( Aura_Worker_Snapshots::CLAIM_KEPT, $snaps->put_back( $dir . '/.aura-restore-dddd', $dir . '/pb-dir' ) );
 		$this->assertSame( "theirs\n", file_get_contents( $dir . '/pb-dir' ), "the racer's file is not replaced" );
 		$this->assertFileExists( $dir . '/.aura-restore-dddd/inside.txt', 'the directory stays aside, whole' );
 	}

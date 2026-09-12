@@ -2491,9 +2491,14 @@ class Aura_Worker_Snapshots {
 			// second writer who took the path after our claim would be
 			// destroyed by an unconditional put-back. When the path is taken,
 			// the entry stays under its claim name and the answer says where.
-			return $this->put_back_no_clobber( $claim, $target )
-				? $this->changed_since( 'something that is not a regular file took the path while the restore was being prepared' )
-				: $this->changed_since( 'something that is not a regular file took the path and could not be put back', array( 'moved_aside' => $claim ) );
+			$put_back = $this->put_back_no_clobber( $claim, $target );
+			if ( self::CLAIM_DROPPED === $put_back ) {
+				return $this->changed_since( 'something that is not a regular file took the path while the restore was being prepared' );
+			}
+			if ( self::CLAIM_LOST === $put_back ) {
+				return $this->changed_since( 'something that is not a regular file took the path, and a concurrent writer replaced it again before the name holding it could be released' );
+			}
+			return $this->changed_since( 'something that is not a regular file took the path and could not be put back', array( 'moved_aside' => $claim ) );
 		}
 
 		// THE authoritative check: the file we hold, not the name we read.
@@ -2719,7 +2724,7 @@ class Aura_Worker_Snapshots {
 			// `.aura-restore-*` name, which this engine never sweeps, rather
 			// than clobbering a file that is not ours. Either way this is "not
 			// cleared", and the caller keeps its own claim aside and says so.
-			if ( ! $this->put_back_no_clobber( $aside, $target ) ) {
+			if ( self::CLAIM_KEPT === $this->put_back_no_clobber( $aside, $target ) ) {
 				// IT COULD NOT GO BACK, SO SAY WHERE IT IS (Codex #102 round-9
 				// P1). A writer's EXECUTABLE file taken on a link-less host is
 				// the reachable case: the copy cannot recreate execute bits, so
@@ -2783,13 +2788,17 @@ class Aura_Worker_Snapshots {
 	 *
 	 * @param string $aside  The entry held aside.
 	 * @param string $target Where it belongs.
-	 * @return bool True when the path holds it again.
+	 * @return string One of CLAIM_DROPPED (back at its path, the held name
+	 *                released), CLAIM_KEPT (not put back; it is still under
+	 *                $aside for the caller to name) or CLAIM_LOST (put back,
+	 *                then replaced by a racer before the held name could be
+	 *                released — there is nothing left to name).
 	 */
 	protected function put_back_no_clobber( $aside, $target ) {
 		if ( is_link( $aside ) ) {
 			$dest = @readlink( $aside ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- An unreadable link is answered false below.
 			if ( ! is_string( $dest ) || ! @symlink( $dest, $target ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- EEXIST is the refusal this call is chosen FOR.
-				return false;
+				return self::CLAIM_KEPT;
 			}
 			// THE ENTRY ASIDE IS ONLY REDUNDANT WHILE THE PATH HOLDS WHAT WE
 			// PUT THERE (Codex #102 round-7 P2 — the rule the hard-link branch
@@ -2806,10 +2815,19 @@ class Aura_Worker_Snapshots {
 			$this->before_claim_drop( $aside, $target );
 			clearstatcache( true, $target );
 			if ( ! is_link( $target ) || @readlink( $target ) !== $dest ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- An unreadable link is not ours; the entry stays aside.
-				return false; // the claim stays, and the caller names it
+				return self::CLAIM_KEPT; // the claim stays, and the caller names it
 			}
 			wp_delete_file( $aside ); // the link is back at its path; its held name goes
-			return true;
+			// AND THE LOSS IS REPORTED, NOT SWALLOWED (Codex #102 round-15 P2 —
+			// the half of rounds 5 and 6 this branch still had not carried). PHP
+			// cannot fuse the check and the unlink, so a racer landing between
+			// them leaves the name just removed as the entry's last. That cannot
+			// be prevented; answering a clean put-back for it can.
+			clearstatcache( true, $target );
+			if ( ! is_link( $target ) || @readlink( $target ) !== $dest ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Gone is an answer.
+				return self::CLAIM_LOST;
+			}
+			return self::CLAIM_DROPPED;
 		}
 		if ( ! is_dir( $aside ) ) {
 			// A REGULAR FILE NEVER REACHES THE RENAME (Codex #102 round-4 P1).
@@ -2818,7 +2836,7 @@ class Aura_Worker_Snapshots {
 			// exactly the shape that has a second no-clobber primitive. Both
 			// are tried, and the entry stays aside if neither lands.
 			if ( $this->link_available() && $this->link_into_place( $aside, $target ) ) {
-				return self::CLAIM_DROPPED === $this->drop_linked_claim( $aside, $target );
+				return $this->drop_linked_claim( $aside, $target );
 			}
 			// ONLY A REGULAR FILE IS COPIED (Codex #102 round-8 P2). A FIFO,
 			// socket or device node can be claimed too — an external writer can
@@ -2853,7 +2871,7 @@ class Aura_Worker_Snapshots {
 				// can displace a whole plugin or uploads folder, a socket or
 				// FIFO is recreated by whatever owns it, and one sitting at a
 				// WordPress file path mid-restore is pathological already.
-				return false;
+				return self::CLAIM_KEPT;
 			}
 			// fopen( 'xb' ) refuses an occupied path, so the copy can never
 			// replace a writer who took it — the same way put_claim_back()
@@ -2862,25 +2880,33 @@ class Aura_Worker_Snapshots {
 			// stays aside rather than going back lesser: the residual the plan
 			// documents for a link-less host.
 			if ( true !== $this->put_back_by_write( $aside, $target ) ) {
-				return false;
+				return self::CLAIM_KEPT;
 			}
 			// The copy's source can still be being written by whoever held it.
 			// Only call it back when the two read the same.
 			$a = hash_file( 'sha256', $aside );
 			$b = $this->hash_regular_file( $target );
 			if ( ! is_string( $a ) || ! is_string( $b ) || ! hash_equals( $a, $b ) ) {
-				return false; // the copy may be behind; the entry stays aside, named
+				return self::CLAIM_KEPT; // the copy may be behind; the entry stays aside, named
 			}
 			wp_delete_file( $aside );
-			return true;
+			// The copy is a SEPARATE inode, so identity here is the content:
+			// re-read it, and if the path stopped holding what we put there,
+			// the name just removed was the entry's last (Codex #102 round-15).
+			if ( $b !== $this->hash_regular_file( $target ) ) {
+				return self::CLAIM_LOST;
+			}
+			return self::CLAIM_DROPPED;
 		}
 		// A DIRECTORY, and only a directory: the checked rename, with the
 		// window documented above.
 		$this->before_non_file_put_back( $aside, $target );
 		if ( self::path_present( $target ) ) {
-			return false;
+			return self::CLAIM_KEPT;
 		}
-		return (bool) @rename( $aside, $target ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.rename_rename -- No no-clobber move exists for this shape; a refusal is answered.
+		return @rename( $aside, $target ) // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.rename_rename -- No no-clobber move exists for this shape; a refusal is answered.
+			? self::CLAIM_DROPPED
+			: self::CLAIM_KEPT;
 	}
 
 	/**
