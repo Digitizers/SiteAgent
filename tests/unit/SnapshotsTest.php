@@ -3195,6 +3195,51 @@ final class SnapshotsTest extends TestCase {
 		$this->assertSame( "newcomer\n", file_get_contents( $file ), "the racer's file is untouched" );
 	}
 
+	public function test_a_fifo_is_never_fed_to_the_copy_fallback(): void {
+		// Codex #102 round-8 P2: an external writer can replace the verified
+		// file with a FIFO between the hash and the claim, and on a link-less
+		// host that FIFO reached the exclusive-create copy — where
+		// fopen( 'rb' ) BLOCKS until another process opens the other end. The
+		// request would hang holding the target lock with the real path absent,
+		// which is worse than any answer it could give.
+		//
+		// The copy is stubbed rather than let run, so a REGRESSION fails this
+		// assertion instead of deadlocking the suite — which is exactly what it
+		// did when this fix was checked by reverting it.
+		if ( ! function_exists( 'posix_mkfifo' ) ) {
+			$this->markTestSkipped( 'posix_mkfifo() is unavailable on this host' );
+		}
+		$dir  = WP_CONTENT_DIR;
+		$fifo = $dir . '/.aura-restore-f1f0';
+		$this->assertTrue( posix_mkfifo( $fifo, 0600 ), 'the fixture is a real FIFO' );
+
+		$snaps = new class extends Aura_Worker_Snapshots {
+			public $seam_fired     = 0;
+			public $copy_attempted = false;
+			protected function link_available() {
+				return false; // the host where the copy fallback is reached
+			}
+			protected function before_non_file_put_back( $aside, $target ) {
+				++$this->seam_fired;
+			}
+			protected function put_back_by_write( $claim, $target ) {
+				// Never delegates: opening the FIFO is the hang under test.
+				$this->copy_attempted = true;
+				return 'the copy must never be reached for a FIFO';
+			}
+			public function put_back( $aside, $target ) {
+				return $this->put_back_no_clobber( $aside, $target );
+			}
+		};
+
+		$this->assertTrue( $snaps->put_back( $fifo, $dir . '/fifo-target' ) );
+		$this->assertFalse( $snaps->copy_attempted, 'a FIFO is never opened for copying' );
+		$this->assertSame( 1, $snaps->seam_fired, 'it takes the rename instead' );
+		$this->assertSame( 'fifo', filetype( $dir . '/fifo-target' ), 'and it is back at its path, still a FIFO' );
+
+		unlink( $dir . '/fifo-target' );
+	}
+
 	public function test_a_symlink_claim_is_kept_when_a_racer_takes_the_path_before_cleanup(): void {
 		// Codex #102 round-7 P2: the symlink branch did not carry the rule the
 		// hard-link branch learned in rounds 5 and 6. A writer who replaces the

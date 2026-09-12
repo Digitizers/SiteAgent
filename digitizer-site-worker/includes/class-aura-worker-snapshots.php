@@ -2734,6 +2734,9 @@ class Aura_Worker_Snapshots {
 	 *   primitive put_claim_back() uses — and on a host WITHOUT link(), by the
 	 *   exclusive-create copy put_claim_back() falls back to. It never reaches
 	 *   the rename on either kind of host.
+	 * - a FIFO, socket or device node is never copied: fopen() on a FIFO
+	 *   blocks until the other end is opened, and there is nothing to copy out
+	 *   of such an entry anyway. It takes the rename, like a directory.
 	 * - a DIRECTORY has no such primitive in PHP, and rename() stays. The
 	 *   exposure there is narrower than it looks: rename() of a directory
 	 *   FAILS onto a regular file and onto a non-empty directory, so the only
@@ -2780,6 +2783,22 @@ class Aura_Worker_Snapshots {
 			// are tried, and the entry stays aside if neither lands.
 			if ( $this->link_available() && $this->link_into_place( $aside, $target ) ) {
 				return self::CLAIM_DROPPED === $this->drop_linked_claim( $aside, $target );
+			}
+			// ONLY A REGULAR FILE IS COPIED (Codex #102 round-8 P2). A FIFO,
+			// socket or device node can be claimed too — an external writer can
+			// replace the verified file with one between the hash and the claim
+			// — and fopen( 'rb' ) on a FIFO BLOCKS until another process opens
+			// the other end. The copy would hang this request while it holds the
+			// target lock and the real path is absent, which is far worse than
+			// any answer it could give. There is nothing to copy out of such an
+			// entry in any case, so it falls through to the rename below, which
+			// moves any shape in one call.
+			if ( ! is_file( $aside ) ) {
+				$this->before_non_file_put_back( $aside, $target );
+				if ( self::path_present( $target ) ) {
+					return false;
+				}
+				return (bool) @rename( $aside, $target ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.rename_rename -- No no-clobber move exists for this shape; a refusal is answered.
 			}
 			// fopen( 'xb' ) refuses an occupied path, so the copy can never
 			// replace a writer who took it — the same way put_claim_back()
@@ -3054,7 +3073,7 @@ class Aura_Worker_Snapshots {
 	 * @param string $target The original path.
 	 * @return true|string true when the bytes are back at their path.
 	 */
-	private function put_back_by_write( $claim, $target ) {
+	protected function put_back_by_write( $claim, $target ) {
 		$src = @fopen( $claim, 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- The file this call holds under its claim name.
 		if ( false === $src ) {
 			return 'the claimed file could not be read';
