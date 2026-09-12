@@ -2769,12 +2769,10 @@ class Aura_Worker_Snapshots {
 	 *   primitive put_claim_back() uses — and on a host WITHOUT link(), by the
 	 *   exclusive-create copy put_claim_back() falls back to. It never reaches
 	 *   the rename on either kind of host.
-	 * - a FIFO is never copied — fopen() on one blocks until the other end is
-	 *   opened, and there is nothing to copy out of it anyway — but it IS
-	 *   recreated, with posix_mkfifo(), which refuses an existing path. A FIFO
-	 *   is a node rather than content, so recreating it is exact.
-	 * - a SOCKET or DEVICE NODE has no primitive at all and is kept aside,
-	 *   named. Stranding one costs little, unlike a directory.
+	 * - a FIFO, SOCKET or DEVICE NODE is kept aside, named. It is never copied
+	 *   (fopen() on a FIFO blocks, and there is nothing to copy out of one) and
+	 *   never renamed back (that clobbers). Stranding one costs little, unlike
+	 *   a directory.
 	 * - a DIRECTORY has no such primitive in PHP, and rename() stays. The
 	 *   exposure there is narrower than it looks: rename() of a directory
 	 *   FAILS onto a regular file and onto a non-empty directory, so the only
@@ -2832,61 +2830,30 @@ class Aura_Worker_Snapshots {
 			// entry in any case, so it falls through to the rename below, which
 			// moves any shape in one call.
 			if ( ! is_file( $aside ) ) {
-				// A FIFO, socket or device node. Measured rather than assumed:
-				// rename( FIFO, existing file ) REPLACES the file, while
-				// posix_mkfifo() onto an existing path refuses. So a FIFO has a
-				// no-clobber primitive after all and takes it; nothing else
-				// does, and those are kept aside rather than renamed over a
-				// writer who took the path (Codex #102 round-10 P1).
+				// A FIFO, SOCKET OR DEVICE NODE IS KEPT ASIDE, NAMED. It can be
+				// claimed like anything else — an external writer can replace
+				// the verified file with one between the hash and the claim —
+				// but it is never copied and never renamed back:
 				//
-				// A FIFO is a NODE, not content — recreating it at the path is
-				// exact, not an approximation — and the cost of keeping a
-				// socket or device node aside is small, unlike a directory,
-				// which is why the balance lands differently here.
-				$type = @filetype( $aside ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- An unreadable type is answered below.
-				if ( 'fifo' === $type && function_exists( 'posix_mkfifo' ) ) {
-					$perms = @fileperms( $aside ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- A false takes the create default.
-					$mode  = false === $perms ? $this->create_mode() : ( $perms & 0777 );
-					// posix_mkfifo() TAKES THE UMASK, exactly as mkdir() and
-					// fopen() do (Codex #102 round-11 P2). A 0666 FIFO under the
-					// common 0022 umask would come back 0644 — silently removing
-					// the write access its clients need — and we would then
-					// delete the original and report it restored exactly. Set
-					// the umask around the call, the way stage() and
-					// publish_restored_by_write() already do, and VERIFY.
-					$was  = umask( 0777 & ~$mode );
-					$made = @posix_mkfifo( $target, $mode ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- EEXIST is the refusal this call is chosen FOR.
-					umask( $was );
-					if ( ! $made ) {
-						return false; // the path is taken; the node stays aside, named
-					}
-					// AND THE NODE WE MADE IS THE ONE WE ACT ON (Codex #102
-					// round-12 P2). Everything below addresses the path by NAME
-					// — a chmod, and an unlink on the failure path — and this
-					// engine's rule is that nothing does that after a claim
-					// except under an inode check. Without one, a racer who
-					// replaced our node with a FIFO of their own would be
-					// chmod'd by us and accepted, the original deleted and
-					// reported restored; or the cleanup would unlink theirs.
-					clearstatcache( true, $target );
-					$mine = @stat( $target ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Already gone is an answer.
-					if ( ! is_array( $mine ) ) {
-						return false; // the original stays aside, named
-					}
-					$this->before_node_verify( $target );
-					if ( ! $this->node_wears_mode( $target, $mode, $mine ) ) {
-						// A default ACL can widen it past the umask. The node we
-						// made is not the node we held, so it goes and the
-						// original stays aside rather than being replaced by a
-						// lesser one — the rule publish_restored_by_write()
-						// follows for the same reason.
-						$this->remove_own_node( $target, $mine );
-						return false;
-					}
-					wp_delete_file( $aside );
-					return true;
-				}
-				return false; // no no-clobber primitive exists for it: keep it, named
+				// - copying would open it, and fopen( 'rb' ) on a FIFO BLOCKS
+				//   until another process opens the other end, hanging this
+				//   request while it holds the target lock (Codex #102 round-8).
+				//   There is nothing to copy out of such an entry anyway.
+				// - renaming it back CLOBBERS whatever took the path, measured:
+				//   rename( FIFO, existing file ) replaces the file (round-10).
+				//
+				// An earlier version of this branch recreated a FIFO with the
+				// POSIX mkfifo call, which does refuse an existing path. That
+				// was correct, and it was also the densest source of defects in
+				// this class: the umask, the node's identity through
+				// verification, and the cleanup's own unlink each needed a guard
+				// of their own, and each guard produced the next finding (Codex
+				// #102 rounds 10-14). Keeping the node aside needs none of them
+				// and loses very little — unlike a directory, whose stranding
+				// can displace a whole plugin or uploads folder, a socket or
+				// FIFO is recreated by whatever owns it, and one sitting at a
+				// WordPress file path mid-restore is pathological already.
+				return false;
 			}
 			// fopen( 'xb' ) refuses an occupied path, so the copy can never
 			// replace a writer who took it — the same way put_claim_back()
@@ -3211,103 +3178,9 @@ class Aura_Worker_Snapshots {
 	 * @param string $path The path.
 	 * @return string|false
 	 */
-	/**
-	 * Is the node at $path a FIFO wearing exactly $mode? Read back rather than
-	 * assumed: the umask is not the only thing that can change a created node's
-	 * permissions — a default POSIX ACL ignores it entirely, which is the same
-	 * fact stage() guards against for regular files.
-	 *
-	 * @param string $path The path.
-	 * @param int    $mode The mode it must wear.
-	 * @param array  $mine stat() of the node this call created.
-	 * @return bool
-	 */
-	private function node_wears_mode( $path, $mode, array $mine ) {
-		$now = $this->same_node( $path, $mine );
-		if ( false === $now ) {
-			return false;
-		}
-		if ( ( $now['mode'] & 0777 ) === ( $mode & 0777 ) ) {
-			return true;
-		}
-		if ( ! function_exists( 'chmod' ) || ! @chmod( $path, $mode ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Our own node, proved above; a refusal is answered.
-			return false;
-		}
-		$after = $this->same_node( $path, $mine );
-		return false !== $after && ( $after['mode'] & 0777 ) === ( $mode & 0777 );
-	}
 
-	/**
-	 * stat() of $path, but only while it still names the node $mine describes.
-	 * The mode comes back with it, so a caller reads the type and the
-	 * permissions off the same observation that proved the identity rather
-	 * than off a later, separately raceable one.
-	 *
-	 * What device+inode CANNOT tell apart: a node unlinked and immediately
-	 * recreated at the same path, because the kernel is free to hand back the
-	 * inode number it just freed — Linux does, APFS does not. There is no
-	 * stronger identity available to PHP, and this is the same comparison
-	 * remove_own_entry() and drop_linked_claim() rest on, so the limit is the
-	 * engine's throughout rather than this method's.
-	 *
-	 * @param string $path The path.
-	 * @param array  $mine stat() of the node this call created.
-	 * @return array|false
-	 */
-	private function same_node( $path, array $mine ) {
-		clearstatcache( true, $path );
-		$now = @stat( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Gone is an answer.
-		if ( ! is_array( $now ) || $now['ino'] !== $mine['ino'] || $now['dev'] !== $mine['dev'] ) {
-			return false;
-		}
-		return $now;
-	}
 
-	/**
-	 * Seam between creating a node and verifying it. Nothing in production; a
-	 * test models a racer replacing the path here.
-	 *
-	 * @param string $target The path.
-	 */
-	protected function before_node_verify( $target ) {
-	}
 
-	/**
-	 * Remove a FIFO this call created, while the path still holds one. Used
-	 * when the node could not be given the mode it must have: a lesser node at
-	 * the path is worse than none, because the original is still held aside
-	 * and can be reported.
-	 *
-	 * @param string $path The path.
-	 */
-	private function remove_own_node( $path, array $mine ) {
-		if ( false === $this->same_node( $path, $mine ) ) {
-			return; // not ours any more; nothing here is ours to remove
-		}
-		// CLAIM BEFORE DELETING (Codex #102 round-13 P2, the rule
-		// remove_own_entry() already follows). stat-then-unlink is two steps on
-		// a NAME, so a writer who replaces the path in between would lose the
-		// node we then unlink. rename() is atomic and inode-preserving: what is
-		// deleted is the node we moved, and if what we moved turns out to be
-		// somebody else's, it goes straight back through the same no-clobber
-		// put-back every other shape uses.
-		$aside = $this->aside_name( $path );
-		if ( ! @rename( $path, $aside ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.rename_rename -- The claim IS the point: atomic, inode-preserving.
-			return;
-		}
-		if ( false !== $this->same_node( $aside, $mine ) ) {
-			wp_delete_file( $aside );
-			return;
-		}
-		if ( ! $this->put_back_no_clobber( $aside, $path ) ) {
-			// The same obligation remove_own_entry() carries (Codex #102
-			// round-14 P2): a socket, a device node or a link-less executable
-			// cannot be put back, and discarding the path would leave another
-			// writer's LIVE entry gone from its real name with nothing saying
-			// where it went.
-			$this->stranded = $aside;
-		}
-	}
 
 	/**
 	 * A fresh opaque name beside $path, for an entry this engine holds. Nothing

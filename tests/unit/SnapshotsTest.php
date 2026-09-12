@@ -3260,17 +3260,21 @@ final class SnapshotsTest extends TestCase {
 		$this->assertNotSame( $out['stranded'], isset( $out['moved_aside'] ) ? $out['moved_aside'] : null, 'distinct from our own claim' );
 	}
 
-	public function test_a_fifo_is_never_fed_to_the_copy_fallback(): void {
-		// Codex #102 round-8 P2: an external writer can replace the verified
-		// file with a FIFO between the hash and the claim, and on a link-less
-		// host that FIFO reached the exclusive-create copy — where
-		// fopen( 'rb' ) BLOCKS until another process opens the other end. The
-		// request would hang holding the target lock with the real path absent,
-		// which is worse than any answer it could give.
+	public function test_a_special_node_is_kept_aside_and_never_copied_or_renamed(): void {
+		// Codex #102 rounds 8 and 10, settled by simplification. A FIFO, socket
+		// or device node can be claimed like anything else — an external writer
+		// can replace the verified file with one between the hash and the claim
+		// — and neither way of putting it back is safe:
 		//
-		// The copy is stubbed rather than let run, so a REGRESSION fails this
-		// assertion instead of deadlocking the suite — which is exactly what it
-		// did when this fix was checked by reverting it.
+		// - copying opens it, and fopen( 'rb' ) on a FIFO BLOCKS until another
+		//   process opens the other end, hanging the request while it holds the
+		//   target lock. A regression here deadlocks rather than fails, so the
+		//   copy is stubbed instead of being allowed to run.
+		// - renaming it back clobbers whatever took the path (measured:
+		//   rename( FIFO, existing file ) replaces the file).
+		//
+		// So it is kept aside and named, and the seam that fires only on the
+		// checked rename must not fire at all.
 		if ( ! function_exists( 'posix_mkfifo' ) ) {
 			$this->markTestSkipped( 'posix_mkfifo() is unavailable on this host' );
 		}
@@ -3282,7 +3286,7 @@ final class SnapshotsTest extends TestCase {
 			public $seam_fired     = 0;
 			public $copy_attempted = false;
 			protected function link_available() {
-				return false; // the host where the copy fallback is reached
+				return false; // the host where the copy fallback would be reached
 			}
 			protected function before_non_file_put_back( $aside, $target ) {
 				++$this->seam_fired;
@@ -3290,90 +3294,20 @@ final class SnapshotsTest extends TestCase {
 			protected function put_back_by_write( $claim, $target ) {
 				// Never delegates: opening the FIFO is the hang under test.
 				$this->copy_attempted = true;
-				return 'the copy must never be reached for a FIFO';
+				return 'the copy must never be reached for a special node';
 			}
 			public function put_back( $aside, $target ) {
 				return $this->put_back_no_clobber( $aside, $target );
 			}
 		};
 
-		$this->assertTrue( $snaps->put_back( $fifo, $dir . '/fifo-target' ) );
-		$this->assertFalse( $snaps->copy_attempted, 'a FIFO is never opened for copying' );
-		// It does not take the checked rename either (Codex #102 round-10 P1):
-		// posix_mkfifo() refuses an existing path, so the node is RECREATED
-		// no-clobber. A FIFO is a node rather than content, so that is exact.
-		$this->assertSame( 0, $snaps->seam_fired, 'and never the clobbering rename' );
-		$this->assertSame( 'fifo', filetype( $dir . '/fifo-target' ), 'it is back at its path, still a FIFO' );
-		$this->assertFileDoesNotExist( $fifo, 'and the entry aside is gone' );
+		$this->assertFalse( $snaps->put_back( $fifo, $dir . '/fifo-target' ), 'it is kept aside for the caller to name' );
+		$this->assertFalse( $snaps->copy_attempted, 'never opened for copying' );
+		$this->assertSame( 0, $snaps->seam_fired, 'and never offered to the clobbering rename' );
+		$this->assertSame( 'fifo', filetype( $fifo ), 'the node is still aside, intact' );
+		$this->assertFileDoesNotExist( $dir . '/fifo-target', 'and nothing was put at the path' );
 
-		unlink( $dir . '/fifo-target' );
-
-		// An occupied path is refused, never replaced.
-		$fifo2 = $dir . '/.aura-restore-f1f2';
-		$this->assertTrue( posix_mkfifo( $fifo2, 0600 ) );
-		file_put_contents( $dir . '/fifo-taken', "theirs\n" );
-		$this->assertFalse( $snaps->put_back( $fifo2, $dir . '/fifo-taken' ) );
-		$this->assertSame( "theirs\n", file_get_contents( $dir . '/fifo-taken' ), "the other writer's file is untouched" );
-		$this->assertSame( 'fifo', filetype( $fifo2 ), 'the node stays aside, named' );
-		unlink( $fifo2 );
-
-		// The mode survives the umask (Codex #102 round-11 P2). posix_mkfifo()
-		// takes the umask exactly as mkdir() and fopen() do, so a 0666 FIFO
-		// under the common 0022 umask would come back 0644 — silently removing
-		// the write access its clients need — and the original would then be
-		// deleted and reported restored exactly.
-		$fifo3 = $dir . '/.aura-restore-f1f3';
-		$this->assertTrue( posix_mkfifo( $fifo3, 0666 ) );
-		chmod( $fifo3, 0666 ); // posix_mkfifo() masked it on the way in too
-		$this->assertSame( 0666, fileperms( $fifo3 ) & 0777, 'the fixture really is 0666' );
-		$was = umask( 0022 );
-		try {
-			$this->assertTrue( $snaps->put_back( $fifo3, $dir . '/fifo-mode' ) );
-		} finally {
-			umask( $was );
-		}
-		$this->assertSame( 'fifo', filetype( $dir . '/fifo-mode' ) );
-		$this->assertSame( 0666, fileperms( $dir . '/fifo-mode' ) & 0777, 'the mode it had, not what the umask allowed' );
-		unlink( $dir . '/fifo-mode' );
-
-		// A racer replacing the node between its creation and its verification
-		// is not ours to chmod, accept, or unlink (Codex #102 round-12 P2).
-		$swapper = new class extends Aura_Worker_Snapshots {
-			public $armed = '';
-			protected function link_available() {
-				return false;
-			}
-			protected function before_node_verify( $target ) {
-				if ( '' !== $this->armed ) {
-					// Their node is created BESIDE ours and renamed over it, so
-					// it holds an inode allocated while ours is still alive.
-					// Unlinking ours first and creating in place would let the
-					// kernel hand back the very inode number just freed — which
-					// it does on Linux but not on APFS, and a test that turns on
-					// that is a test that passes on one CI runner and not
-					// another.
-					$theirs = $target . '.theirs';
-					posix_mkfifo( $theirs, 0600 );
-					rename( $theirs, $target );
-					$this->armed = '';
-				}
-			}
-			public function put_back( $aside, $target ) {
-				return $this->put_back_no_clobber( $aside, $target );
-			}
-		};
-		$fifo4 = $dir . '/.aura-restore-f1f4';
-		$this->assertTrue( posix_mkfifo( $fifo4, 0666 ) );
-		chmod( $fifo4, 0666 );
-		$swapper->armed = $dir . '/fifo-swapped';
-
-		$this->assertFalse( $swapper->put_back( $fifo4, $dir . '/fifo-swapped' ) );
-		$this->assertSame( 'fifo', filetype( $fifo4 ), 'our original stays aside, named' );
-		$this->assertSame( 0666, fileperms( $fifo4 ) & 0777 );
-		$this->assertSame( 'fifo', filetype( $dir . '/fifo-swapped' ), "the racer's node is still there" );
-		$this->assertSame( 0600, fileperms( $dir . '/fifo-swapped' ) & 0777, "and was neither chmod'd nor unlinked by us" );
-		unlink( $fifo4 );
-		unlink( $dir . '/fifo-swapped' );
+		unlink( $fifo );
 	}
 
 	public function test_a_symlink_claim_is_kept_when_a_racer_takes_the_path_before_cleanup(): void {
