@@ -2705,12 +2705,7 @@ class Aura_Worker_Snapshots {
 		// this path exists to keep. rename() is atomic and inode-preserving, so
 		// what is deleted is the entry we moved, and a racer's file — if that
 		// is what we moved — is put straight back.
-		try {
-			$suffix = bin2hex( random_bytes( 8 ) );
-		} catch ( \Exception $e ) {
-			$suffix = substr( md5( uniqid( '', true ) ), 0, 16 );
-		}
-		$aside = dirname( $target ) . '/.aura-restore-' . $suffix;
+		$aside = $this->aside_name( $target );
 		if ( ! @rename( $target, $aside ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.rename_rename -- The claim IS the point: atomic, inode-preserving.
 			return false;
 		}
@@ -3286,9 +3281,43 @@ class Aura_Worker_Snapshots {
 	 * @param string $path The path.
 	 */
 	private function remove_own_node( $path, array $mine ) {
-		if ( false !== $this->same_node( $path, $mine ) ) {
-			wp_delete_file( $path );
+		if ( false === $this->same_node( $path, $mine ) ) {
+			return; // not ours any more; nothing here is ours to remove
 		}
+		// CLAIM BEFORE DELETING (Codex #102 round-13 P2, the rule
+		// remove_own_entry() already follows). stat-then-unlink is two steps on
+		// a NAME, so a writer who replaces the path in between would lose the
+		// node we then unlink. rename() is atomic and inode-preserving: what is
+		// deleted is the node we moved, and if what we moved turns out to be
+		// somebody else's, it goes straight back through the same no-clobber
+		// put-back every other shape uses.
+		$aside = $this->aside_name( $path );
+		if ( ! @rename( $path, $aside ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.rename_rename -- The claim IS the point: atomic, inode-preserving.
+			return;
+		}
+		if ( false !== $this->same_node( $aside, $mine ) ) {
+			wp_delete_file( $aside );
+			return;
+		}
+		$this->put_back_no_clobber( $aside, $path );
+	}
+
+	/**
+	 * A fresh opaque name beside $path, for an entry this engine holds. Nothing
+	 * of the target's own name is in it: `.agent.php.aura-restore-x` would
+	 * still carry `.php`, which Apache's multi-extension AddHandler semantics
+	 * will execute.
+	 *
+	 * @param string $path The path it sits beside.
+	 * @return string
+	 */
+	private function aside_name( $path ) {
+		try {
+			$suffix = bin2hex( random_bytes( 8 ) );
+		} catch ( \Exception $e ) {
+			$suffix = substr( md5( uniqid( '', true ) ), 0, 16 );
+		}
+		return dirname( $path ) . '/.aura-restore-' . $suffix;
 	}
 
 	private function hash_regular_file( $path ) {
