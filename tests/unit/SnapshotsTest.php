@@ -636,6 +636,90 @@ final class SnapshotsTest extends TestCase {
 		$this->assertTrue( $snaps->restore( $rec['id'] )['success'] );
 	}
 
+	public function test_a_created_file_already_gone_answers_already(): void {
+		$snaps = new Aura_Worker_Snapshots();
+		$file  = WP_CONTENT_DIR . '/created.php';
+		$rec   = $snaps->create_file( $file, "<?php // new\n" )['snapshot'];
+		unlink( $file );
+
+		$out = $snaps->restore( $rec['id'] );
+
+		$this->assertTrue( $out['success'] );
+		$this->assertTrue( $out['already'] );
+	}
+
+	public function test_a_directory_at_the_created_path_answers_the_changed_code(): void {
+		// Codex #101 round-1 P1: this refusal had no code, so the REST layer
+		// answered 500 for a designated changed-since refusal.
+		$snaps = new Aura_Worker_Snapshots();
+		$file  = WP_CONTENT_DIR . '/created-dir.php';
+		$rec   = $snaps->create_file( $file, "<?php // new\n" )['snapshot'];
+		unlink( $file );
+		mkdir( $file, 0755 );
+
+		$out = $snaps->restore( $rec['id'] );
+
+		$this->assertFalse( $out['success'] );
+		$this->assertSame( 'aura_file_changed_since', $out['code'] );
+		$this->assertStringContainsString( 'not a regular file', $out['error'] );
+		$this->assertDirectoryExists( $file, 'the directory is untouched' );
+	}
+
+	public function test_a_created_file_edited_since_answers_the_changed_code(): void {
+		$snaps = new Aura_Worker_Snapshots();
+		$file  = WP_CONTENT_DIR . '/created-edited.php';
+		$rec   = $snaps->create_file( $file, "<?php // new\n" )['snapshot'];
+		file_put_contents( $file, "<?php // edited\n" );
+
+		$out = $snaps->restore( $rec['id'] );
+
+		$this->assertFalse( $out['success'] );
+		$this->assertSame( 'aura_file_changed_since', $out['code'] );
+		$this->assertSame( 'file_changed_since', $out['error'] );
+	}
+
+	public function test_a_voided_record_answers_the_voided_code(): void {
+		$snaps = new class extends Aura_Worker_Snapshots {
+			public function void( $id ) {
+				return $this->void_record_in_place( $id, array( 'interrupted' => true ) );
+			}
+		};
+		$file = WP_CONTENT_DIR . '/voided.php';
+		$rec  = $snaps->create_file( $file, "<?php // new\n" )['snapshot'];
+		$this->assertTrue( $snaps->void( $rec['id'] ) );
+
+		$out = $snaps->restore( $rec['id'] );
+
+		$this->assertFalse( $out['success'] );
+		$this->assertSame( 'aura_snapshot_voided', $out['code'] );
+		$this->assertFileExists( $file, 'a voided record never deletes the file' );
+	}
+
+	public function test_a_held_path_answers_the_locked_code(): void {
+		// target_lock_tries() is the seam: one 20 ms attempt, and the lock is
+		// already held by a handle this test keeps open.
+		$snaps = new class extends Aura_Worker_Snapshots {
+			protected function target_lock_tries() {
+				return 1;
+			}
+		};
+		$file = WP_CONTENT_DIR . '/held.php';
+		file_put_contents( $file, "<?php // v0\n" );
+		$rec = $snaps->overwrite_file( $file, "<?php // v1\n" )['snapshot'];
+
+		$lock = WP_CONTENT_DIR . '/aura-backups/snapshots/path-' . sha1( $file ) . '.lock';
+		$fh   = fopen( $lock, 'cb' );
+		$this->assertTrue( flock( $fh, LOCK_EX | LOCK_NB ) );
+
+		$out = $snaps->restore( $rec['id'] );
+
+		flock( $fh, LOCK_UN );
+		fclose( $fh );
+		$this->assertFalse( $out['success'] );
+		$this->assertSame( 'aura_path_locked', $out['code'] );
+		$this->assertSame( 'locked', $out['error'] );
+	}
+
 	public function test_restore_claims_the_path_before_verifying_so_a_file_that_arrives_after_the_claim_is_never_touched(): void {
 		// Codex #91 round-1 P1: hash-then-unlink had a window in which another
 		// process could replace the target and lose unverified bytes. The

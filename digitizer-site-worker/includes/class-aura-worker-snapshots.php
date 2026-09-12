@@ -1126,7 +1126,12 @@ class Aura_Worker_Snapshots {
 	 */
 	private function locked_answer( $out, $path ) {
 		if ( null === $out ) {
-			return array( 'success' => false, 'error' => 'locked', 'detail' => 'another write to this path is in progress: ' . $path );
+			return array(
+				'success' => false,
+				'code'    => 'aura_path_locked',
+				'error'   => 'locked',
+				'detail'  => 'another write to this path is in progress: ' . $path,
+			);
 		}
 		if ( self::LOCK_UNAVAILABLE === $out ) {
 			return array( 'success' => false, 'error' => 'Unable to create a lock under the snapshots directory (unwritable?); nothing can be persisted there, so nothing was written.' );
@@ -2637,7 +2642,11 @@ class Aura_Worker_Snapshots {
 		// can go live the moment its destination appears, never "already gone"
 		// (Codex #94 round-2 P2). It is reported, never deleted.
 		if ( ! is_file( $target ) ) {
-			return array( 'success' => false, 'error' => 'Target is not a regular file: ' . $target );
+			return array(
+				'success' => false,
+				'code'    => 'aura_file_changed_since',
+				'error'   => 'Target is not a regular file: ' . $target,
+			);
 		}
 
 		if ( ! $this->link_available() ) {
@@ -2653,6 +2662,7 @@ class Aura_Worker_Snapshots {
 				if ( ! is_string( $inplace ) || ! hash_equals( $expected, $inplace ) ) {
 					return array(
 						'success' => false,
+						'code'    => 'aura_file_changed_since',
 						'error'   => 'file_changed_since',
 						'detail'  => 'the file is executable and link() is unavailable, so it was verified in place and left untouched',
 					);
@@ -2675,7 +2685,7 @@ class Aura_Worker_Snapshots {
 		if ( ! @rename( $target, $claim ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.rename_rename -- The claim IS the point; $wp_filesystem->move() may copy+delete, which is neither atomic nor inode-preserving.
 			return self::path_present( $target )
 				? array( 'success' => false, 'error' => 'Unable to claim file for restore: ' . $target )
-				: array( 'success' => true ); // it vanished between exists() and the claim: already gone
+				: array( 'success' => true, 'already' => true ); // it vanished between exists() and the claim: already gone
 		}
 		$this->after_claim( $claim, $target );
 
@@ -2695,7 +2705,7 @@ class Aura_Worker_Snapshots {
 		// that took the path meanwhile. link() is no-clobber; a refusal means the
 		// path is taken — the changed file stays beside it under its claim name
 		// and the answer says where. Nothing is ever deleted on this branch.
-		$out = array( 'success' => false, 'error' => 'file_changed_since' );
+		$out = array( 'success' => false, 'code' => 'aura_file_changed_since', 'error' => 'file_changed_since' );
 		if ( $this->link_available() ) {
 			if ( @link( $claim, $target ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- EEXIST is the expected refusal, classified below.
 				wp_delete_file( $claim ); // the second name to the same inode; the file is back at its path
