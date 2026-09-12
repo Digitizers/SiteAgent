@@ -2843,8 +2843,11 @@ class Aura_Worker_Snapshots {
 	 * @param string $aside  The entry held aside.
 	 * @param string $target Where it belongs.
 	 * @return string One of CLAIM_DROPPED (back at its path, the held name
-	 *                released), CLAIM_KEPT (not put back; it is still under
-	 *                $aside for the caller to name) or CLAIM_LOST (put back,
+	 *                released), CLAIM_KEPT (it is still under $aside for the
+	 *                caller to name — either because it could not go back, or
+	 *                because it did and the held name could not be removed;
+	 *                `.aura-restore-*` is never swept, so both must be said)
+	 *                or CLAIM_LOST (put back,
 	 *                then replaced by a racer before the held name could be
 	 *                released — there is nothing left to name).
 	 */
@@ -2872,6 +2875,13 @@ class Aura_Worker_Snapshots {
 				return self::CLAIM_KEPT; // the claim stays, and the caller names it
 			}
 			wp_delete_file( $aside ); // the link is back at its path; its held name goes
+			if ( self::path_present( $aside ) ) {
+				// The name could not be removed, and `.aura-restore-*` is never
+				// swept: the caller must still be told where it is (Codex #102
+				// round-18 P2 — drop_linked_claim() has answered KEPT for this
+				// since round 6; these two branches did not).
+				return self::CLAIM_KEPT;
+			}
 			// AND THE LOSS IS REPORTED, NOT SWALLOWED (Codex #102 round-15 P2 —
 			// the half of rounds 5 and 6 this branch still had not carried). PHP
 			// cannot fuse the check and the unlink, so a racer landing between
@@ -2944,6 +2954,9 @@ class Aura_Worker_Snapshots {
 				return self::CLAIM_KEPT; // the copy may be behind; the entry stays aside, named
 			}
 			wp_delete_file( $aside );
+			if ( self::path_present( $aside ) ) {
+				return self::CLAIM_KEPT; // the held name stays; say where it is
+			}
 			// The copy is a SEPARATE inode, so identity here is the content:
 			// re-read it, and if the path stopped holding what we put there,
 			// the name just removed was the entry's last (Codex #102 round-15).
