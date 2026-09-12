@@ -1,7 +1,18 @@
 name: Deploy to WordPress.org
 on:
   release:
-    types: [published]
+    # `released`, NOT `published`. GitHub fires `published` for a pre-release
+    # too — which the guard below then skips — and fires nothing this workflow
+    # listens for when that pre-release is later promoted. So the documented
+    # release procedure (pre-release, field check, promote) shipped NOTHING to
+    # WordPress.org, silently: no run appeared at all, and the only signal was
+    # the wp.org API still reporting the previous version.
+    #
+    # `released` means "a release was published, or a pre-release was changed
+    # to a release" — both paths, and never a pre-release. It also cannot
+    # double-fire the way [published, released] would for a release published
+    # straight to stable.
+    types: [released]
 
 # Least privilege: the job only checks out the repo and deploys to WordPress.org
 # SVN using SVN_USERNAME/SVN_PASSWORD secrets — it never writes back via GITHUB_TOKEN.
