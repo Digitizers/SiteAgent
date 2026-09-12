@@ -1148,6 +1148,17 @@ class Aura_Worker_Snapshots {
 	}
 
 	/**
+	 * Seam between a create restore's in-place verification and its claim.
+	 * Nothing in production; a test models the writer that lands in the one
+	 * window where the claim-and-put-back machinery is still reachable on a
+	 * link-less host (Codex #102 round-28 P2).
+	 *
+	 * @param string $target The path.
+	 */
+	protected function before_create_claim( $target ) {
+	}
+
+	/**
 	 * Refuse a create after its record was written. Discards the staged file
 	 * and retires the record — every exit after persist_create_record() goes
 	 * through here, because the record of a create that did NOT happen must
@@ -3265,25 +3276,40 @@ class Aura_Worker_Snapshots {
 		}
 
 		if ( ! $this->link_available() ) {
-			// Without link() an executable cannot be put back (fopen() cannot
-			// create one), so claiming it by rename() and then refusing left an
-			// edited 0755 file aside with its path absent (SiteAgent#99). Such a
-			// file is verified IN PLACE first: other bytes → refused, untouched;
-			// the agent's bytes → the claim below, and only a change inside that
-			// window can still leave it aside.
-			$perms = @fileperms( $target ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- The file is there (checked above); a refusal falls through to the claim.
-			if ( false !== $perms && 0 !== ( $perms & 0111 ) ) {
-				$inplace = $this->hash_regular_file( $target );
-				if ( ! is_string( $inplace ) || ! hash_equals( $expected, $inplace ) ) {
-					return array(
-						'success' => false,
-						'code'    => 'aura_file_changed_since',
-						'error'   => 'file_changed_since',
-						'detail'  => 'the file is executable and link() is unavailable, so it was verified in place and left untouched',
-					);
-				}
+			// WITHOUT link(), A REFUSAL MUST NOT TOUCH THE FILE AT ALL (Codex
+			// #102 round-28 P2). The put-back on this host is a COPY into a new
+			// inode: the bytes and the mode survive it, but ownership, ACLs,
+			// xattrs and timestamps do not. So claiming a changed file and
+			// putting it back materially modified it — while answering
+			// `aura_file_changed_since`, whose whole contract is that nothing
+			// was written.
+			//
+			// The executable case was verified in place for a sharper version
+			// of this (SiteAgent#99: fopen() cannot create an executable at
+			// all, so the file was left aside with its path absent). The reason
+			// generalises to every file on a link-less host, and the check is
+			// the same one restore_existing_file_locked() uses for every answer
+			// that writes nothing: hash IN PLACE first, and claim only what is
+			// about to be deleted.
+			//
+			// A change landing between this hash and the claim still reaches
+			// the put-back below — that window is the residual, not the common
+			// case this removes.
+			$inplace = $this->hash_regular_file( $target );
+			if ( ! is_string( $inplace ) || ! hash_equals( $expected, $inplace ) ) {
+				$perms = @fileperms( $target ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Only decides the wording below.
+				return array(
+					'success' => false,
+					'code'    => 'aura_file_changed_since',
+					'error'   => 'file_changed_since',
+					'detail'  => false !== $perms && 0 !== ( $perms & 0111 )
+						? 'the file is executable and link() is unavailable, so it was verified in place and left untouched'
+						: 'link() is unavailable, so the file was verified in place and left untouched rather than copied back',
+				);
 			}
 		}
+
+		$this->before_create_claim( $target );
 
 		// CLAIM the pathname before verifying anything (Codex #91 round-1 P1):
 		// hash-then-unlink had a window in which another process could replace

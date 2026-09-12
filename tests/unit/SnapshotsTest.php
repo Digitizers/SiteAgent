@@ -2434,6 +2434,16 @@ final class SnapshotsTest extends TestCase {
 		// only when it still reads the same as the target.
 		$file  = WP_CONTENT_DIR . '/still-writing.log';
 		$snaps = new class extends Aura_Worker_Snapshots {
+			public $edit_at_seam = '';
+			protected function before_create_claim( $target ) {
+				// The change lands AFTER the in-place verification, which is the
+				// only window where a link-less host still reaches the claim and
+				// put-back machinery this test is about (Codex #102 round-28).
+				if ( '' !== $this->edit_at_seam ) {
+					file_put_contents( $this->edit_at_seam, "edited\n" );
+					$this->edit_at_seam = '';
+				}
+			}
 			public $allow_link = true;
 			protected function link_available() {
 				return $this->allow_link;
@@ -2445,7 +2455,7 @@ final class SnapshotsTest extends TestCase {
 			}
 		};
 		$rec = $snaps->create_file( $file, "a\n" )['snapshot'];
-		file_put_contents( $file, "edited\n" );
+		$snaps->edit_at_seam = $file;
 		$snaps->allow_link = false;
 
 		$restore = $snaps->restore( $rec['id'] );
@@ -2532,6 +2542,16 @@ final class SnapshotsTest extends TestCase {
 	public function test_without_link_a_changed_file_whose_path_was_retaken_is_kept_aside_and_named(): void {
 		$file  = WP_CONTENT_DIR . '/nolinkback-taken.php';
 		$snaps = new class extends Aura_Worker_Snapshots {
+			public $edit_at_seam = '';
+			protected function before_create_claim( $target ) {
+				// The change lands AFTER the in-place verification, which is the
+				// only window where a link-less host still reaches the claim and
+				// put-back machinery this test is about (Codex #102 round-28).
+				if ( '' !== $this->edit_at_seam ) {
+					file_put_contents( $this->edit_at_seam, "edited\n" );
+					$this->edit_at_seam = '';
+				}
+			}
 			public $allow_link = true;
 			protected function link_available() {
 				return $this->allow_link;
@@ -2541,7 +2561,7 @@ final class SnapshotsTest extends TestCase {
 			}
 		};
 		$rec = $snaps->create_file( $file, "a\n" )['snapshot'];
-		file_put_contents( $file, "edited\n" );
+		$snaps->edit_at_seam = $file;
 		$snaps->allow_link = false;
 
 		$restore = $snaps->restore( $rec['id'] );
@@ -2644,6 +2664,16 @@ final class SnapshotsTest extends TestCase {
 	public function test_without_link_a_short_put_back_write_keeps_the_file_aside_and_clears_our_empty_entry(): void {
 		$file  = WP_CONTENT_DIR . '/nolinkback-short.php';
 		$snaps = new class extends Aura_Worker_Snapshots {
+			public $edit_at_seam = '';
+			protected function before_create_claim( $target ) {
+				// The change lands AFTER the in-place verification, which is the
+				// only window where a link-less host still reaches the claim and
+				// put-back machinery this test is about (Codex #102 round-28).
+				if ( '' !== $this->edit_at_seam ) {
+					file_put_contents( $this->edit_at_seam, "edited\n" );
+					$this->edit_at_seam = '';
+				}
+			}
 			public $allow_link = true;
 			protected function link_available() {
 				return $this->allow_link;
@@ -2653,7 +2683,7 @@ final class SnapshotsTest extends TestCase {
 			}
 		};
 		$rec = $snaps->create_file( $file, "a\n" )['snapshot'];
-		file_put_contents( $file, "edited\n" );
+		$snaps->edit_at_seam = $file;
 		$snaps->allow_link = false;
 
 		$restore = $snaps->restore( $rec['id'] );
@@ -3287,6 +3317,41 @@ final class SnapshotsTest extends TestCase {
 		$this->assertNotSame( $out['stranded'], isset( $out['moved_aside'] ) ? $out['moved_aside'] : null, 'distinct from our own claim' );
 	}
 
+	public function test_without_link_a_changed_created_file_is_refused_without_being_touched(): void {
+		// Codex #102 round-28 P2: on a link-less host the put-back is a COPY
+		// into a new inode. The bytes and the mode survive it; ownership, ACLs,
+		// xattrs and timestamps do not. So claiming a changed file and putting
+		// it back materially modified it — while answering
+		// `aura_file_changed_since`, whose whole contract is that nothing was
+		// written. It is verified IN PLACE instead, and the inode must be the
+		// same one afterwards.
+		$file  = WP_CONTENT_DIR . '/untouched-refusal.php';
+		$snaps = new class extends Aura_Worker_Snapshots {
+			protected function link_available() {
+				return false;
+			}
+		};
+		$rec = $snaps->create_file( $file, "agent\n" )['snapshot'];
+		file_put_contents( $file, "edited by the user\n" );
+		clearstatcache( true, $file );
+		$before = stat( $file );
+
+		$restore = $snaps->restore( $rec['id'] );
+
+		$this->assertFalse( $restore['success'] );
+		$this->assertSame( 'aura_file_changed_since', $restore['code'] );
+		$this->assertSame( "edited by the user\n", file_get_contents( $file ) );
+		// The inode first: it is the assertion that distinguishes "verified in
+		// place" from "claimed, copied back, and reported as untouched", and a
+		// copy passes every content check while failing this one.
+		clearstatcache( true, $file );
+		$after = stat( $file );
+		$this->assertSame( $before['ino'], $after['ino'], 'the same inode: it was never claimed and copied back' );
+		$this->assertSame( $before['dev'], $after['dev'] );
+		$this->assertSame( array(), glob( WP_CONTENT_DIR . '/.aura-restore-*' ), 'and nothing was ever claimed' );
+		$this->assertStringContainsString( 'left untouched', (string) ( $restore['detail'] ?? '' ) );
+	}
+
 	public function test_a_created_file_restore_reports_a_file_its_cleanup_displaced(): void {
 		// Codex #102 round-27 P1: the create restore reached remove_own_entry()
 		// only once the put-back gained its identity-safe cleanup one round
@@ -3295,6 +3360,16 @@ final class SnapshotsTest extends TestCase {
 		// So the file was recorded and then silently dropped from the answer.
 		$file  = WP_CONTENT_DIR . '/created-displaced.php';
 		$snaps = new class extends Aura_Worker_Snapshots {
+			public $edit_at_seam = '';
+			protected function before_create_claim( $target ) {
+				// The change lands AFTER the in-place verification, which is the
+				// only window where a link-less host still reaches the claim and
+				// put-back machinery this test is about (Codex #102 round-28).
+				if ( '' !== $this->edit_at_seam ) {
+					file_put_contents( $this->edit_at_seam, "edited\n" );
+					$this->edit_at_seam = '';
+				}
+			}
 			public $armed = '';
 			protected function link_available() {
 				return false; // the host where the copy fallback is reached
@@ -3316,7 +3391,7 @@ final class SnapshotsTest extends TestCase {
 			}
 		};
 		$rec = $snaps->create_file( $file, "agent\n" )['snapshot'];
-		file_put_contents( $file, "edited\n" ); // not the agent's bytes: a put-back, never a delete
+		$snaps->edit_at_seam = $file;
 		$snaps->armed      = $file;
 		$snaps->fail_write = true;
 
@@ -3338,6 +3413,16 @@ final class SnapshotsTest extends TestCase {
 		// offline.
 		$file  = WP_CONTENT_DIR . '/acl-putback.php';
 		$snaps = new class extends Aura_Worker_Snapshots {
+			public $edit_at_seam = '';
+			protected function before_create_claim( $target ) {
+				// The change lands AFTER the in-place verification, which is the
+				// only window where a link-less host still reaches the claim and
+				// put-back machinery this test is about (Codex #102 round-28).
+				if ( '' !== $this->edit_at_seam ) {
+					file_put_contents( $this->edit_at_seam, "edited\n" );
+					$this->edit_at_seam = '';
+				}
+			}
 			public $wide = false;
 			protected function link_available() {
 				return false; // the host where the copy fallback is reached
@@ -3349,7 +3434,7 @@ final class SnapshotsTest extends TestCase {
 			}
 		};
 		$rec = $snaps->create_file( $file, "agent\n" )['snapshot'];
-		file_put_contents( $file, "edited\n" );
+		$snaps->edit_at_seam = $file;
 		chmod( $file, 0600 ); // so the put-back asks for 0600 and the ACL's 0666 differs
 		$snaps->wide = true;
 
