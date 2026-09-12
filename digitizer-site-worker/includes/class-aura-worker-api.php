@@ -1537,7 +1537,7 @@ class Aura_Worker_API {
 		// execution failure of an envelope that IS here — never 404, which Aura
 		// reads as "no longer restorable on the site".
 		$status = $result['success'] ? 200 : ( isset( $result['code'] ) ? 409 : 500 );
-		return new WP_REST_Response( Aura_Worker_Rules::with_warnings( $result ), $status );		return new WP_REST_Response( Aura_Worker_Rules::with_warnings( $result ), $status );
+		return new WP_REST_Response( Aura_Worker_Rules::with_warnings( $result ), $status );
 	}
 
 	/**
