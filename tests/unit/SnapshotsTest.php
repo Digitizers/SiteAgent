@@ -3197,7 +3197,36 @@ final class SnapshotsTest extends TestCase {
 		$this->assertSame( "mine\n", file_get_contents( $dir . '/pb-file.txt' ) );
 		$this->assertSame( 0, $snaps->seam_fired, 'a regular file never reaches the checked rename either' );
 
-		// (c) an occupied path is REFUSED, not replaced — the entry stays aside.
+		// (c) a regular file on a host WITHOUT link(): the exclusive-create copy,
+		// still never the rename (Codex #102 round-4 P1 — gating only the link()
+		// attempt left this shape falling through to it on most managed hosts).
+		$nolink = new class extends Aura_Worker_Snapshots {
+			public $seam_fired = 0;
+			protected function link_available() {
+				return false;
+			}
+			protected function before_non_file_put_back( $aside, $target ) {
+				++$this->seam_fired;
+			}
+			public function put_back( $aside, $target ) {
+				return $this->put_back_no_clobber( $aside, $target );
+			}
+		};
+		file_put_contents( $dir . '/.aura-restore-eeee', "nolink\n" );
+		$this->assertTrue( $nolink->put_back( $dir . '/.aura-restore-eeee', $dir . '/pb-nolink.txt' ) );
+		$this->assertSame( "nolink\n", file_get_contents( $dir . '/pb-nolink.txt' ) );
+		$this->assertFileDoesNotExist( $dir . '/.aura-restore-eeee' );
+		$this->assertSame( 0, $nolink->seam_fired, 'a link-less host copies it back; it never reaches the rename' );
+
+		// ...and an occupied path is refused there too, never replaced.
+		file_put_contents( $dir . '/pb-nolink-taken.txt', "theirs\n" );
+		file_put_contents( $dir . '/.aura-restore-ffff', "mine\n" );
+		$this->assertFalse( $nolink->put_back( $dir . '/.aura-restore-ffff', $dir . '/pb-nolink-taken.txt' ) );
+		$this->assertSame( "theirs\n", file_get_contents( $dir . '/pb-nolink-taken.txt' ), "the other writer's file is untouched" );
+		$this->assertSame( "mine\n", file_get_contents( $dir . '/.aura-restore-ffff' ), 'the entry stays aside, named' );
+		$this->assertSame( 0, $nolink->seam_fired );
+
+		// (d) an occupied path is REFUSED, not replaced — the entry stays aside.
 		file_put_contents( $dir . '/pb-taken.txt', "theirs\n" );
 		symlink( $dir . '/pb-dest.txt', $dir . '/.aura-restore-cccc' );
 		$this->assertFalse( $snaps->put_back( $dir . '/.aura-restore-cccc', $dir . '/pb-taken.txt' ) );

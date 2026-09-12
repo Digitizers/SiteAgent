@@ -2655,7 +2655,9 @@ class Aura_Worker_Snapshots {
 	 *   rename( symlink, existing file ) replaces the file, symlink() onto an
 	 *   existing path does not.
 	 * - a REGULAR FILE is linked back with link(), the same no-clobber
-	 *   primitive put_claim_back() uses.
+	 *   primitive put_claim_back() uses — and on a host WITHOUT link(), by the
+	 *   exclusive-create copy put_claim_back() falls back to. It never reaches
+	 *   the rename on either kind of host.
 	 * - a DIRECTORY has no such primitive in PHP, and rename() stays. The
 	 *   exposure there is narrower than it looks: rename() of a directory
 	 *   FAILS onto a regular file and onto a non-empty directory, so the only
@@ -2677,11 +2679,36 @@ class Aura_Worker_Snapshots {
 			wp_delete_file( $aside ); // the link is back at its path; its held name goes
 			return true;
 		}
-		if ( ! is_dir( $aside ) && $this->link_available() && $this->link_into_place( $aside, $target ) ) {
+		if ( ! is_dir( $aside ) ) {
+			// A REGULAR FILE NEVER REACHES THE RENAME (Codex #102 round-4 P1).
+			// Gating only the link() attempt left a link-less host — which is
+			// most managed hosts — falling through to the clobbering rename for
+			// exactly the shape that has a second no-clobber primitive. Both
+			// are tried, and the entry stays aside if neither lands.
+			if ( $this->link_available() && $this->link_into_place( $aside, $target ) ) {
+				wp_delete_file( $aside );
+				return true;
+			}
+			// fopen( 'xb' ) refuses an occupied path, so the copy can never
+			// replace a writer who took it — the same way put_claim_back()
+			// puts a file back on such a host. An executable cannot be
+			// recreated this way (fopen() creates no execute bits), so one
+			// stays aside rather than going back lesser: the residual the plan
+			// documents for a link-less host.
+			if ( true !== $this->put_back_by_write( $aside, $target ) ) {
+				return false;
+			}
+			// The copy's source can still be being written by whoever held it.
+			// Only call it back when the two read the same.
+			$a = hash_file( 'sha256', $aside );
+			$b = hash_file( 'sha256', $target );
+			if ( ! is_string( $a ) || ! is_string( $b ) || ! hash_equals( $a, $b ) ) {
+				return false; // the copy may be behind; the entry stays aside, named
+			}
 			wp_delete_file( $aside );
 			return true;
 		}
-		// A directory, or a host without link(): the checked rename, with the
+		// A DIRECTORY, and only a directory: the checked rename, with the
 		// window documented above.
 		$this->before_non_file_put_back( $aside, $target );
 		if ( self::path_present( $target ) ) {
