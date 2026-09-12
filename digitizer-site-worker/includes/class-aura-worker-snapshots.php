@@ -325,6 +325,16 @@ class Aura_Worker_Snapshots {
 		return true === $done;
 	}
 
+	/**
+	 * A path that belongs to ANOTHER writer and could not be put back, set by
+	 * remove_own_entry() and folded into the answer by publish_restored_bytes()
+	 * (Codex #102 round-9 P1). Distinct from `moved_aside`, which names OUR own
+	 * claim: this is somebody else's live file, displaced by a claim of ours.
+	 *
+	 * @var string
+	 */
+	private $stranded = '';
+
 	/** drop_linked_claim(): the claim was redundant and is gone. */
 	const CLAIM_DROPPED = 'dropped';
 
@@ -476,7 +486,7 @@ class Aura_Worker_Snapshots {
 			// not that nothing else wrote into it. Same outcome as a partial —
 			// the file is a fact, the record must never let a restore delete it.
 			$this->after_publish( $path );
-			$landed = is_file( $path ) ? hash_file( 'sha256', $path ) : false;
+			$landed = $this->hash_regular_file( $path );
 			if ( ! is_string( $landed ) || ! hash_equals( $sha, $landed ) ) {
 				if ( 'link' === $this->last_publish_mode ) {
 					// The stage is a second NAME of the altered inode, not a copy
@@ -1895,7 +1905,7 @@ class Aura_Worker_Snapshots {
 					// (Codex #97 round-7 P2). Removed, else voided in place.
 					return $this->void_create_record( $id );
 				}
-				$actual = is_file( $target ) ? hash_file( 'sha256', $target ) : false;
+				$actual = $this->hash_regular_file( $target );
 				if ( is_string( $actual ) && hash_equals( $expected, $actual ) ) {
 					return true; // published; only the stage cleanup was lost
 				}
@@ -2367,7 +2377,7 @@ class Aura_Worker_Snapshots {
 		if ( null !== $refused ) {
 			return $this->restore_refusal( $refused );
 		}
-		$current = is_file( $target ) ? hash_file( 'sha256', $target ) : false;
+		$current = $this->hash_regular_file( $target );
 		if ( ! is_string( $current ) ) {
 			return $this->changed_since( 'the file is gone, or is no longer a regular file' );
 		}
@@ -2417,6 +2427,28 @@ class Aura_Worker_Snapshots {
 	 * @return array
 	 */
 	private function publish_restored_bytes( $target, $bytes, $replaced ) {
+		$this->stranded = ''; // one restore at a time; never carry another's
+		$out            = $this->publish_restored_bytes_inner( $target, $bytes, $replaced );
+		if ( '' !== $this->stranded && is_array( $out ) ) {
+			// Every exit of the inner call passes through here, so no branch can
+			// forget to report a displaced file (Codex #102 round-9 P1).
+			$out['stranded'] = $this->stranded;
+		}
+		$this->stranded = '';
+		return $out;
+	}
+
+	/**
+	 * publish_restored_bytes()'s body. Wrapped only so that a file belonging to
+	 * ANOTHER writer, displaced by one of our claims and unable to go back, is
+	 * named on whichever answer this returns.
+	 *
+	 * @param string $target   The path.
+	 * @param string $bytes    The snapshot's payload.
+	 * @param string $replaced The fence.
+	 * @return array
+	 */
+	private function publish_restored_bytes_inner( $target, $bytes, $replaced ) {
 		// STAGE FIRST, while the target is still live (Codex #101 round-2 P2):
 		// staging writes the whole payload, and doing it after the claim left
 		// the pathname absent for the length of that write. The mode is read
@@ -2640,7 +2672,7 @@ class Aura_Worker_Snapshots {
 		// let the caller delete the claim, which is the only copy of what the
 		// restore was undoing. Verify the bytes we meant to land.
 		$want = hash_file( 'sha256', $tmp );
-		$got  = hash_file( 'sha256', $target );
+		$got  = $this->hash_regular_file( $target );
 		if ( ! is_string( $want ) || ! is_string( $got ) || ! hash_equals( $want, $got ) ) {
 			return 'raced';
 		}
@@ -2692,7 +2724,15 @@ class Aura_Worker_Snapshots {
 			// `.aura-restore-*` name, which this engine never sweeps, rather
 			// than clobbering a file that is not ours. Either way this is "not
 			// cleared", and the caller keeps its own claim aside and says so.
-			$this->put_back_no_clobber( $aside, $target );
+			if ( ! $this->put_back_no_clobber( $aside, $target ) ) {
+				// IT COULD NOT GO BACK, SO SAY WHERE IT IS (Codex #102 round-9
+				// P1). A writer's EXECUTABLE file taken on a link-less host is
+				// the reachable case: the copy cannot recreate execute bits, so
+				// the file stays under a `.aura-restore-*` name nothing sweeps.
+				// Discarding that path left a live file silently displaced —
+				// and unlike our own claim, this one is not ours to have moved.
+				$this->stranded = $aside;
+			}
 			return false;
 		}
 		wp_delete_file( $aside );
@@ -2812,7 +2852,7 @@ class Aura_Worker_Snapshots {
 			// The copy's source can still be being written by whoever held it.
 			// Only call it back when the two read the same.
 			$a = hash_file( 'sha256', $aside );
-			$b = hash_file( 'sha256', $target );
+			$b = $this->hash_regular_file( $target );
 			if ( ! is_string( $a ) || ! is_string( $b ) || ! hash_equals( $a, $b ) ) {
 				return false; // the copy may be behind; the entry stays aside, named
 			}
@@ -2874,7 +2914,7 @@ class Aura_Worker_Snapshots {
 			return $answer( array( 'moved_aside' => $claim ) );
 		}
 		$a = hash_file( 'sha256', $claim );
-		$b = hash_file( 'sha256', $target );
+		$b = $this->hash_regular_file( $target );
 		if ( ! is_string( $a ) || ! is_string( $b ) || ! hash_equals( $a, $b ) ) {
 			return $answer( array( 'moved_aside' => $claim, 'detail' => $detail . '; the copy at its path may be behind the file kept aside' ) );
 		}
@@ -2963,7 +3003,7 @@ class Aura_Worker_Snapshots {
 			// window can still leave it aside.
 			$perms = @fileperms( $target ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- The file is there (checked above); a refusal falls through to the claim.
 			if ( false !== $perms && 0 !== ( $perms & 0111 ) ) {
-				$inplace = hash_file( 'sha256', $target );
+				$inplace = $this->hash_regular_file( $target );
 				if ( ! is_string( $inplace ) || ! hash_equals( $expected, $inplace ) ) {
 					return array(
 						'success' => false,
@@ -3052,7 +3092,7 @@ class Aura_Worker_Snapshots {
 		// round-8 P1). Writes after this check are the residual of a
 		// link()-less host and are why the claim name is reported at all.
 		$a = hash_file( 'sha256', $claim );
-		$b = hash_file( 'sha256', $target );
+		$b = $this->hash_regular_file( $target );
 		if ( ! is_string( $a ) || ! is_string( $b ) || ! hash_equals( $a, $b ) ) {
 			$out['moved_aside'] = $claim;
 			$out['detail']      = 'the file changed while it was being put back; the copy at its path may be behind the file kept aside';
@@ -3103,6 +3143,32 @@ class Aura_Worker_Snapshots {
 	 */
 	private static function path_present( $path ) {
 		return file_exists( $path ) || is_link( $path );
+	}
+
+	/**
+	 * sha256 of a path, but ONLY while that path is a regular file.
+	 *
+	 * hash_file() opens what it is given, and opening a FIFO BLOCKS until
+	 * another process opens the other end — with the target lock held and
+	 * nothing claimed, that hangs the request outright, and PHP has no
+	 * non-blocking open to prevent it (Codex #102 round-9 P2, the same hazard
+	 * round 8 closed on the copy path). Checking the type immediately before
+	 * the open, on a cleared stat cache, is as close as PHP allows; the
+	 * remaining window is the residual (a) shape — a check and an open that
+	 * cannot be made one operation.
+	 *
+	 * A non-regular path answers false, which every caller already reads as
+	 * "not the content we are looking for".
+	 *
+	 * @param string $path The path.
+	 * @return string|false
+	 */
+	private function hash_regular_file( $path ) {
+		clearstatcache( true, $path );
+		if ( is_link( $path ) || 'file' !== @filetype( $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- An absent path is an answer, not a warning.
+			return false;
+		}
+		return hash_file( 'sha256', $path );
 	}
 
 	/**

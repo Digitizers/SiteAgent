@@ -3195,6 +3195,71 @@ final class SnapshotsTest extends TestCase {
 		$this->assertSame( "newcomer\n", file_get_contents( $file ), "the racer's file is untouched" );
 	}
 
+	public function test_a_fifo_at_the_target_is_never_opened_for_hashing(): void {
+		// Codex #102 round-9 P2: hash_file() opens what it is given, and opening
+		// a FIFO blocks until another process opens the other end — here with
+		// the target lock held and NOTHING claimed, so the request hangs
+		// outright. The type is checked immediately before the open instead.
+		if ( ! function_exists( 'posix_mkfifo' ) ) {
+			$this->markTestSkipped( 'posix_mkfifo() is unavailable on this host' );
+		}
+		$file = WP_CONTENT_DIR . '/fifo-target.php';
+		file_put_contents( $file, "<?php // original\n" );
+		$plain = new Aura_Worker_Snapshots();
+		$rec   = $plain->overwrite_file( $file, "<?php // written\n" )['snapshot'];
+
+		unlink( $file );
+		$this->assertTrue( posix_mkfifo( $file, 0600 ), 'a FIFO now holds the path' );
+
+		$out = $plain->restore( $rec['id'] );
+
+		$this->assertFalse( $out['success'] );
+		$this->assertSame( 'aura_file_changed_since', $out['code'], 'a non-regular path is a changed-since fact, not a hang' );
+		$this->assertSame( 'fifo', filetype( $file ), 'the FIFO is untouched' );
+
+		unlink( $file );
+	}
+
+	public function test_a_displaced_file_that_cannot_go_back_is_named_in_the_answer(): void {
+		// Codex #102 round-9 P1: on a link-less host a racer's EXECUTABLE file
+		// taken by our cleanup claim cannot be recreated — the copy refuses
+		// execute bits — so it stays under a `.aura-restore-*` name nothing
+		// sweeps. Discarding that path left somebody else's live file silently
+		// displaced. It is reported separately from `moved_aside`, which names
+		// OUR OWN claim: these are two different files.
+		$file  = WP_CONTENT_DIR . '/displaced.php';
+		file_put_contents( $file, "<?php // original\n" );
+		$snaps = new class extends Aura_Worker_Snapshots {
+			public $armed = '';
+			protected function link_available() {
+				return false;
+			}
+			protected function write_all( $fh, $src ) {
+				parent::write_all( $fh, $src );
+				return false; // our own write fails, so the entry is cleared
+			}
+			protected function before_entry_removal( $target ) {
+				if ( '' !== $this->armed ) {
+					// A racer replaces our entry with an EXECUTABLE file of
+					// theirs, after the inode check and before the claim.
+					unlink( $target );
+					file_put_contents( $target, "#!/bin/sh\necho theirs\n" );
+					chmod( $target, 0755 );
+				}
+			}
+		};
+		$rec          = $snaps->overwrite_file( $file, "<?php // written\n" )['snapshot'];
+		$snaps->armed = $file;
+
+		$out = $snaps->restore( $rec['id'] );
+
+		$this->assertFalse( $out['success'] );
+		$this->assertArrayHasKey( 'stranded', $out, "the other writer's file is named" );
+		$this->assertMatchesRegularExpression( '/\/\.aura-restore-[0-9a-f]{16}$/', $out['stranded'] );
+		$this->assertSame( "#!/bin/sh\necho theirs\n", file_get_contents( $out['stranded'] ), 'their bytes, intact' );
+		$this->assertNotSame( $out['stranded'], isset( $out['moved_aside'] ) ? $out['moved_aside'] : null, 'distinct from our own claim' );
+	}
+
 	public function test_a_fifo_is_never_fed_to_the_copy_fallback(): void {
 		// Codex #102 round-8 P2: an external writer can replace the verified
 		// file with a FIFO between the hash and the claim, and on a link-less
