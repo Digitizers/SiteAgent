@@ -2607,6 +2607,7 @@ class Aura_Worker_Snapshots {
 		//
 		// The answer carries NO code: the restore wrote, so it is our own
 		// execution failure, not the site refusing with nothing written.
+		$staged = false;
 		if ( $this->link_available() ) {
 			clearstatcache( true, $tmp );
 			clearstatcache( true, $target );
@@ -2625,6 +2626,24 @@ class Aura_Worker_Snapshots {
 			}
 		}
 		$this->discard_stage( $tmp ); // in link mode the stage is a second name of the published inode
+		if ( $this->link_available() && is_array( $staged ) ) {
+			// AND AGAIN AFTER (Codex #102 round-17 P1). The check above and the
+			// release are two operations, so a racer landing between them makes
+			// the stage the published inode's last name and this discard drops
+			// it — after which the claim would be deleted and success reported
+			// for a target holding the racer's file. The window itself cannot be
+			// closed; answering success into it can.
+			clearstatcache( true, $target );
+			$still = @stat( $target ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Gone is an answer.
+			if ( ! is_array( $still ) || $still['ino'] !== $staged['ino'] || $still['dev'] !== $staged['dev'] ) {
+				return array(
+					'success'     => false,
+					'error'       => 'Failed to write file: ' . $target . ' (another writer replaced it immediately after the restore landed)',
+					'detail'      => 'the restore landed and was replaced before it could be confirmed; the file it replaced is kept aside',
+					'moved_aside' => $claim,
+				);
+			}
+		}
 
 		// THE CLAIM IS NOT DELETED ON TRUST (Codex #101 round-2 P1). A writer
 		// that opened the target before the claim holds a descriptor on THIS
@@ -2995,9 +3014,18 @@ class Aura_Worker_Snapshots {
 			return $answer( array( 'moved_aside' => $claim, 'detail' => $detail . '; the copy at its path may be behind the file kept aside' ) );
 		}
 		wp_delete_file( $claim );
-		return file_exists( $claim )
-			? $answer( array( 'moved_aside' => $claim ) )
-			: $answer();
+		if ( file_exists( $claim ) ) {
+			return $answer( array( 'moved_aside' => $claim ) );
+		}
+		// THE COPY MUST STILL BE THERE (Codex #102 round-17 P1, the rule
+		// put_back_no_clobber() already follows). A racer replacing the path
+		// between the hash and this delete makes the claim the changed file's
+		// only remaining copy, and deleting it destroys it — while the answer
+		// omits moved_aside and reads as a clean put-back.
+		if ( $b !== $this->hash_regular_file( $target ) ) {
+			return $answer( array( 'detail' => $detail . '; a concurrent writer replaced the path as the file was being put back, and the copy held aside could not be preserved' ) );
+		}
+		return $answer();
 	}
 
 	/**
@@ -3177,6 +3205,13 @@ class Aura_Worker_Snapshots {
 		wp_delete_file( $claim ); // the bytes are back at their path; the claim copy goes
 		if ( file_exists( $claim ) ) {
 			$out['moved_aside'] = $claim;
+			return $out;
+		}
+		// And the copy must still be there (Codex #102 round-17 P1): the same
+		// hash-then-delete window put_claim_back() and put_back_no_clobber()
+		// both re-check, on the branch that carries the create restore.
+		if ( $b !== $this->hash_regular_file( $target ) ) {
+			$out['detail'] = 'a concurrent writer replaced the path as the file was being put back, and the copy held aside could not be preserved';
 		}
 		return $out;
 	}
