@@ -335,6 +335,16 @@ class Aura_Worker_Snapshots {
 	 */
 	private $stranded = '';
 
+	/**
+	 * Whether an entry belonging to ANOTHER writer was put back and then
+	 * destroyed by a further writer before its held name could be released —
+	 * a loss with no surviving path to name, folded into the answer as a
+	 * detail by publish_restored_bytes() (Codex #102 round-21 P2).
+	 *
+	 * @var bool
+	 */
+	private $displaced_lost = false;
+
 	/** drop_linked_claim(): the claim was redundant and is gone. */
 	const CLAIM_DROPPED = 'dropped';
 
@@ -2427,14 +2437,20 @@ class Aura_Worker_Snapshots {
 	 * @return array
 	 */
 	private function publish_restored_bytes( $target, $bytes, $replaced ) {
-		$this->stranded = ''; // one restore at a time; never carry another's
+		$this->stranded       = ''; // one restore at a time; never carry another's
+		$this->displaced_lost = false;
 		$out            = $this->publish_restored_bytes_inner( $target, $bytes, $replaced );
 		if ( '' !== $this->stranded && is_array( $out ) ) {
 			// Every exit of the inner call passes through here, so no branch can
 			// forget to report a displaced file (Codex #102 round-9 P1).
 			$out['stranded'] = $this->stranded;
 		}
-		$this->stranded = '';
+		if ( $this->displaced_lost && is_array( $out ) ) {
+			$note           = "another writer's file was displaced by this restore's cleanup and destroyed by a third writer before it could be put back";
+			$out['detail']  = isset( $out['detail'] ) ? $out['detail'] . '; ' . $note : $note;
+		}
+		$this->stranded       = '';
+		$this->displaced_lost = false;
 		return $out;
 	}
 
@@ -2805,7 +2821,16 @@ class Aura_Worker_Snapshots {
 			// `.aura-restore-*` name, which this engine never sweeps, rather
 			// than clobbering a file that is not ours. Either way this is "not
 			// cleared", and the caller keeps its own claim aside and says so.
-			if ( self::CLAIM_KEPT === $this->put_back_no_clobber( $aside, $target ) ) {
+			$put_back = $this->put_back_no_clobber( $aside, $target );
+			if ( self::CLAIM_LOST === $put_back ) {
+				// A THIRD writer replaced the path after this entry was linked
+				// or copied back but before its held name was released, so the
+				// entry is gone and there is no path to name (Codex #102
+				// round-21 P2). It is still somebody else's data, and reporting
+				// it as an ordinary cleanup failure would hide that.
+				$this->displaced_lost = true;
+			}
+			if ( self::CLAIM_KEPT === $put_back ) {
 				// IT COULD NOT GO BACK, SO SAY WHERE IT IS (Codex #102 round-9
 				// P1). A writer's EXECUTABLE file taken on a link-less host is
 				// the reachable case: the copy cannot recreate execute bits, so
