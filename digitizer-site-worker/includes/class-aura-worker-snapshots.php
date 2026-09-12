@@ -960,6 +960,33 @@ class Aura_Worker_Snapshots {
 	}
 
 	/**
+	 * Remove a claim that was just linked back — ONLY while the path still
+	 * names the file we linked.
+	 *
+	 * link() leaves TWO names for one inode, and the delete that follows is a
+	 * second step on a name. A writer who replaces the target in between
+	 * leaves the CLAIM as the last remaining name, so deleting it destroys the
+	 * very file the put-back existed to protect — and silently, because the
+	 * answer would report it safely back (Codex #102 round-5 P1). Proving
+	 * identity before addressing a path by name is the rule remove_own_entry()
+	 * already follows; this is the same rule on the other side of the link.
+	 *
+	 * @param string $claim  The claim, now a second name for the file.
+	 * @param string $target The path it was linked to.
+	 * @return bool True when the path still holds our file (the claim was then
+	 *              removed, best-effort — the caller reports a name that stays).
+	 */
+	private function drop_linked_claim( $claim, $target ) {
+		$ours = @stat( $claim ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Gone is an answer.
+		$now  = @stat( $target ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Gone is an answer.
+		if ( ! is_array( $ours ) || ! is_array( $now ) || $now['ino'] !== $ours['ino'] || $now['dev'] !== $ours['dev'] ) {
+			return false; // the path stopped being our file: the claim is its LAST name
+		}
+		wp_delete_file( $claim );
+		return true;
+	}
+
+	/**
 	 * Refuse a create after its record was written. Discards the staged file
 	 * and retires the record — every exit after persist_create_record() goes
 	 * through here, because the record of a create that did NOT happen must
@@ -2686,8 +2713,7 @@ class Aura_Worker_Snapshots {
 			// exactly the shape that has a second no-clobber primitive. Both
 			// are tried, and the entry stays aside if neither lands.
 			if ( $this->link_available() && $this->link_into_place( $aside, $target ) ) {
-				wp_delete_file( $aside );
-				return true;
+				return $this->drop_linked_claim( $aside, $target );
 			}
 			// fopen( 'xb' ) refuses an occupied path, so the copy can never
 			// replace a writer who took it — the same way put_claim_back()
@@ -2739,7 +2765,11 @@ class Aura_Worker_Snapshots {
 		};
 		if ( $this->link_available() ) {
 			if ( $this->link_into_place( $claim, $target ) ) {
-				wp_delete_file( $claim );
+				if ( ! $this->drop_linked_claim( $claim, $target ) ) {
+					// A racer replaced the target after our link: the claim is
+					// the file's last name and is kept, named.
+					return $answer( array( 'moved_aside' => $claim ) );
+				}
 				return file_exists( $claim )
 					? $answer( array( 'moved_aside' => $claim ) )
 					: $answer();
@@ -2899,11 +2929,12 @@ class Aura_Worker_Snapshots {
 		$out = array( 'success' => false, 'code' => 'aura_file_changed_since', 'error' => 'file_changed_since' );
 		if ( $this->link_available() ) {
 			if ( $this->link_into_place( $claim, $target ) ) {
-				wp_delete_file( $claim ); // the second name to the same inode; the file is back at its path
-				if ( file_exists( $claim ) ) {
-					// The file is back, but its claim name could not be removed and
-					// `.aura-restore-*` is never swept: say where it is, as the
-					// matching-hash branch does (Codex #94 round-7 P2).
+				if ( ! $this->drop_linked_claim( $claim, $target ) || file_exists( $claim ) ) {
+					// Either a racer replaced the target after our link — the
+					// claim is the file's LAST name and must not be deleted
+					// (Codex #102 round-5 P1) — or the file is back and only its
+					// claim name could not be removed, and `.aura-restore-*` is
+					// never swept (Codex #94 round-7 P2). Both say where it is.
 					$out['moved_aside'] = $claim;
 				}
 				return $out;

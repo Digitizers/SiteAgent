@@ -3163,6 +3163,38 @@ final class SnapshotsTest extends TestCase {
 		$this->assertSame( "tampered by another writer\n", file_get_contents( $file ), "the other writer's bytes are not clobbered" );
 	}
 
+	public function test_a_racer_that_replaces_the_target_after_the_link_keeps_the_claim(): void {
+		// Codex #102 round-5 P1: link() leaves TWO names for one inode, and the
+		// delete that follows is a second step on a name. A writer who replaces
+		// the target in between leaves the CLAIM as the last remaining name —
+		// so deleting it destroys the very file the put-back existed to
+		// protect, silently, because the answer reported it safely back.
+		$file  = WP_CONTENT_DIR . '/relinked.php';
+		$snaps = new class extends Aura_Worker_Snapshots {
+			public $armed = '';
+			protected function link_into_place( $claim, $target ) {
+				$ok = parent::link_into_place( $claim, $target );
+				if ( $ok && '' !== $this->armed ) {
+					unlink( $target );                            // a racer replaces the path
+					file_put_contents( $target, "newcomer\n" );   // after our link, before our delete
+				}
+				return $ok;
+			}
+		};
+		$rec = $snaps->create_file( $file, "agent\n" )['snapshot'];
+		file_put_contents( $file, "edited\n" ); // not the agent's bytes: it is put back, never deleted
+		$snaps->armed = $file;
+
+		$restore = $snaps->restore( $rec['id'] );
+
+		$this->assertFalse( $restore['success'] );
+		$this->assertSame( 'file_changed_since', $restore['error'] );
+		$this->assertArrayHasKey( 'moved_aside', $restore, "the claim is the changed file's last name; it is kept and named" );
+		$this->assertFileExists( $restore['moved_aside'] );
+		$this->assertSame( "edited\n", file_get_contents( $restore['moved_aside'] ), 'the user data survives' );
+		$this->assertSame( "newcomer\n", file_get_contents( $file ), "the racer's file is untouched" );
+	}
+
 	public function test_a_no_clobber_shape_is_put_back_without_the_checked_rename(): void {
 		// Codex #102 round-3 P1: check-then-rename is a race — rename() CLOBBERS
 		// on POSIX, so a writer arriving between the check and the rename is
