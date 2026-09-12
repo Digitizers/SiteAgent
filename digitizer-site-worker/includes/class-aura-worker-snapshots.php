@@ -3299,7 +3299,14 @@ class Aura_Worker_Snapshots {
 			wp_delete_file( $aside );
 			return;
 		}
-		$this->put_back_no_clobber( $aside, $path );
+		if ( ! $this->put_back_no_clobber( $aside, $path ) ) {
+			// The same obligation remove_own_entry() carries (Codex #102
+			// round-14 P2): a socket, a device node or a link-less executable
+			// cannot be put back, and discarding the path would leave another
+			// writer's LIVE entry gone from its real name with nothing saying
+			// where it went.
+			$this->stranded = $aside;
+		}
 	}
 
 	/**
