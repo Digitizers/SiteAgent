@@ -70,12 +70,16 @@ final class SnapshotsTest extends TestCase {
 	}
 
 	public function test_snapshot_file_extra_cannot_override_the_records_identity(): void {
-		// Item 3 (final review): $extra is merged into the persisted record,
-		// so a caller could otherwise overwrite 'kind', 'target', 'bytes' or
-		// 'existed' — and an 'existed' => false would make a future restore()
-		// dispatch to restore_created_file(), which DELETES the file. The
-		// reserved identity keys must win; every other key in $extra (e.g.
-		// write_seq) must still land.
+		// Item 3 (final review) and Codex #102 round-23 P2: $extra reaches a
+		// PUBLIC method and is merged into the persisted record, so a caller
+		// could otherwise overwrite 'kind', 'target', 'bytes' or 'existed' —
+		// an 'existed' => false would make a future restore() dispatch to
+		// restore_created_file(), which DELETES the file — or hand a direct
+		// snapshot a 'replaced_with_sha256' the engine never established,
+		// turning a fail-closed record into a restorable one.
+		//
+		// The guard is an ALLOWLIST for that reason: the blocklist it replaced
+		// had already missed the fence. Only CALLER_META_KEYS lands.
 		$snaps = new Aura_Worker_Snapshots();
 		$file  = WP_CONTENT_DIR . '/identity.php';
 		file_put_contents( $file, "<?php // original\n" );
@@ -87,6 +91,7 @@ final class SnapshotsTest extends TestCase {
 				'kind'      => 'page',
 				'target'    => '/not/the/real/path.php',
 				'bytes'     => 999999,
+				'replaced_with_sha256' => hash( 'sha256', "<?php // original\n" ),
 				'write_seq' => 7,
 			)
 		);
@@ -97,7 +102,13 @@ final class SnapshotsTest extends TestCase {
 		$this->assertSame( $file, $rec['target'], 'target cannot be overridden' );
 		$this->assertSame( strlen( "<?php // original\n" ), $rec['bytes'], 'bytes cannot be overridden' );
 		$this->assertArrayNotHasKey( 'existed', $rec, 'existed is dropped, never set to the caller\'s value' );
-		$this->assertSame( 7, $rec['write_seq'], 'a non-reserved key in $extra still lands' );
+		$this->assertArrayNotHasKey( 'replaced_with_sha256', $rec, 'only the engine\'s own post-write stamp may fence a record' );
+		$this->assertSame( 7, $rec['write_seq'], 'an allowlisted key in $extra still lands' );
+
+		// And the record really is fail-closed: unfenced, so a restore refuses.
+		$restore = $snaps->restore( $snap['snapshot']['id'] );
+		$this->assertFalse( $restore['success'] );
+		$this->assertSame( 'aura_snapshot_unfenced', $restore['code'] );
 	}
 
 	public function test_option_snapshot_and_restore_roundtrip(): void {

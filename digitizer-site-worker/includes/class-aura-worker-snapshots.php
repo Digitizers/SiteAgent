@@ -161,7 +161,10 @@ class Aura_Worker_Snapshots {
 	 *
 	 * @param string $path  Absolute path to the file.
 	 * @param array  $extra Extra meta keys merged into the record before it is
-	 *                      persisted (e.g. `write_seq` from an engine writer).
+	 *                      persisted. Only the keys in CALLER_META_KEYS are
+	 *                      kept (`write_seq`); everything else is dropped,
+	 *                      including the overwrite fence, which only the
+	 *                      engine's own post-write stamp may establish.
 	 *                      The record's identity keys (`kind`, `target`,
 	 *                      `bytes`, `existed`) are reserved: any of the same
 	 *                      name in $extra is ignored, never overriding what
@@ -178,15 +181,20 @@ class Aura_Worker_Snapshots {
 			return array( 'success' => false, 'error' => 'Unable to read file: ' . $path );
 		}
 
-		// The identity keys win: a caller-supplied 'kind', 'target', 'bytes'
-		// or 'existed' in $extra must never override what this method
-		// establishes — an 'existed' => false, for instance, would make a
-		// future restore() dispatch to restore_created_file(), which DELETES
-		// the file. This method never sets 'existed' itself, so the reserved
-		// key is simply dropped from $extra rather than given a value here.
+		// AN ALLOWLIST, NOT A BLOCKLIST (Codex #102 round-23 P2). $extra reaches
+		// this PUBLIC method from outside the engine, and a blocklist of the
+		// record's dangerous keys has to be extended every time the record
+		// grows one — which had already failed once: the four identity keys
+		// were reserved and `replaced_with_sha256`, the FENCE, was not, so a
+		// caller could hand a direct snapshot a fence the engine never
+		// established and turn a fail-closed record into a restorable one. Only
+		// the fence's own post-write stamping path may create it.
+		//
+		// The keys a caller may contribute are named here instead, so a new
+		// record key is inert until somebody deliberately adds it.
 		$record = $this->persist(
 			array_merge(
-				array_diff_key( $extra, array_flip( array( 'kind', 'target', 'bytes', 'existed' ) ) ),
+				array_intersect_key( $extra, array_flip( self::CALLER_META_KEYS ) ),
 				array(
 					'kind'   => 'file',
 					'target' => $path,
@@ -367,6 +375,14 @@ class Aura_Worker_Snapshots {
 
 	/** drop_linked_claim(): a racer took the path inside the window PHP cannot close, and the name removed was the file's last. Unrecoverable — but never silent. */
 	const CLAIM_LOST = 'lost';
+
+	/**
+	 * The ONLY record keys snapshot_file()'s caller may contribute. Everything
+	 * else in $extra is dropped — see the note at the array_intersect_key()
+	 * that uses this. Adding a key here makes it caller-settable, so each one
+	 * is a decision, not an oversight.
+	 */
+	const CALLER_META_KEYS = array( 'write_seq' );
 
 	/** A staged file this old with no create in flight is a crash's leftover. */
 	const STAGE_MAX_AGE = 3600; // one hour — a literal, so the class needs no WordPress constant at load
