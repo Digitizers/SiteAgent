@@ -2641,7 +2641,7 @@ final class SnapshotsTest extends TestCase {
 		$this->assertSame( "#!/bin/sh\necho edited\n", file_get_contents( $restore['moved_aside'] ) );
 	}
 
-	public function test_without_link_a_short_put_back_write_keeps_the_file_aside_and_leaves_our_empty_entry(): void {
+	public function test_without_link_a_short_put_back_write_keeps_the_file_aside_and_clears_our_empty_entry(): void {
 		$file  = WP_CONTENT_DIR . '/nolinkback-short.php';
 		$snaps = new class extends Aura_Worker_Snapshots {
 			public $allow_link = true;
@@ -2661,7 +2661,20 @@ final class SnapshotsTest extends TestCase {
 		$this->assertSame( 'file_changed_since', $restore['error'] );
 		$this->assertArrayHasKey( 'moved_aside', $restore );
 		$this->assertSame( "edited\n", file_get_contents( $restore['moved_aside'] ), 'the changed bytes are kept' );
-		$this->assertSame( '', file_get_contents( $file ), 'our empty entry, never a truncated one' );
+		// The empty entry this call created is CLEARED rather than left at the
+		// live path (Codex #102 round-26 P1). Leaving it is right for the create
+		// path, which has nothing else to put there; a put-back holds the real
+		// file under its claim, so an empty file here would take the site's file
+		// offline and block the next no-clobber attempt — fopen( 'xb' ) would
+		// refuse it. This is the rule publish_restored_by_write() already keeps:
+		// a restore clears its own damage.
+		$this->assertFalse( self::path_exists( $file ), 'the path is left free, not occupied by our empty entry' );
+	}
+
+	/** file_exists() plus is_link(), so a dangling link still counts as present. */
+	private static function path_exists( $path ) {
+		clearstatcache( true, $path );
+		return file_exists( $path ) || is_link( $path );
 	}
 
 	public function test_write_seq_is_recorded_and_strictly_increases_per_target(): void {
@@ -3272,6 +3285,39 @@ final class SnapshotsTest extends TestCase {
 		$this->assertMatchesRegularExpression( '/\/\.aura-restore-[0-9a-f]{16}$/', $out['stranded'] );
 		$this->assertSame( "#!/bin/sh\necho theirs\n", file_get_contents( $out['stranded'] ), 'their bytes, intact' );
 		$this->assertNotSame( $out['stranded'], isset( $out['moved_aside'] ) ? $out['moved_aside'] : null, 'distinct from our own claim' );
+	}
+
+	public function test_a_put_back_refused_by_a_wide_acl_leaves_the_path_free(): void {
+		// Codex #102 round-26 P1: a default ACL can make the exclusively created
+		// recovery copy come out wider than asked, which write_exclusively()
+		// refuses — and it used to leave its empty entry at the LIVE path. The
+		// claim then held the real file while the site's path held nothing but
+		// an empty file, and the next no-clobber attempt was blocked, because
+		// fopen( 'xb' ) refuses an existing path. A failed restore took the file
+		// offline.
+		$file  = WP_CONTENT_DIR . '/acl-putback.php';
+		$snaps = new class extends Aura_Worker_Snapshots {
+			public $wide = false;
+			protected function link_available() {
+				return false; // the host where the copy fallback is reached
+			}
+			protected function mode_of( $fh, array $stat ) {
+				// The ACL hands back a wider mode than the umask asked for, but
+				// only once the put-back's own copy is being created.
+				return $this->wide ? 0100666 : (int) $stat['mode'];
+			}
+		};
+		$rec = $snaps->create_file( $file, "agent\n" )['snapshot'];
+		file_put_contents( $file, "edited\n" );
+		chmod( $file, 0600 ); // so the put-back asks for 0600 and the ACL's 0666 differs
+		$snaps->wide = true;
+
+		$restore = $snaps->restore( $rec['id'] );
+
+		$this->assertFalse( $restore['success'] );
+		$this->assertArrayHasKey( 'moved_aside', $restore, 'the changed file is kept and named' );
+		$this->assertSame( "edited\n", file_get_contents( $restore['moved_aside'] ) );
+		$this->assertFalse( self::path_exists( $file ), 'and the live path is left free, not holding an empty file of ours' );
 	}
 
 	public function test_the_target_is_verified_after_the_claim_hash_not_before_it(): void {

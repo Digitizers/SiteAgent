@@ -831,6 +831,10 @@ class Aura_Worker_Snapshots {
 	 *
 	 * @param string   $path Target path.
 	 * @param resource $src  Readable handle with the bytes.
+	 * @param bool     $clear_on_refusal Whether a refusal should remove the entry
+	 *                       this call created, identity-checked. For a caller that
+	 *                       still holds the file elsewhere (the put-back); the
+	 *                       create path leaves it, having nothing else to put there.
 	 * @param int|null $mode Mode for the new entry; null = FS_CHMOD_FILE (0644).
 	 *                       fopen() creates from a base of 0666 and a umask can only
 	 *                       REMOVE bits, so execute bits cannot be produced here: a
@@ -847,7 +851,7 @@ class Aura_Worker_Snapshots {
 	 *                     names it. `last_publish_detail` carries the sentence for
 	 *                     'partial' too.
 	 */
-	private function write_exclusively( $path, $src, $mode = null ) {
+	private function write_exclusively( $path, $src, $mode = null, $clear_on_refusal = false ) {
 		$mode = ( null === $mode ? $this->create_mode() : (int) $mode ) & 0666; // callers refuse execute bits before reaching here
 		$was  = umask( 0777 & ~$mode ); // the mode is decided AT creation, on our inode only
 		$fh   = @fopen( $path, 'xb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- 'x' is the no-clobber claim; EEXIST is the expected refusal, classified below.
@@ -863,8 +867,20 @@ class Aura_Worker_Snapshots {
 		// (Codex #97 round-8 P1).
 		$real = is_array( $mine ) ? ( (int) $this->mode_of( $fh, $mine ) & 0777 ) : -1;
 		if ( $real !== $mode ) {
+			// A CALLER THAT STILL HOLDS THE FILE CLEARS THE PATH (Codex #102
+			// round-26 P1). Leaving the empty entry is right for the CREATE
+			// path, which has nothing else to put there — but a put-back holds
+			// the real file under its claim, and an empty file at the live path
+			// takes the site's file offline AND blocks the next no-clobber
+			// attempt, because fopen( 'xb' ) will now refuse it.
+			$cleared = $clear_on_refusal ? $this->remove_own_entry( $fh, $path, $mine ) : false;
 			fclose( $fh ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
-			return sprintf( 'the created entry has mode %o, not the %o asked for (a default ACL?); an empty file remains at %s', $real, $mode, $path );
+			return sprintf(
+				'the created entry has mode %o, not the %o asked for (a default ACL?)%s',
+				$real,
+				$mode,
+				$cleared ? '' : '; an empty file remains at ' . $path
+			);
 		}
 		$written = $this->write_all( $fh, $src );
 		$synced  = $written && fflush( $fh ) && ( function_exists( 'fsync' ) ? (bool) fsync( $fh ) : true );
@@ -878,12 +894,13 @@ class Aura_Worker_Snapshots {
 			// the emptying is refused, the partial bytes are a fact the caller
 			// must keep recovery state for (Codex #97 round-3 P2).
 			$emptied = $this->truncate_to_empty( $fh );
+			$cleared = $emptied && $clear_on_refusal ? $this->remove_own_entry( $fh, $path, $mine ) : false;
 			fclose( $fh ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			if ( ! $emptied ) {
 				$this->last_publish_detail = 'the write into the claimed target was short and the entry could not be emptied' . ( $still_ours ? '; partial bytes remain at ' . $path : '' );
 				return 'partial';
 			}
-			return 'the write into the claimed target was short' . ( $still_ours ? '; an empty file remains at ' . $path : '' );
+			return 'the write into the claimed target was short' . ( $still_ours && ! $cleared ? '; an empty file remains at ' . $path : '' );
 		}
 		fclose( $fh ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 		if ( ! $still_ours ) {
@@ -3365,7 +3382,10 @@ class Aura_Worker_Snapshots {
 			fclose( $src ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			return sprintf( 'the file is executable (mode %o) and that cannot be recreated without link()', $mode );
 		}
-		$out = $this->write_exclusively( $target, $src, $mode ); // the file comes back with the mode it had (Codex #97 round-3 P2)
+		// $clear_on_refusal: this caller HOLDS the file under its claim name, so
+		// a refusal must leave the live path free for the next attempt rather
+		// than occupied by an empty entry of ours (Codex #102 round-26 P1).
+		$out = $this->write_exclusively( $target, $src, $mode, true ); // the file comes back with the mode it had (Codex #97 round-3 P2)
 		fclose( $src ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 		return $out;
 	}
