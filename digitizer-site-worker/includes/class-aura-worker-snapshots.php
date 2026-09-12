@@ -1086,6 +1086,16 @@ class Aura_Worker_Snapshots {
 	}
 
 	/**
+	 * Seam between a restore landing and the last check before its claim is
+	 * released. Nothing in production; a test models a racer editing the
+	 * target in the one window that check exists to catch.
+	 *
+	 * @param string $target The path.
+	 */
+	protected function before_claim_release( $target ) {
+	}
+
+	/**
 	 * Refuse a create after its record was written. Discards the staged file
 	 * and retires the record — every exit after persist_create_record() goes
 	 * through here, because the record of a create that did NOT happen must
@@ -2689,22 +2699,28 @@ class Aura_Worker_Snapshots {
 					'moved_aside' => $claim,
 				);
 			}
-			// AND AN INODE CHECK IS NOT A CONTENT CHECK (Codex #102 round-19
-			// P1) — the rule round 2 established for the link()-less branch,
-			// reaching this one at last. A writer editing the target IN PLACE
-			// keeps the inode, so every identity test above passes while the
-			// bytes at the path are theirs. Reporting success there would tell
-			// Aura the rollback landed for content this restore never produced.
-			// The link()-less branch proves the same thing for itself before it
-			// returns true, which is why only this one needs it here.
-			if ( hash( 'sha256', $bytes ) !== $this->hash_regular_file( $target ) ) {
-				return array(
-					'success'     => false,
-					'error'       => 'Failed to write file: ' . $target . ' (another writer changed it immediately after the restore landed)',
-					'detail'      => 'the restore landed and its bytes were changed before it could be confirmed; the file it replaced is kept aside',
-					'moved_aside' => $claim,
-				);
-			}
+		}
+		// AND AN INODE CHECK IS NOT A CONTENT CHECK — ON EITHER HOST (Codex
+		// #102 rounds 19 and 24). A writer editing the target IN PLACE keeps
+		// the inode, so every identity test above passes while the bytes at the
+		// path are theirs; reporting success would tell Aura the rollback
+		// landed for content this restore never produced.
+		//
+		// This check is deliberately NOT gated on link_available(). The
+		// link()-less publish does hash its own result, but it does so before
+		// returning, and a racer can edit the target between that hash and the
+		// claim's release just below — so gating it there left the write branch
+		// with no check adjacent to the release, which is the one that matters.
+		// It is the LAST thing verified before the claim, the only held copy of
+		// the pre-restore file, is given up.
+		$this->before_claim_release( $target );
+		if ( hash( 'sha256', $bytes ) !== $this->hash_regular_file( $target ) ) {
+			return array(
+				'success'     => false,
+				'error'       => 'Failed to write file: ' . $target . ' (another writer changed it immediately after the restore landed)',
+				'detail'      => 'the restore landed and its bytes were changed before it could be confirmed; the file it replaced is kept aside',
+				'moved_aside' => $claim,
+			);
 		}
 
 		// THE CLAIM IS NOT DELETED ON TRUST (Codex #101 round-2 P1). A writer

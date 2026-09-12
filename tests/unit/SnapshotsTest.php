@@ -3274,6 +3274,42 @@ final class SnapshotsTest extends TestCase {
 		$this->assertNotSame( $out['stranded'], isset( $out['moved_aside'] ) ? $out['moved_aside'] : null, 'distinct from our own claim' );
 	}
 
+	public function test_a_racer_editing_the_target_before_the_claim_is_released_is_caught_without_link(): void {
+		// Codex #102 round-24 P1: the final content check was gated on
+		// link_available(), so on a link-less host — most managed hosts — the
+		// only target check adjacent to the claim's release did not run. The
+		// write branch does hash its own result, but BEFORE returning, and a
+		// racer editing the target between that hash and the release would see
+		// the restore answer success for their bytes while the claim, the only
+		// held copy of the pre-restore file, was discarded.
+		$file = WP_CONTENT_DIR . '/nolink-late-edit.php';
+		file_put_contents( $file, "<?php // original\n" );
+		$plain = new Aura_Worker_Snapshots();
+		$rec   = $plain->overwrite_file( $file, "<?php // written\n" )['snapshot'];
+
+		$snaps = new class extends Aura_Worker_Snapshots {
+			public $armed = '';
+			protected function link_available() {
+				return false;
+			}
+			protected function before_claim_release( $target ) {
+				if ( '' !== $this->armed ) {
+					file_put_contents( $target, "edited by another writer\n" );
+					$this->armed = '';
+				}
+			}
+		};
+		$snaps->armed = $file;
+
+		$out = $snaps->restore( $rec['id'] );
+
+		$this->assertFalse( $out['success'], 'the bytes at the path are not the ones restored' );
+		$this->assertArrayNotHasKey( 'code', $out, 'we wrote, so this is our own failure — a 500, not a 409' );
+		$this->assertArrayHasKey( 'moved_aside', $out, 'the claim is kept rather than discarded' );
+		$this->assertSame( "<?php // written\n", file_get_contents( $out['moved_aside'] ), 'the pre-restore file survives' );
+		$this->assertSame( "edited by another writer\n", file_get_contents( $file ), "the other writer's bytes are untouched" );
+	}
+
 	public function test_a_racer_editing_the_target_in_place_after_a_linked_publish_is_not_a_success(): void {
 		// Codex #102 round-19 P1: an INODE check is not a CONTENT check — the
 		// rule round 2 established for the link()-less branch, reaching this one
