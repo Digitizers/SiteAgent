@@ -3195,6 +3195,66 @@ final class SnapshotsTest extends TestCase {
 		$this->assertSame( "newcomer\n", file_get_contents( $file ), "the racer's file is untouched" );
 	}
 
+	public function test_a_racer_inside_the_unclosable_window_is_reported_not_silent(): void {
+		// Codex #102 round-6 P1. PHP cannot make a check and an unlink one
+		// operation, so the last sliver of residual (a) stays open: a writer
+		// who replaces the path between the proof and the delete leaves the
+		// claim as the file's last name, and the delete then loses it. What is
+		// fixable is the SILENCE — that outcome used to answer a clean put-back
+		// for a file that no longer existed anywhere. The seam fires in exactly
+		// that window; the answer must say what happened.
+		$file  = WP_CONTENT_DIR . '/window-loss.php';
+		$snaps = new class extends Aura_Worker_Snapshots {
+			public $armed = '';
+			protected function before_claim_drop( $claim, $target ) {
+				if ( '' !== $this->armed ) {
+					unlink( $target );                           // inside the window
+					file_put_contents( $target, "newcomer\n" );
+				}
+			}
+		};
+		$rec = $snaps->create_file( $file, "agent\n" )['snapshot'];
+		file_put_contents( $file, "edited\n" );
+		$snaps->armed = $file;
+
+		$restore = $snaps->restore( $rec['id'] );
+
+		$this->assertFalse( $restore['success'] );
+		$this->assertSame( 'file_changed_since', $restore['error'] );
+		$this->assertArrayNotHasKey( 'moved_aside', $restore, 'there is no file to point at any more' );
+		$this->assertArrayHasKey( 'detail', $restore, 'but the caller is told, rather than reading it as a clean put-back' );
+		$this->assertStringContainsString( 'could not be preserved', $restore['detail'] );
+		$this->assertSame( "newcomer\n", file_get_contents( $file ), "the racer's file is untouched" );
+	}
+
+	public function test_a_racer_that_unlinks_the_target_before_the_drop_keeps_the_last_name(): void {
+		// The same window, one step earlier — and here it IS caught: the link
+		// count read off the claim is 1, so the claim is the file's last name
+		// and is kept rather than deleted.
+		$file  = WP_CONTENT_DIR . '/window-caught.php';
+		$snaps = new class extends Aura_Worker_Snapshots {
+			public $armed = '';
+			protected function link_into_place( $claim, $target ) {
+				$ok = parent::link_into_place( $claim, $target );
+				if ( $ok && '' !== $this->armed ) {
+					unlink( $target ); // the target's name goes; ours is the last
+					file_put_contents( $target, "newcomer\n" );
+				}
+				return $ok;
+			}
+		};
+		$rec = $snaps->create_file( $file, "agent\n" )['snapshot'];
+		file_put_contents( $file, "edited\n" );
+		$snaps->armed = $file;
+
+		$restore = $snaps->restore( $rec['id'] );
+
+		$this->assertFalse( $restore['success'] );
+		$this->assertArrayHasKey( 'moved_aside', $restore );
+		$this->assertSame( "edited\n", file_get_contents( $restore['moved_aside'] ), 'the user data survives' );
+		$this->assertSame( "newcomer\n", file_get_contents( $file ) );
+	}
+
 	public function test_a_no_clobber_shape_is_put_back_without_the_checked_rename(): void {
 		// Codex #102 round-3 P1: check-then-rename is a race — rename() CLOBBERS
 		// on POSIX, so a writer arriving between the check and the rename is

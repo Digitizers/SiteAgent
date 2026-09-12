@@ -325,6 +325,15 @@ class Aura_Worker_Snapshots {
 		return true === $done;
 	}
 
+	/** drop_linked_claim(): the claim was redundant and is gone. */
+	const CLAIM_DROPPED = 'dropped';
+
+	/** drop_linked_claim(): the claim still names the file and is kept, to be reported. */
+	const CLAIM_KEPT = 'kept';
+
+	/** drop_linked_claim(): a racer took the path inside the window PHP cannot close, and the name removed was the file's last. Unrecoverable — but never silent. */
+	const CLAIM_LOST = 'lost';
+
 	/** A staged file this old with no create in flight is a crash's leftover. */
 	const STAGE_MAX_AGE = 3600; // one hour — a literal, so the class needs no WordPress constant at load
 
@@ -977,13 +986,53 @@ class Aura_Worker_Snapshots {
 	 *              removed, best-effort — the caller reports a name that stays).
 	 */
 	private function drop_linked_claim( $claim, $target ) {
+		// PHP CACHES stat() PER PATH, and callers reach here having already
+		// asked is_link()/is_dir() about this very name — so a cached entry
+		// here predates the link() that just ran, and its nlink still reads 1.
+		// Every check below is about state that changed a statement ago.
+		clearstatcache( true, $claim );
+		clearstatcache( true, $target );
 		$ours = @stat( $claim ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Gone is an answer.
 		$now  = @stat( $target ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Gone is an answer.
 		if ( ! is_array( $ours ) || ! is_array( $now ) || $now['ino'] !== $ours['ino'] || $now['dev'] !== $ours['dev'] ) {
-			return false; // the path stopped being our file: the claim is its LAST name
+			return self::CLAIM_KEPT; // the path stopped being our file: the claim is its LAST name
 		}
+		// THE LINK COUNT IS THE CLOSER CHECK (Codex #102 round-6 P1). This
+		// claim is only redundant while the inode still carries the target's
+		// name too. Reading nlink off the stat we already hold is nearer the
+		// unlink than a second lookup by name, so it narrows the window that
+		// cannot be closed — a racer who has already unlinked the target is
+		// caught here, and the file keeps its last name.
+		if ( isset( $ours['nlink'] ) && (int) $ours['nlink'] < 2 ) {
+			return self::CLAIM_KEPT;
+		}
+		$this->before_claim_drop( $claim, $target );
 		wp_delete_file( $claim );
-		return true;
+		if ( self::path_present( $claim ) ) {
+			return self::CLAIM_KEPT; // the name could not be removed; the caller says where it is
+		}
+		// PHP CANNOT MAKE A CHECK AND AN UNLINK ONE OPERATION — that is the
+		// residual the plan documents as (a), and no ordering of calls closes
+		// it. What IS fixable is the SILENCE: losing this race used to answer a
+		// clean put-back for a file that no longer exists anywhere. Re-read the
+		// path, and when it stopped being the file we linked, say so.
+		clearstatcache( true, $target );
+		$after = @stat( $target ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Gone is an answer.
+		if ( ! is_array( $after ) || $after['ino'] !== $ours['ino'] || $after['dev'] !== $ours['dev'] ) {
+			return self::CLAIM_LOST;
+		}
+		return self::CLAIM_DROPPED;
+	}
+
+	/**
+	 * Seam between proving the claim is redundant and removing it. Nothing in
+	 * production; a test models a racer replacing the path in the one window
+	 * PHP leaves open here.
+	 *
+	 * @param string $claim  The claim.
+	 * @param string $target The path it was linked to.
+	 */
+	protected function before_claim_drop( $claim, $target ) {
 	}
 
 	/**
@@ -2713,7 +2762,7 @@ class Aura_Worker_Snapshots {
 			// exactly the shape that has a second no-clobber primitive. Both
 			// are tried, and the entry stays aside if neither lands.
 			if ( $this->link_available() && $this->link_into_place( $aside, $target ) ) {
-				return $this->drop_linked_claim( $aside, $target );
+				return self::CLAIM_DROPPED === $this->drop_linked_claim( $aside, $target );
 			}
 			// fopen( 'xb' ) refuses an occupied path, so the copy can never
 			// replace a writer who took it — the same way put_claim_back()
@@ -2765,12 +2814,11 @@ class Aura_Worker_Snapshots {
 		};
 		if ( $this->link_available() ) {
 			if ( $this->link_into_place( $claim, $target ) ) {
-				if ( ! $this->drop_linked_claim( $claim, $target ) ) {
-					// A racer replaced the target after our link: the claim is
-					// the file's last name and is kept, named.
-					return $answer( array( 'moved_aside' => $claim ) );
+				$dropped = $this->drop_linked_claim( $claim, $target );
+				if ( self::CLAIM_LOST === $dropped ) {
+					return $answer( array( 'detail' => $detail . '; a concurrent writer replaced the path as the file was being put back, and the copy held aside could not be preserved' ) );
 				}
-				return file_exists( $claim )
+				return self::CLAIM_KEPT === $dropped
 					? $answer( array( 'moved_aside' => $claim ) )
 					: $answer();
 			}
@@ -2929,13 +2977,16 @@ class Aura_Worker_Snapshots {
 		$out = array( 'success' => false, 'code' => 'aura_file_changed_since', 'error' => 'file_changed_since' );
 		if ( $this->link_available() ) {
 			if ( $this->link_into_place( $claim, $target ) ) {
-				if ( ! $this->drop_linked_claim( $claim, $target ) || file_exists( $claim ) ) {
+				$dropped = $this->drop_linked_claim( $claim, $target );
+				if ( self::CLAIM_KEPT === $dropped ) {
 					// Either a racer replaced the target after our link — the
 					// claim is the file's LAST name and must not be deleted
 					// (Codex #102 round-5 P1) — or the file is back and only its
 					// claim name could not be removed, and `.aura-restore-*` is
 					// never swept (Codex #94 round-7 P2). Both say where it is.
 					$out['moved_aside'] = $claim;
+				} elseif ( self::CLAIM_LOST === $dropped ) {
+					$out['detail'] = 'a concurrent writer replaced the path as the file was being put back, and the copy held aside could not be preserved';
 				}
 				return $out;
 			}
