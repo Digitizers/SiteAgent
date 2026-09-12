@@ -2752,6 +2752,23 @@ class Aura_Worker_Snapshots {
 			if ( ! is_string( $dest ) || ! @symlink( $dest, $target ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- EEXIST is the refusal this call is chosen FOR.
 				return false;
 			}
+			// THE ENTRY ASIDE IS ONLY REDUNDANT WHILE THE PATH HOLDS WHAT WE
+			// PUT THERE (Codex #102 round-7 P2 — the rule the hard-link branch
+			// learned in rounds 5 and 6, which this one did not carry). A
+			// writer who replaces the path after the symlink() lands leaves
+			// this the only copy, and deleting it loses that writer's entry
+			// while the answer reports it safely back.
+			//
+			// Identity for a symlink is its DESTINATION, not an inode: the link
+			// we just created is a different inode from the one held aside, by
+			// construction, so readlink() is the comparison that means anything
+			// here. The check and the unlink are still two steps — the same
+			// residual (a) window, failing safe.
+			$this->before_claim_drop( $aside, $target );
+			clearstatcache( true, $target );
+			if ( ! is_link( $target ) || @readlink( $target ) !== $dest ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- An unreadable link is not ours; the entry stays aside.
+				return false; // the claim stays, and the caller names it
+			}
 			wp_delete_file( $aside ); // the link is back at its path; its held name goes
 			return true;
 		}

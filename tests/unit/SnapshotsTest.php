@@ -3195,6 +3195,37 @@ final class SnapshotsTest extends TestCase {
 		$this->assertSame( "newcomer\n", file_get_contents( $file ), "the racer's file is untouched" );
 	}
 
+	public function test_a_symlink_claim_is_kept_when_a_racer_takes_the_path_before_cleanup(): void {
+		// Codex #102 round-7 P2: the symlink branch did not carry the rule the
+		// hard-link branch learned in rounds 5 and 6. A writer who replaces the
+		// path after symlink() lands leaves the entry aside as the only copy,
+		// and deleting it loses that writer's entry while the answer reports it
+		// safely back. Identity for a symlink is its DESTINATION — the link we
+		// create is a different inode from the one held aside, by construction.
+		$dir   = WP_CONTENT_DIR;
+		$snaps = new class extends Aura_Worker_Snapshots {
+			public $armed = '';
+			protected function before_claim_drop( $claim, $target ) {
+				if ( '' !== $this->armed ) {
+					unlink( $target );                          // inside the window
+					file_put_contents( $target, "newcomer\n" );
+				}
+			}
+			public function put_back( $aside, $target ) {
+				return $this->put_back_no_clobber( $aside, $target );
+			}
+		};
+
+		file_put_contents( $dir . '/sl-dest.txt', "dest\n" );
+		symlink( $dir . '/sl-dest.txt', $dir . '/.aura-restore-9999' );
+		$snaps->armed = $dir . '/sl-target.txt';
+
+		$this->assertFalse( $snaps->put_back( $dir . '/.aura-restore-9999', $dir . '/sl-target.txt' ) );
+		$this->assertTrue( is_link( $dir . '/.aura-restore-9999' ), 'the claim stays aside for the caller to name' );
+		$this->assertSame( $dir . '/sl-dest.txt', readlink( $dir . '/.aura-restore-9999' ) );
+		$this->assertSame( "newcomer\n", file_get_contents( $dir . '/sl-target.txt' ), "the other writer's entry is untouched" );
+	}
+
 	public function test_a_racer_inside_the_unclosable_window_is_reported_not_silent(): void {
 		// Codex #102 round-6 P1. PHP cannot make a check and an unlink one
 		// operation, so the last sliver of residual (a) stays open: a writer
