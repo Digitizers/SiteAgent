@@ -2059,40 +2059,52 @@ final class SnapshotsTest extends TestCase {
 		file_put_contents( $file, "<?php // v1\n" );
 		chmod( $file, 0600 );
 		$snaps = new class extends Aura_Worker_Snapshots {
-			public $mode_before_widen = null;
-			public $mode_asked        = 'unset';
-			public $calls             = array();
+			public $calls = array();
 			protected function secure_stage( $tmp, $mode = null ) {
-				$this->mode_before_widen = fileperms( $tmp ) & 0777; // the bytes are all in at this point
-				$this->mode_asked        = $mode;
-				$this->calls[]           = array( 'before' => $this->mode_before_widen, 'asked' => $mode );
+				$this->calls[] = array(
+					'dir'    => dirname( $tmp ),
+					'before' => fileperms( $tmp ) & 0777, // the bytes are all in at this point
+					'asked'  => $mode,
+				);
 				return parent::secure_stage( $tmp, $mode );
+			}
+			/**
+			 * The stage beside the TARGET. An overwrite also stages the
+			 * write_seq sidecar and the fence-stamped record, and a create
+			 * stages the sidecar too — all of those live in the snapshots
+			 * directory, and their ORDER around the content's call has moved
+			 * more than once. Name the call by where it is, never by its
+			 * position (Codex #102 round-1).
+			 */
+			public function content_call() {
+				foreach ( $this->calls as $c ) {
+					if ( WP_CONTENT_DIR === $c['dir'] ) {
+						return $c;
+					}
+				}
+				return null;
 			}
 		};
 
-		// overwrite_file() takes the write_seq sidecar's own stage() call
-		// BEFORE the content's (next_write_seq() runs ahead of
-		// replace_in_place()), so the content stage is still the LAST
-		// secure_stage() call recorded here.
 		$this->assertTrue( $snaps->overwrite_file( $file, "<?php // v2\n" )['success'] );
-		$this->assertSame( 0600, $snaps->mode_before_widen, 'born owner-only' );
-		$this->assertSame( 0600, $snaps->mode_asked );
+		$content = $snaps->content_call();
+		$this->assertIsArray( $content, 'the content stage was recorded' );
+		$this->assertSame( 0600, $content['before'], 'born owner-only' );
+		$this->assertSame( 0600, $content['asked'] );
 		$this->assertSame( 0600, fileperms( $file ) & 0777 );
 
+		$snaps->calls = array();
 		chmod( $file, 0644 );
 		$this->assertTrue( $snaps->overwrite_file( $file, "<?php // v3\n" )['success'] );
-		$this->assertSame( 0600, $snaps->mode_before_widen, 'owner-only until complete, even for a 0644 target' );
-		$this->assertSame( 0644, $snaps->mode_asked );
+		$content = $snaps->content_call();
+		$this->assertSame( 0600, $content['before'], 'owner-only until complete, even for a 0644 target' );
+		$this->assertSame( 0644, $content['asked'] );
 		$this->assertSame( 0644, fileperms( $file ) & 0777, 'widened to the file\'s own mode at the end' );
 
 		// A create's stage is born 0600 too and ends at the create mode.
-		// create_file_locked() stages the CONTENT first (step 1) and only
-		// then calls next_write_seq(), which stages the sequence sidecar
-		// second — the reverse order from overwrite_file() above — so the
-		// content's own call is the FIRST one recorded, not the last.
 		$snaps->calls = array();
 		$snaps->create_file( WP_CONTENT_DIR . '/fresh.php', "x\n" );
-		$content = $snaps->calls[0];
+		$content = $snaps->content_call();
 		$this->assertSame( 0600, $content['before'] );
 		$this->assertNull( $content['asked'], 'the create mode' );
 		$this->assertSame( 0644, fileperms( WP_CONTENT_DIR . '/fresh.php' ) & 0777 );
@@ -2244,12 +2256,15 @@ final class SnapshotsTest extends TestCase {
 			}
 		};
 		$this->assertTrue( $once->overwrite_file( $file, "<?php // v2\n" )['success'] );
-		// overwrite_file() now stages the write_seq sidecar (next_write_seq())
-		// before it stages the content — that FIRST stage() call is the one
-		// that hits the once-off wide read and is tightened + reread (2
-		// calls); the content's own stage() call, third overall, reads tight
-		// on the first try because the mock's "wide once" is already spent.
-		$this->assertSame( 3, $once->asked, 'read wide, tightened, read again — spent by the write_seq sidecar\'s own stage() call, which now runs first' );
+		// The mock's "wide once" is spent by the FIRST stage() an overwrite
+		// takes — the write_seq sidecar's — which is therefore tightened and
+		// re-read (2 calls). Every later stage reads tight on the first try
+		// (1 call each), and an overwrite takes two more: the content, and
+		// the fence-stamped record (Codex #102 round-1 P2 made that one a
+		// stage-and-rename instead of a truncating write). 2 + 1 + 1 = 4.
+		// This number tracks how many times an overwrite stages; a change to
+		// that is a deliberate change to this line, not a surprise.
+		$this->assertSame( 4, $once->asked, 'read wide, tightened, read again — spent by the write_seq sidecar\'s own stage() call, which runs first' );
 		$this->assertSame( "<?php // v2\n", file_get_contents( $file ) );
 
 		// (b) the ACL wins even after chmod(): refused before a byte is staged; the target untouched.
@@ -3019,6 +3034,134 @@ final class SnapshotsTest extends TestCase {
 		$this->assertArrayNotHasKey( 'code', $out, 'our own chmod failure is a 500, not a changed-since 409' );
 		$this->assertSame( "<?php // written\n", file_get_contents( $file ), 'the file is put back with the bytes it held under the claim' );
 		$this->assertSame( array(), glob( WP_CONTENT_DIR . '/.aura-restore-*' ), 'no claim file left behind' );
+	}
+
+	public function test_a_link_refused_while_the_path_is_free_puts_the_file_back_by_copy(): void {
+		// Codex #102 round-1 P1: link() can EXIST and still be refused — by the
+		// filesystem, or by a host policy. Answering `moved_aside` there left
+		// the site's file under a name nothing sweeps with NOTHING at its real
+		// path: a failed restore taking the file offline. With the path free,
+		// the put-back falls through to the copy.
+		$file = WP_CONTENT_DIR . '/link-refused-free.php';
+		file_put_contents( $file, "<?php // original\n" );
+		$plain = new Aura_Worker_Snapshots();
+		$rec   = $plain->overwrite_file( $file, "<?php // written\n" )['snapshot'];
+
+		$snaps = new class extends Aura_Worker_Snapshots {
+			public $calls = 0;
+			protected function link_into_place( $claim, $target ) {
+				return false; // the filesystem refuses hard links
+			}
+			protected function secure_stage( $tmp, $mode = null ) {
+				// Abandon the restore after the claim, so the put-back runs.
+				if ( 0 === $this->calls++ ) {
+					return parent::secure_stage( $tmp, $mode );
+				}
+				return false;
+			}
+		};
+
+		$out = $snaps->restore( $rec['id'] );
+
+		$this->assertFalse( $out['success'] );
+		$this->assertSame( "<?php // written\n", file_get_contents( $file ), 'the file is back at its path, not stranded under the claim' );
+		$this->assertArrayNotHasKey( 'moved_aside', $out, 'nothing was left aside' );
+		$this->assertSame( array(), glob( WP_CONTENT_DIR . '/.aura-restore-*' ), 'the claim copy is gone' );
+	}
+
+	public function test_a_link_refused_while_the_path_is_retaken_keeps_the_file_aside(): void {
+		// The other half of the same distinction: a refused link WITH the path
+		// taken is EEXIST, and the newcomer must never be clobbered — the file
+		// stays aside and the answer says where.
+		$file = WP_CONTENT_DIR . '/link-refused-taken.php';
+		file_put_contents( $file, "<?php // original\n" );
+		$plain = new Aura_Worker_Snapshots();
+		$rec   = $plain->overwrite_file( $file, "<?php // written\n" )['snapshot'];
+
+		$snaps = new class extends Aura_Worker_Snapshots {
+			public $calls = 0;
+			protected function link_into_place( $claim, $target ) {
+				return false;
+			}
+			protected function after_claim( $claim, $target ) {
+				file_put_contents( $target, "newcomer\n" ); // the path is retaken in the window
+			}
+			protected function secure_stage( $tmp, $mode = null ) {
+				if ( 0 === $this->calls++ ) {
+					return parent::secure_stage( $tmp, $mode );
+				}
+				return false;
+			}
+		};
+
+		$out = $snaps->restore( $rec['id'] );
+
+		$this->assertFalse( $out['success'] );
+		$this->assertSame( "newcomer\n", file_get_contents( $file ), 'the newcomer is untouched' );
+		$this->assertArrayHasKey( 'moved_aside', $out, 'the caller learns where the file is' );
+		$this->assertMatchesRegularExpression( '/\/\.aura-restore-[0-9a-f]{16}$/', $out['moved_aside'] );
+		$this->assertSame( "<?php // written\n", file_get_contents( $out['moved_aside'] ) );
+	}
+
+	public function test_a_create_restore_puts_the_file_back_by_copy_when_link_is_refused(): void {
+		// The create restore carries its own put-back tail, and the same
+		// refused-link-with-a-free-path case stranded the file there too
+		// (Codex #102 round-1 P1).
+		$file  = WP_CONTENT_DIR . '/link-refused-create.php';
+		$snaps = new class extends Aura_Worker_Snapshots {
+			protected function link_into_place( $claim, $target ) {
+				return false;
+			}
+		};
+		$rec = $snaps->create_file( $file, "agent\n" )['snapshot'];
+		file_put_contents( $file, "edited\n" ); // not the agent's bytes: the file is put back, never deleted
+
+		$restore = $snaps->restore( $rec['id'] );
+
+		$this->assertFalse( $restore['success'] );
+		$this->assertSame( 'file_changed_since', $restore['error'] );
+		$this->assertSame( "edited\n", file_get_contents( $file ), 'put back at its path, same bytes' );
+		$this->assertArrayNotHasKey( 'moved_aside', $restore );
+		$this->assertSame( array(), glob( WP_CONTENT_DIR . '/.aura-restore-*' ), 'the claim copy is gone' );
+	}
+
+	public function test_a_fence_stamp_that_fails_leaves_the_record_whole_and_readable(): void {
+		// Codex #102 round-1 P2: the caller treats a failed stamp as a safely
+		// UNFENCED record — which assumes the record still EXISTS.
+		// file_put_contents() truncates first, so a short write or a full disk
+		// left an undecodable .json: the rollback record lost outright and its
+		// payload orphaned, strictly worse than unfenced.
+		$file = WP_CONTENT_DIR . '/stamp-fails.php';
+		file_put_contents( $file, "<?php // original\n" );
+
+		$snaps = new class extends Aura_Worker_Snapshots {
+			protected function stage( $dir, $name, $content, $mode = null ) {
+				// Fail ONLY the record's own stage — the content's and the
+				// write_seq sidecar's must still land, or the test proves
+				// nothing about the stamp.
+				if ( '.json' === substr( (string) $name, -5 ) ) {
+					return array( 'success' => false, 'error' => 'Short write while staging (disk full?): ' . $dir );
+				}
+				return parent::stage( $dir, $name, $content, $mode );
+			}
+		};
+
+		$out = $snaps->overwrite_file( $file, "<?php // written\n" );
+
+		$this->assertTrue( $out['success'], 'the write itself landed' );
+		$this->assertSame( "<?php // written\n", file_get_contents( $file ) );
+
+		$record = $snaps->get( $out['snapshot']['id'] );
+		$this->assertIsArray( $record, 'the record is still decodable' );
+		$this->assertSame( $file, $record['target'] );
+		$this->assertArrayNotHasKey( 'replaced_with_sha256', $record, 'and unfenced, the closed side' );
+		$this->assertSame( "<?php // original\n", file_get_contents( $record['payload_path'] ), 'its payload is intact' );
+
+		// Unfenced means the restore refuses rather than writing.
+		$restore = $snaps->restore( $record['id'] );
+		$this->assertFalse( $restore['success'] );
+		$this->assertSame( 'aura_snapshot_unfenced', $restore['code'] );
+		$this->assertSame( "<?php // written\n", file_get_contents( $file ), 'nothing was written' );
 	}
 
 	public function test_a_chmod_that_lands_after_the_claim_is_the_mode_that_is_restored(): void {

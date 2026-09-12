@@ -301,8 +301,25 @@ class Aura_Worker_Snapshots {
 				if ( false === $json ) {
 					return false;
 				}
-				$n = @file_put_contents( $meta_path, $json ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- The record file this class owns; a refusal is answered to the caller.
-				return false !== $n && $n === strlen( $json ) && $this->sync_file( $meta_path );
+				// NEVER TRUNCATE THE RECORD IN PLACE (Codex #102 round-1 P2).
+				// A caller treats a failed stamp as a safely UNFENCED record —
+				// which assumes the record still exists. file_put_contents()
+				// truncates first, so a short write or a full disk here left an
+				// undecodable .json: the rollback record lost outright and its
+				// payload orphaned, strictly worse than unfenced. Stage beside it
+				// and rename over it, the way every other write in this class
+				// lands. stage() fsyncs the bytes before it returns.
+				$perms = @fileperms( $meta_path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- An unreadable mode falls back to the create default below.
+				$mode  = false === $perms ? $this->create_mode() : ( $perms & 0777 );
+				$tmp   = $this->stage( rtrim( $this->dir, '/' ), basename( $meta_path ), $json, $mode );
+				if ( is_array( $tmp ) ) {
+					return false;
+				}
+				if ( ! @rename( $tmp, $meta_path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.rename_rename -- Replacing the record with its complete successor IS the point, atomically.
+					$this->discard_stage( $tmp );
+					return false;
+				}
+				return $this->sync_file( $meta_path );
 			}
 		);
 		return true === $done;
@@ -923,6 +940,23 @@ class Aura_Worker_Snapshots {
 	 */
 	protected function link_available() {
 		return function_exists( 'link' );
+	}
+
+	/**
+	 * Put a claimed file back at its path with a hard link: no-clobber, and
+	 * the same inode, so a writer holding the file keeps writing to the file
+	 * that is back at its path.
+	 *
+	 * Protected so a test can model a host where link() EXISTS but the
+	 * filesystem or a policy refuses it (Codex #102 round-1 P1) — which is a
+	 * different fact from link_available() being false.
+	 *
+	 * @param string $claim  The claimed file.
+	 * @param string $target Its original path.
+	 * @return bool
+	 */
+	protected function link_into_place( $claim, $target ) {
+		return (bool) @link( $claim, $target ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- EEXIST is the expected refusal, classified by the caller.
 	}
 
 	/**
@@ -2567,13 +2601,23 @@ class Aura_Worker_Snapshots {
 				: array_merge( array( 'success' => false, 'error' => $detail, 'detail' => $detail ), $extra );
 		};
 		if ( $this->link_available() ) {
-			if ( @link( $claim, $target ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- EEXIST is the expected refusal, classified below.
+			if ( $this->link_into_place( $claim, $target ) ) {
 				wp_delete_file( $claim );
 				return file_exists( $claim )
 					? $answer( array( 'moved_aside' => $claim ) )
 					: $answer();
 			}
-			return $answer( array( 'moved_aside' => $claim ) );
+			// A REFUSED LINK IS NOT ALWAYS A TAKEN PATH (Codex #102 round-1 P1).
+			// EEXIST means a racer holds the path and the file must stay aside.
+			// But link() can also be refused by the filesystem or a policy while
+			// the path is still FREE, and answering `moved_aside` there leaves
+			// the site's file under a name nothing sweeps with NOTHING at its
+			// real path — a failed restore taking the file offline. Tell the two
+			// apart with the predicate this engine already trusts, and fall
+			// through to the copy when the path is free.
+			if ( self::path_present( $target ) ) {
+				return $answer( array( 'moved_aside' => $claim ) );
+			}
 		}
 		if ( true !== $this->put_back_by_write( $claim, $target ) ) {
 			return $answer( array( 'moved_aside' => $claim ) );
@@ -2717,7 +2761,7 @@ class Aura_Worker_Snapshots {
 		// and the answer says where. Nothing is ever deleted on this branch.
 		$out = array( 'success' => false, 'code' => 'aura_file_changed_since', 'error' => 'file_changed_since' );
 		if ( $this->link_available() ) {
-			if ( @link( $claim, $target ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- EEXIST is the expected refusal, classified below.
+			if ( $this->link_into_place( $claim, $target ) ) {
 				wp_delete_file( $claim ); // the second name to the same inode; the file is back at its path
 				if ( file_exists( $claim ) ) {
 					// The file is back, but its claim name could not be removed and
@@ -2725,10 +2769,16 @@ class Aura_Worker_Snapshots {
 					// matching-hash branch does (Codex #94 round-7 P2).
 					$out['moved_aside'] = $claim;
 				}
-			} else {
-				$out['moved_aside'] = $claim;
+				return $out;
 			}
-			return $out;
+			// EEXIST, or a host that refuses hard links with the path still free?
+			// The same distinction put_claim_back() draws (Codex #102 round-1 P1):
+			// only the first is a taken path. Falling through to the write copy
+			// keeps a refused link from leaving this path empty.
+			if ( self::path_present( $target ) ) {
+				$out['moved_aside'] = $claim;
+				return $out;
+			}
 		}
 		// A host without link() (SiteAgent#96) puts the file back the way
 		// publish() lands one: exclusive-create the path and write the claimed
