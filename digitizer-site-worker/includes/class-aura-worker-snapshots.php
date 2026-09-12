@@ -319,7 +319,21 @@ class Aura_Worker_Snapshots {
 					$this->discard_stage( $tmp );
 					return false;
 				}
-				return $this->sync_file( $meta_path );
+				// THE RENAME IS THE FENCE (Codex #102 round-22 P2). Once it
+				// lands, the record ON DISK carries the hash and every later
+				// get() and restore will read it as fenced. Returning false
+				// because the fsync afterwards was refused makes the ANSWER and
+				// the RECORD disagree: Aura mirrors the snapshot unfenced and
+				// never offers it, while the site would accept a restore of the
+				// very same record. A refused fsync cannot unsay what the
+				// rename already said.
+				//
+				// Its result is therefore deliberately not the answer. The
+				// durability it buys fails toward the safe side anyway: a record
+				// lost to a power cut reverts to its unfenced predecessor, which
+				// is the state a failed stamp is supposed to leave.
+				$this->sync_file( $meta_path );
+				return true;
 			}
 		);
 		return true === $done;
@@ -1333,7 +1347,7 @@ class Aura_Worker_Snapshots {
 	 * @param string $path File path.
 	 * @return bool
 	 */
-	private function sync_file( $path ) {
+	protected function sync_file( $path ) {
 		if ( ! function_exists( 'fsync' ) ) {
 			return true;
 		}

@@ -3631,6 +3631,34 @@ final class SnapshotsTest extends TestCase {
 		$this->assertSame( "real\n", file_get_contents( WP_CONTENT_DIR . '/elsewhere-unfenced.php' ), 'nothing written through it' );
 	}
 
+	public function test_a_refused_fsync_after_the_stamp_lands_does_not_unsay_the_fence(): void {
+		// Codex #102 round-22 P2: once the rename lands, the record ON DISK
+		// carries the hash and every later get() reads it as fenced. Answering
+		// "unfenced" because the fsync afterwards was refused made the ANSWER
+		// and the RECORD disagree — Aura would mirror it unfenced and never
+		// offer it, while the site would accept a restore of the same record.
+		$file  = WP_CONTENT_DIR . '/fsync-refused.php';
+		file_put_contents( $file, "<?php // original\n" );
+		$snaps = new class extends Aura_Worker_Snapshots {
+			protected function sync_file( $path ) {
+				return false; // the fsync is refused, after the rename landed
+			}
+		};
+
+		$out = $snaps->overwrite_file( $file, "<?php // written\n" );
+
+		$this->assertTrue( $out['success'] );
+		$sha = hash( 'sha256', "<?php // written\n" );
+		$this->assertSame( $sha, $out['snapshot']['replaced_with_sha256'] ?? null, 'the answer says fenced' );
+		$this->assertSame( $sha, $snaps->get( $out['snapshot']['id'] )['replaced_with_sha256'] ?? null, 'and so does the record' );
+
+		// And the two agreeing means the restore behaves as the answer implied.
+		file_put_contents( $file, "<?php // written\n" ); // untouched since the write
+		$restore = $snaps->restore( $out['snapshot']['id'] );
+		$this->assertTrue( $restore['success'] );
+		$this->assertSame( "<?php // original\n", file_get_contents( $file ) );
+	}
+
 	public function test_a_fence_stamp_that_fails_leaves_the_record_whole_and_readable(): void {
 		// Codex #102 round-1 P2: the caller treats a failed stamp as a safely
 		// UNFENCED record — which assumes the record still EXISTS.
