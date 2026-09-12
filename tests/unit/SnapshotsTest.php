@@ -3345,8 +3345,16 @@ final class SnapshotsTest extends TestCase {
 			}
 			protected function before_node_verify( $target ) {
 				if ( '' !== $this->armed ) {
-					unlink( $target );
-					posix_mkfifo( $target, 0600 ); // THEIR node now holds the path
+					// Their node is created BESIDE ours and renamed over it, so
+					// it holds an inode allocated while ours is still alive.
+					// Unlinking ours first and creating in place would let the
+					// kernel hand back the very inode number just freed — which
+					// it does on Linux but not on APFS, and a test that turns on
+					// that is a test that passes on one CI runner and not
+					// another.
+					$theirs = $target . '.theirs';
+					posix_mkfifo( $theirs, 0600 );
+					rename( $theirs, $target );
 					$this->armed = '';
 				}
 			}

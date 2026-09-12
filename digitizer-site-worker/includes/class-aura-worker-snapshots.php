@@ -3248,6 +3248,13 @@ class Aura_Worker_Snapshots {
 	 * permissions off the same observation that proved the identity rather
 	 * than off a later, separately raceable one.
 	 *
+	 * What device+inode CANNOT tell apart: a node unlinked and immediately
+	 * recreated at the same path, because the kernel is free to hand back the
+	 * inode number it just freed — Linux does, APFS does not. There is no
+	 * stronger identity available to PHP, and this is the same comparison
+	 * remove_own_entry() and drop_linked_claim() rest on, so the limit is the
+	 * engine's throughout rather than this method's.
+	 *
 	 * @param string $path The path.
 	 * @param array  $mine stat() of the node this call created.
 	 * @return array|false
