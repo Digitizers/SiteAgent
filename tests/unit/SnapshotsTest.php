@@ -3274,6 +3274,49 @@ final class SnapshotsTest extends TestCase {
 		$this->assertNotSame( $out['stranded'], isset( $out['moved_aside'] ) ? $out['moved_aside'] : null, 'distinct from our own claim' );
 	}
 
+	public function test_the_target_is_verified_after_the_claim_hash_not_before_it(): void {
+		// Codex #102 round-25 P1: the claim's own hash reads a whole separate
+		// inode and for a large file is not a moment. With the target check
+		// ahead of it, an edit landing WHILE that hash ran was never seen — so
+		// "the last thing verified before the claim is released" was not true
+		// of the target at all.
+		//
+		// The ordering itself is what is pinned here, by a probe rather than by
+		// reading the source: the seam removes the CLAIM. If the claim has
+		// already been hashed by the time the seam fires, the restore is
+		// unaffected and answers a clean success. If it has not, the hash fails
+		// and the answer carries `moved_aside`. The two orders are therefore
+		// distinguishable from the outside.
+		$file = WP_CONTENT_DIR . '/order-matters.php';
+		file_put_contents( $file, "<?php // original\n" );
+		$plain = new Aura_Worker_Snapshots();
+		$rec   = $plain->overwrite_file( $file, "<?php // written\n" )['snapshot'];
+
+		$snaps = new class extends Aura_Worker_Snapshots {
+			public $fired = false;
+			protected function before_claim_release( $target ) {
+				if ( $this->fired ) {
+					return;
+				}
+				$this->fired = true;
+				foreach ( glob( dirname( $target ) . '/.aura-restore-*' ) as $held ) {
+					unlink( $held ); // the claim goes, at the seam's instant
+				}
+			}
+		};
+
+		$out = $snaps->restore( $rec['id'] );
+
+		$this->assertTrue( $snaps->fired, 'the seam ran' );
+		$this->assertTrue( $out['success'], 'the restore landed' );
+		$this->assertArrayNotHasKey(
+			'moved_aside',
+			$out,
+			'the claim was already hashed before the seam, so losing it changes nothing — which is the ordering under test'
+		);
+		$this->assertSame( "<?php // original\n", file_get_contents( $file ) );
+	}
+
 	public function test_a_racer_editing_the_target_before_the_claim_is_released_is_caught_without_link(): void {
 		// Codex #102 round-24 P1: the final content check was gated on
 		// link_available(), so on a link-less host — most managed hosts — the

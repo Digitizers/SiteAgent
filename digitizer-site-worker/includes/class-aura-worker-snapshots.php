@@ -2713,6 +2713,30 @@ class Aura_Worker_Snapshots {
 		// with no check adjacent to the release, which is the one that matters.
 		// It is the LAST thing verified before the claim, the only held copy of
 		// the pre-restore file, is given up.
+		// THE CLAIM IS NOT DELETED ON TRUST (Codex #101 round-2 P1). A writer
+		// that opened the target before the claim holds a descriptor on THIS
+		// inode and may have written through it since the hash above; the
+		// claim is now the only pathname those bytes have. Re-hash, and keep
+		// the file — named — when it moved.
+		//
+		// THIS HASH RUNS FIRST because it can be SLOW (Codex #102 round-25 P1).
+		// It reads a whole separate inode, which for a large file is not a
+		// moment — and while it ran, the target check below was already behind
+		// it, so "the last thing verified before the claim is released" was not
+		// true of the target at all. Order matters more than the checks do:
+		// whatever is verified last is the only thing actually verified.
+		$out   = array( 'success' => true );
+		$after = hash_file( 'sha256', $claim );
+		$moved = ! is_string( $after ) || ! hash_equals( $actual, $after );
+
+		// AND THE TARGET IS VERIFIED LAST, on either host and on both outcomes.
+		// A writer editing the target IN PLACE keeps the inode, so every
+		// identity test above passes while the bytes at the path are theirs;
+		// reporting success would tell Aura the rollback landed for content
+		// this restore never produced. Not gated on link_available(): the
+		// link()-less publish hashes its own result, but before returning, and
+		// a check that happens earlier is not a check that happens last
+		// (Codex #102 rounds 19 and 24).
 		$this->before_claim_release( $target );
 		if ( hash( 'sha256', $bytes ) !== $this->hash_regular_file( $target ) ) {
 			return array(
@@ -2722,16 +2746,7 @@ class Aura_Worker_Snapshots {
 				'moved_aside' => $claim,
 			);
 		}
-
-		// THE CLAIM IS NOT DELETED ON TRUST (Codex #101 round-2 P1). A writer
-		// that opened the target before the claim holds a descriptor on THIS
-		// inode and may have written through it since the hash above; the
-		// claim is now the only pathname those bytes have. Re-hash, and keep
-		// the file — named — when it moved. The restore itself still
-		// succeeded: the old bytes are at the path.
-		$out   = array( 'success' => true );
-		$after = hash_file( 'sha256', $claim );
-		if ( ! is_string( $after ) || ! hash_equals( $actual, $after ) ) {
+		if ( $moved ) {
 			$out['moved_aside'] = $claim;
 			$out['detail']      = 'the replaced file was written to while the restore ran and was kept aside rather than deleted';
 			return $out;
