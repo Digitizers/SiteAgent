@@ -2643,6 +2643,22 @@ class Aura_Worker_Snapshots {
 					'moved_aside' => $claim,
 				);
 			}
+			// AND AN INODE CHECK IS NOT A CONTENT CHECK (Codex #102 round-19
+			// P1) — the rule round 2 established for the link()-less branch,
+			// reaching this one at last. A writer editing the target IN PLACE
+			// keeps the inode, so every identity test above passes while the
+			// bytes at the path are theirs. Reporting success there would tell
+			// Aura the rollback landed for content this restore never produced.
+			// The link()-less branch proves the same thing for itself before it
+			// returns true, which is why only this one needs it here.
+			if ( hash( 'sha256', $bytes ) !== $this->hash_regular_file( $target ) ) {
+				return array(
+					'success'     => false,
+					'error'       => 'Failed to write file: ' . $target . ' (another writer changed it immediately after the restore landed)',
+					'detail'      => 'the restore landed and its bytes were changed before it could be confirmed; the file it replaced is kept aside',
+					'moved_aside' => $claim,
+				);
+			}
 		}
 
 		// THE CLAIM IS NOT DELETED ON TRUST (Codex #101 round-2 P1). A writer

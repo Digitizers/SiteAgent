@@ -3263,6 +3263,40 @@ final class SnapshotsTest extends TestCase {
 		$this->assertNotSame( $out['stranded'], isset( $out['moved_aside'] ) ? $out['moved_aside'] : null, 'distinct from our own claim' );
 	}
 
+	public function test_a_racer_editing_the_target_in_place_after_a_linked_publish_is_not_a_success(): void {
+		// Codex #102 round-19 P1: an INODE check is not a CONTENT check — the
+		// rule round 2 established for the link()-less branch, reaching this one
+		// at last. A writer editing the target IN PLACE keeps the inode, so
+		// every identity test passes while the bytes at the path are theirs, and
+		// the restore reported success for content it never produced.
+		$file = WP_CONTENT_DIR . '/inplace-after-publish.php';
+		file_put_contents( $file, "<?php // original\n" );
+		$plain = new Aura_Worker_Snapshots();
+		$rec   = $plain->overwrite_file( $file, "<?php // written\n" )['snapshot'];
+
+		$snaps = new class extends Aura_Worker_Snapshots {
+			public $armed = '';
+			protected function publish( $tmp, $path ) {
+				$out = parent::publish( $tmp, $path );
+				if ( true === $out && '' !== $this->armed ) {
+					// IN PLACE: same inode, different bytes.
+					file_put_contents( $path, "edited by another writer\n" );
+					$this->armed = '';
+				}
+				return $out;
+			}
+		};
+		$snaps->armed = $file;
+
+		$out = $snaps->restore( $rec['id'] );
+
+		$this->assertFalse( $out['success'], 'the bytes at the path are not the ones restored' );
+		$this->assertArrayNotHasKey( 'code', $out, 'we wrote, so this is our own failure — a 500, not a 409' );
+		$this->assertArrayHasKey( 'moved_aside', $out, 'the file it replaced is kept and named' );
+		$this->assertSame( "<?php // written\n", file_get_contents( $out['moved_aside'] ) );
+		$this->assertSame( "edited by another writer\n", file_get_contents( $file ), "the other writer's bytes are untouched" );
+	}
+
 	public function test_a_racer_replacing_the_target_right_after_a_linked_publish_is_not_a_success(): void {
 		// Codex #102 round-16 P1. With link() the stage is a SECOND NAME for the
 		// published inode, so a racer replacing the target between the publish
