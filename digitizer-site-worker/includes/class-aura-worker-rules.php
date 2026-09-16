@@ -118,6 +118,27 @@ class Aura_Worker_Rules {
 	}
 
 	/**
+	 * bump(), for the other hourly counters this plugin keeps (2.18.0: read
+	 * redaction, #419). Same storage, same sweep, same atomic increment —
+	 * and still the one raw-SQL writer UninstallCoverageTest acknowledges.
+	 * Closed to the known prefixes, all under `aura_worker_`, which
+	 * uninstall.php sweeps.
+	 *
+	 * @param string   $prefix A known counter prefix.
+	 * @param int|null $now    Unix time; injected for tests.
+	 */
+	public static function bump_counter( $prefix, $now = null ) {
+		$known = array( self::BLOCKED_COUNTER, self::WARNED_COUNTER );
+		if ( class_exists( 'Aura_Worker_Redact' ) ) {
+			$known[] = Aura_Worker_Redact::REDACTED_COUNTER;
+			$known[] = Aura_Worker_Redact::PLACEHOLDER_REFUSED_COUNTER;
+		}
+		if ( in_array( $prefix, $known, true ) ) {
+			self::bump( $prefix, $now );
+		}
+	}
+
+	/**
 	 * Option name for one hour of one counter.
 	 *
 	 * @param string $prefix BLOCKED_COUNTER or WARNED_COUNTER.

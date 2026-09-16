@@ -82,6 +82,11 @@ class Aura_Worker {
 		// app-password agent and a second MCP server actually write through.
 		Aura_Worker_Rules::init();
 
+		// Agent read redaction (2.18.0, #419): known secrets — webhook
+		// endpoints first — never leave the site in a response an agent
+		// reads, and a write carrying the placeholder is refused.
+		Aura_Worker_Redact::init();
+
 		// The Elementor MCP door (2.16.0): wraps every non-read `elementor/*`
 		// ability, verifies after registration that the wrapper is what the
 		// registry finally holds, and closes both of Elementor's transports when

@@ -164,6 +164,67 @@ class Aura_Worker_Redact {
 	const STATUS_VERSION = 1;
 
 	/**
+	 * Hook the read seam and the counters. Called from Aura_Worker::init(),
+	 * right after Aura_Worker_Rules::init().
+	 */
+	public static function init() {
+		// LAST, so whatever any other plugin adds to the body is covered too.
+		add_filter( 'rest_pre_echo_response', array( __CLASS__, 'filter_echo' ), PHP_INT_MAX, 3 );
+		add_action( 'aura_worker_redacted', array( __CLASS__, 'record_redacted' ), 10, 2 );
+		add_action( 'aura_worker_placeholder_refused', array( __CLASS__, 'record_placeholder_refused' ), 10, 1 );
+	}
+
+	/**
+	 * `rest_pre_echo_response` — the served body, final (spec §1.1).
+	 *
+	 * @param mixed                $result  Response data about to be JSON-encoded.
+	 * @param WP_REST_Server|null  $server  Server.
+	 * @param WP_REST_Request|null $request The served request.
+	 * @return mixed
+	 */
+	public static function filter_echo( $result, $server = null, $request = null ) {
+		if ( null === $result || ! self::is_audience( $request ) ) {
+			return $result;
+		}
+		$count    = 0;
+		$redacted = self::redact( $result, $count );
+		if ( 0 === $count ) {
+			return $result;
+		}
+		/**
+		 * A served response had values replaced before it left the site.
+		 *
+		 * @since 2.18.0
+		 *
+		 * @param int    $count How many values were replaced.
+		 * @param string $route The route served.
+		 */
+		do_action( 'aura_worker_redacted', $count, (string) $request->get_route() );
+		return $redacted;
+	}
+
+	/**
+	 * One response redacted: bump the hourly counter (spec §4).
+	 *
+	 * @param int      $count Replacements (reported, not counted).
+	 * @param string   $route Route.
+	 * @param int|null $now   Unix time; injected for tests.
+	 */
+	public static function record_redacted( $count = 0, $route = '', $now = null ) {
+		Aura_Worker_Rules::bump_counter( self::REDACTED_COUNTER, $now );
+	}
+
+	/**
+	 * One write refused for a placeholder: bump the hourly counter (spec §4).
+	 *
+	 * @param string   $route Route.
+	 * @param int|null $now   Unix time; injected for tests.
+	 */
+	public static function record_placeholder_refused( $route = '', $now = null ) {
+		Aura_Worker_Rules::bump_counter( self::PLACEHOLDER_REFUSED_COUNTER, $now );
+	}
+
+	/**
 	 * Redact one response body — or any tree. Pure: no hooks, no counters.
 	 *
 	 * @param mixed $data  Response data.
