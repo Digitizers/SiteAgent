@@ -4,7 +4,7 @@ Tags: ai, automation, maintenance, updates, wordpress management
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.17.3
+Stable tag: 2.17.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -252,6 +252,11 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 7. Connections: provider connections (Cloudways, Cloudflare, Bunny, Hostinger, Vultr, xCloud) with resource counts, status, and credential-rotation reminders.
 
 == Changelog ==
+
+= 2.17.4 =
+* Self-update: a package that carries the version already running is refused before anything changes. The verified download is inspected in place, the plugin is not backed up, and no install runs. Before this, a same-version request backed the plugin up, reinstalled over the live directory, refused and restored — and on one host lost `readme.txt` on every run. The refusal answers `code: aura_self_update_same_version`. An archive that cannot be read falls through to the previous path.
+* Self-update: when the post-install version check fails, the message now says what the evidence supports. A verified package with a different version means the upgrader did not replace the plugin directory (`aura_self_update_not_replaced`); without that proof both causes are named (`aura_self_update_version_unchanged`).
+* Self-update: a restore that cannot finish reports which stage failed (`clear` or `extract`), and the message says what is on disk. A failed clear can remove some files before it stops, so the directory is no longer described as untouched.
 
 = 2.17.3 =
 * Snapshots: an `overwrite_file()` record now stores the sha256 of the content it wrote (`replaced_with_sha256`), and restoring that record puts the old bytes back ONLY while the file still holds exactly what the write left there. A file edited since is refused untouched (`aura_file_changed_since`); a file already holding the old bytes answers `already` and is not rewritten; a record taken without that hash — a direct `POST /aura/v2/snapshot`, or a Power Pack older than 0.2.5 — is refused as unfenced (`aura_snapshot_unfenced`), because nothing proves what it would be writing over.

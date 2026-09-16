@@ -17,7 +17,7 @@
   </a>
   <img src="https://img.shields.io/badge/WordPress-6.2%E2%80%937.1-21759b?logo=wordpress" alt="WordPress" />
   <img src="https://img.shields.io/badge/PHP-7.4%2B-777bb4?logo=php" alt="PHP" />
-  <img src="https://img.shields.io/badge/Stable-2.17.3-green" alt="Stable" />
+  <img src="https://img.shields.io/badge/Stable-2.17.4-green" alt="Stable" />
 </p>
 
 ---
@@ -238,6 +238,12 @@ These plug straight into **Aura's Fleet MCP Gateway**: read tools run on demand,
 ---
 
 ## Changelog
+
+### 2.17.4
+
+- **Self-update: a same-version package is refused before anything changes** (SiteAgent#104). The sha256-verified download is read in place with `ZipArchive` — only the main file's `Version:` header and `AURA_WORKER_VERSION` define — and if either names the running version the request is refused with `code: aura_self_update_same_version`: no backup, no install, the live directory untouched, the temp file deleted. Before this, the guard ran only after the backup and the install, so every refused request reinstalled and restored the plugin; on one WP Engine site each run lost `readme.txt` (SiteAgent#95). A missing `ZipArchive`, an unreadable archive, or no main file at the expected path falls through to the previous behaviour.
+- **Self-update: the post-install check names what the evidence supports.** A verified archive with a different version that still leaves the old version on disk → `aura_self_update_not_replaced` (the upgrader did not replace the directory). Without that proof → `aura_self_update_version_unchanged`, naming both possible causes.
+- **Rollback: a failed restore reports its stage.** `restore_plugin()` returns `stage: clear | extract`. A failed clear can delete some files before it stops, so the message reports what the main file reads now instead of calling the directory untouched.
 
 ### 2.17.3
 
