@@ -345,8 +345,56 @@ class Aura_Worker_Security {
 	 * @param string $value Stored token value.
 	 * @return bool
 	 */
-	private function is_hashed( $value ) {
+	private static function is_hashed_token( $value ) {
 		return (bool) preg_match( '/^[0-9a-f]{64}$/', (string) $value );
+	}
+
+	/**
+	 * Does this raw token match the stored site token? The comparison alone:
+	 * no throttle, no failure record, no legacy-token migration, no captured
+	 * auth, no current user — check_aura_token() adds all of those around it.
+	 * Also what a filter that runs BEFORE the permission callback asks
+	 * (Aura_Worker_Redact on the gateway route, 2.18.0) without touching any
+	 * of that state.
+	 *
+	 * @since 2.18.0
+	 *
+	 * @param string $provided_token Raw token, as sent in X-Aura-Token.
+	 * @return bool
+	 */
+	public static function token_matches( $provided_token ) {
+		$provided_token = (string) $provided_token;
+		$stored_token   = get_option( 'aura_worker_site_token', '' );
+		if ( '' === $provided_token || empty( $stored_token ) ) {
+			return false;
+		}
+		if ( self::is_hashed_token( $stored_token ) ) {
+			// Modern path: stored value is a SHA-256 hash of the token.
+			return hash_equals( $stored_token, self::hash_token( $provided_token ) );
+		}
+		// Legacy path: stored value is a raw token from an older version.
+		return hash_equals( $stored_token, $provided_token );
+	}
+
+	/**
+	 * Rewrite a legacy PLAINTEXT stored site token as its SHA-256 hash — the
+	 * form every reader of the option now expects (Aura_Worker_Grant::verify()
+	 * binds a grant to sha256(raw token)). A no-op for an empty or an
+	 * already-hashed value. It needs no presented token: the legacy value IS
+	 * the raw token. check_aura_token() runs it after a match; a grant check
+	 * that is reached without the token (Aura_Worker_Redact's MCP row) runs it
+	 * before verifying (2.18.0).
+	 *
+	 * @since 2.18.0
+	 *
+	 * @return void
+	 */
+	public static function migrate_legacy_stored_token() {
+		$stored_token = get_option( 'aura_worker_site_token', '' );
+		if ( empty( $stored_token ) || self::is_hashed_token( $stored_token ) ) {
+			return;
+		}
+		update_option( 'aura_worker_site_token', self::hash_token( $stored_token ) );
 	}
 
 	/**
@@ -514,19 +562,12 @@ class Aura_Worker_Security {
 			return $throttle;
 		}
 
-		$valid = false;
-		if ( '' !== $provided_token ) {
-			if ( $this->is_hashed( $stored_token ) ) {
-				// Modern path: stored value is a SHA-256 hash of the token.
-				$valid = hash_equals( $stored_token, self::hash_token( $provided_token ) );
-			} else {
-				// Legacy path: stored value is a raw token from an older version.
-				// Compare raw, then opportunistically migrate to a stored hash.
-				$valid = hash_equals( $stored_token, $provided_token );
-				if ( $valid ) {
-					update_option( 'aura_worker_site_token', self::hash_token( $provided_token ) );
-				}
-			}
+		$valid = self::token_matches( $provided_token );
+		if ( $valid ) {
+			// Legacy path: a stored raw token from an older version matched
+			// (so it equals the provided one); opportunistically migrate it to
+			// a stored hash. A no-op when it is already hashed.
+			self::migrate_legacy_stored_token();
 		}
 
 		if ( ! $valid ) {

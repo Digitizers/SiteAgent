@@ -17,7 +17,7 @@
   </a>
   <img src="https://img.shields.io/badge/WordPress-6.2%E2%80%937.1-21759b?logo=wordpress" alt="WordPress" />
   <img src="https://img.shields.io/badge/PHP-7.4%2B-777bb4?logo=php" alt="PHP" />
-  <img src="https://img.shields.io/badge/Stable-2.17.5-green" alt="Stable" />
+  <img src="https://img.shields.io/badge/Stable-2.18.0-green" alt="Stable" />
 </p>
 
 ---
@@ -238,6 +238,13 @@ These plug straight into **Aura's Fleet MCP Gateway**: read tools run on demand,
 ---
 
 ## Changelog
+
+### 2.18.0
+
+- **Agent read redaction** (Digitizers/Aura#419). A REST response an agent reads — the gateway's `/aura/mcp/tools/execute`, or any logged-in, non-cookie caller on a route outside SiteAgent's `aura/v1`, `aura/v2`, `aura/mcp` (an MCP client with an Application Password, `wp/v2`) — has known secrets replaced on `rest_pre_echo_response`, after `_embed` and `_envelope`: receiver URLs (Make/Integromat, Zapier, Slack, Discord, IFTTT, Telegram) and the value of the exact key `webhooks` (Elementor Pro form webhooks on any host). The scan decodes `_elementor_data`/`_elementor_page_settings`, MCP `content[].text`, and `snapshot_get`'s `base64(serialize())` payload (read with `allowed_classes => false`; unreadable → `payload: null, payload_redacted: true`). The placeholder `aura-redacted:v1:<kind>` is one-way. wp-admin, anonymous visitors and Aura's system routes are untouched.
+- **Placeholder write guard.** An agent write whose query, body, JSON or URL params contain `aura-redacted:` is refused with `409 aura_redacted_placeholder`. Elementor element writes merge, so omitting the field keeps the stored webhook; a whole-tree import of a redacted export is refused.
+- **The one unredacted read.** Aura's page-snapshot capture carries `X-Aura-Unredacted-Grant` (an Ed25519 grant bound to `unredacted-read:mcp/<server>#<tool>` and the exact `arguments`, or `unredacted-read:aura/mcp#<tool>` on the gateway). It exempts only that response; an invalid grant on those shapes is `403 aura_unredacted_grant_invalid`; a site without a usable gateway key ignores it.
+- **Reporting.** `audit_rules` → `enforcement.redacted_24h`, `placeholder_refused_24h`, points `read_redaction` and `placeholder_guard`; `/status` → `redaction: { v: 1 }`.
 
 ### 2.17.5
 

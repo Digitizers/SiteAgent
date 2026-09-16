@@ -607,6 +607,10 @@ class Aura_Worker_API {
 			'timestamp'           => gmdate( 'c' ),
 		);
 
+		// Read redaction (2.18.0, #419): Aura shows per site whether agent
+		// reads are redacted here or the site needs an upgrade.
+		$status['redaction'] = Aura_Worker_Redact::status_fragment();
+
 		$unbound = Aura_Worker_Unbind::status_fragment();
 		if ( null !== $unbound ) {
 			// An OBJECT on the wire, always (#434 Task 4, M10). PHP's empty

@@ -45,6 +45,7 @@ digitizer-site-worker/                                      # Repo root (develop
         ├── class-aura-worker-host-probe.php # Can PHP write/delete .php files here? (SA#95)
         ├── class-aura-worker-magic-link.php # Short-lived one-time admin login links
         ├── class-aura-worker-mcp.php        # MCP server + tool registration
+        ├── class-aura-worker-redact.php     # Agent read redaction + placeholder write guard (2.18.0)
         ├── class-aura-worker-tools.php      # MCP tool base + registry
         └── tools/                           # Individual MCP tools (site-context, update-plugin-safely, ...)
 ```
@@ -70,6 +71,7 @@ To create an installable ZIP: `cd` to the repo root and run `zip -r digitizer-si
 | `Aura_Worker_MCP` | `includes/class-aura-worker-mcp.php` | MCP server endpoint + tool registration |
 | `Aura_Worker_Tools` | `includes/class-aura-worker-tools.php` | MCP tool base class (`Aura_Tool_Base`) + registry; individual tools live in `includes/tools/` |
 | `Aura_Worker_Unbind` | `includes/class-aura-worker-unbind.php` | The site-unbind marker (`aura_worker_unbound`) + Phase B cleanup: `read`/`is_set`/`is_set_strict`, `write_under_claim`, `delete_under_claim`, `refusal`, `status_fragment`, `leftovers`, `cleanup`, `maybe_finish` |
+| `Aura_Worker_Redact` | `includes/class-aura-worker-redact.php` | Agent read redaction (2.18.0, #419): detectors (`redact`, `redact_text`), audience (`is_audience`), the `rest_pre_echo_response` read seam (`filter_echo`), the `rest_request_before_callbacks` placeholder guard and unredacted-grant check (`before_callbacks`, `grant_shape`), counters, `status_fragment` |
 
 ### Initialization Flow
 
@@ -250,6 +252,79 @@ before stopping at the first `.php` one.
   updater, `new_updater()` on `update_plugin_safely`; the test stub's
   `get_filesystem_method()` reads `$GLOBALS['_fs_method']`.
 
+### Agent read redaction (2.18.0, #419)
+
+Operator rules govern writes only, so a read used to hand an agent whatever the site
+stores — including webhook endpoints (bearer secrets). `Aura_Worker_Redact` keeps them
+out of every REST response an **agent** reads.
+
+- **Seam.** `rest_pre_echo_response` at `PHP_INT_MAX` — core applies it only in
+  `WP_REST_Server::serve_request()`, after `_envelope` and `_embed`. An internal
+  `rest_do_request()` is never redacted on its own. Never move it to
+  `rest_post_dispatch` (runs before `_embed`) or `rest_request_after_callbacks` (runs
+  for internal dispatches). Every HTTP method is redacted. A route that serves its own
+  body via `rest_pre_serve_request` bypasses it (none known on the agent path).
+- **Audience** (`is_audience()`): a served REST request, and either the gateway's
+  `/aura/mcp/tools/execute` — matched the way core dispatches it
+  (`is_gateway_execute_route()`: case-insensitive, tolerating one trailing newline) —
+  whatever the caller's cookie state, or, when not cookie-authenticated
+  (`Aura_Worker_Rules::cookie_authenticated()`), a route outside `aura/v1|v2|mcp` with
+  a logged-in user. The cookie flag is consulted only on that second branch — a
+  cookie session hitting the gateway route is redacted too, since that route is
+  SiteAgent-token-authenticated and never a wp-admin surface. System routes, wp-admin
+  and anonymous callers are never redacted. Routes compare lowercased.
+- **Detectors.** `URL_PATTERNS` (Make, Integromat, Zapier, Slack — `hooks.slack.com` and
+  GovSlack's `hooks.slack-gov.com` — Discord, IFTTT, Telegram — full URLs matched with
+  or without a scheme, including protocol-relative and bare hosts, anchored on the host with a strict boundary so a lookalike host
+  (`myhooks.zapier.com`) never matches, `\/` accepted); `SECRET_KEYS` — exact key
+  names only (`webhooks`), each with its plugin/setting in a comment, never a
+  substring match. Carriers decoded: `_elementor_data`/`_elementor_page_settings`
+  strings (and a snapshot capture's `{ existed, value }` entry under those keys), the
+  `text` of a `{type:"text"}` item under `content`, and a `snapshot_get` answer's
+  base64 `payload` (`unserialize( …, allowed_classes => false )`; unreadable → `payload:
+  null, payload_redacted: true`). At most two JSON decodes per path; the payload decode
+  is not counted. A response with no match is returned as the same value.
+- **Placeholder** `aura-redacted:v1:<kind>` (`make|integromat|zapier|slack|discord|
+  ifttt|telegram|field`) — one-way, no hash.
+- **Write guard** (`rest_request_before_callbacks`, priority 6, after the rules guard):
+  an audience request with a method other than GET/HEAD/OPTIONS whose query, body,
+  JSON or URL params (each walked separately, carriers decoded) — or, for a non-POST
+  form body core has not parsed yet (`lazy_form_body()`: form-encoded or no content
+  type, no route `args`), that raw body parsed the way core would — contain
+  `aura-redacted:` → `409 aura_redacted_placeholder`. Not a security boundary. On the
+  gateway route the guard and the grant check act only for a request carrying the
+  valid site token (`Aura_Worker_Security::token_matches()`, a side-effect-free
+  comparison): the filter runs before the route's permission callback, so an
+  anonymous caller gets that callback's answer — no 409, no counter, no nonce spent.
+- **Unredacted grant.** `X-Aura-Unredacted-Grant`, verified by
+  `Aura_Worker_Grant::verify()` on two shapes only: a single-object JSON-RPC
+  `tools/call` POST to `/mcp/<server>` (tool `unredacted-read:mcp/<server>#<name>`,
+  params = `arguments`) and `/aura/mcp/tools/execute` (tool
+  `unredacted-read:aura/mcp#<tool>`, params = `params`). Verified → that request object
+  alone is exempt. Recognised shape but invalid → `403 aura_unredacted_grant_invalid`
+  (an unbound site answers `403 aura_site_unbound`). No usable gateway key, or another
+  shape → header ignored. The write guard runs first, so a refused write spends no nonce.
+- **Reporting.** `do_action( 'aura_worker_redacted', $count, $route )` /
+  `do_action( 'aura_worker_placeholder_refused', $route )`; hourly counters through
+  `Aura_Worker_Rules::bump_counter()`; `audit_rules.enforcement` carries `redacted_24h`,
+  `placeholder_refused_24h` and the points `read_redaction`, `placeholder_guard`;
+  `/status` carries `redaction: { v: 1 }` (an object; absent = pre-2.18.0). The counter
+  sweep runs once an hour (on the bump that creates the hour's row), not on every bump.
+- **Walk bounds.** `ArrayObject`/`ArrayIterator` are walked through the view
+  `json_encode()` emits (their storage, or their properties under `STD_PROP_LIST`);
+  no other `Traversable` is iterated. Nesting past `MAX_WALK_DEPTH` (512) — a
+  self-referencing object included — becomes the field placeholder (fail closed).
+- **Limits** (known, accepted):
+  - raw-read tools (`db_query`, `execute_php`, `run_wp_cli`, `read_file`, and
+    `meta_key`/`meta_value` rows) get only the URL detector — the key names are not
+    there, so a `webhooks` value on an unlisted host is not caught;
+  - the guard also refuses legitimate power-tool input that mentions
+    `aura-redacted:` (case-insensitive);
+  - `/aura/mcp/tools/preview` returns unredacted data (it is not in the audience) and
+    must never be forwarded to an agent;
+  - redaction takes about 8× the carrier's size in memory at peak, and fails closed
+    (placeholder or `payload_redacted`) when a step cannot complete.
+
 ---
 
 ## WordPress Options
@@ -266,6 +341,8 @@ before stopping at the first `.php` one.
 | `aura_worker_grant_pubkey` | The gateway's Ed25519 public key; empty = an unkeyed (manual) site |
 | `aura_worker_unbound` | **2.13.0** — the unbind marker: `{ at, site, site_ref, client, seq, app_password_uuids[], app_password_users{} }`. Autoload `no`, read uncached; its presence refuses every mutation |
 | `aura_worker_host_probe` | **SA#95** — the last host write probe: `{ php_writes: ok\|blocked\|unwritable, checked_at }`. Autoload `no`; reported by `/status` as `host` |
+| `aura_worker_redacted_h<hour>` | **2.18.0** — hourly count of agent responses that had a value redacted (raw-SQL increment via `Aura_Worker_Rules::bump_counter()`, swept after 24 h) |
+| `aura_worker_placeholder_refused_h<hour>` | **2.18.0** — hourly count of agent writes refused for carrying `aura-redacted:` |
 | `aura_worker_app_password_probe_unproven` | **2.13.0** — bounded `{ count, at, owner }`: a probe that could not prove an Application Password gone |
 
 All options are cleaned up in `uninstall.php`.
@@ -348,6 +425,10 @@ from WordPress is loaded). `tests/unit/*Test.php`, one class per subject; `sa_re
   by setting `$wpdb->last_error` there); `post_type_exists()` reads `$GLOBALS['_post_types']`
   (register one with `$GLOBALS['_post_types']['angie_snippet'] = true`). All since 2.17.0
   (`audit_agent_code`).
+- The `WP_REST_Request` stub keeps core's parameter sources apart since 2.18.0:
+  `set_/get_query_params()`, `set_/get_body_params()`, `set_/get_url_params()`, and
+  `set_body()` + a `Content-Type: application/json` header for `get_json_params()`.
+  `get_param()` still reads only what `set_param()` stored.
 
 ---
 

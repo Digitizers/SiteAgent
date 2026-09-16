@@ -34,7 +34,12 @@ final class AuditRulesTest extends TestCase {
 		$r = $this->run_tool();
 		$this->assertNull( $r['ruleset'] );
 		$this->assertSame( 0, $r['enforcement']['blocked_24h'] );
-		$this->assertSame( array( 'execute_tool', 'rest_updates', 'core_rest_content' ), $r['enforcement']['points'] );
+		$this->assertSame(
+			array( 'execute_tool', 'rest_updates', 'core_rest_content', 'read_redaction', 'placeholder_guard' ),
+			$r['enforcement']['points']
+		);
+		$this->assertSame( 0, $r['enforcement']['redacted_24h'] );
+		$this->assertSame( 0, $r['enforcement']['placeholder_refused_24h'] );
 	}
 
 	public function test_reports_whether_the_site_can_verify_a_ruleset_at_all(): void {

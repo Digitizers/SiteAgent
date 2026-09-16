@@ -118,6 +118,27 @@ class Aura_Worker_Rules {
 	}
 
 	/**
+	 * bump(), for the other hourly counters this plugin keeps (2.18.0: read
+	 * redaction, #419). Same storage, same sweep, same atomic increment —
+	 * and still the one raw-SQL writer UninstallCoverageTest acknowledges.
+	 * Closed to the known prefixes, all under `aura_worker_`, which
+	 * uninstall.php sweeps.
+	 *
+	 * @param string   $prefix A known counter prefix.
+	 * @param int|null $now    Unix time; injected for tests.
+	 */
+	public static function bump_counter( $prefix, $now = null ) {
+		$known = array( self::BLOCKED_COUNTER, self::WARNED_COUNTER );
+		if ( class_exists( 'Aura_Worker_Redact' ) ) {
+			$known[] = Aura_Worker_Redact::REDACTED_COUNTER;
+			$known[] = Aura_Worker_Redact::PLACEHOLDER_REFUSED_COUNTER;
+		}
+		if ( in_array( $prefix, $known, true ) ) {
+			self::bump( $prefix, $now );
+		}
+	}
+
+	/**
 	 * Option name for one hour of one counter.
 	 *
 	 * @param string $prefix BLOCKED_COUNTER or WARNED_COUNTER.
@@ -156,7 +177,7 @@ class Aura_Worker_Rules {
 		// So the seed and the increment are ONE statement instead: the first
 		// bump of the hour inserts '1', every later bump in the same hour
 		// adds one to whatever is there. Nothing ever reads the row first.
-		$wpdb->query(
+		$affected = $wpdb->query(
 			$wpdb->prepare(
 				"INSERT INTO {$wpdb->options} (option_name, option_value, autoload) VALUES (%s, '1', 'no') ON DUPLICATE KEY UPDATE option_value = option_value + 1",
 				$name
@@ -170,6 +191,16 @@ class Aura_Worker_Rules {
 		// "absent" — for the rest of the request, and on a persistent object
 		// cache for every request after — and the count stays at zero.
 		wp_cache_delete( 'notoptions', 'options' );
+
+		// Once an hour, not once a bump (2.18.0: every redacted response
+		// bumps, #419): the boundary depends only on the hour, so the sweep
+		// the hour's first bump ran is the sweep every later one would run.
+		// MySQL answers 2 for a row ON DUPLICATE KEY UPDATE updated and 1 for
+		// one it inserted; anything but a known update (an error, or a driver
+		// that counts differently) still sweeps, as before.
+		if ( 2 === $affected ) {
+			return;
+		}
 
 		// Sweep hour-options older than the boundary hour. Same-length names
 		// (see bucket_name) make the string comparison a numeric one.
@@ -2704,6 +2735,32 @@ class Aura_Worker_Rules {
 	}
 
 	/**
+	 * Is a REST request being served? `REST_REQUEST`, or the test seam.
+	 *
+	 * Public for Aura_Worker_Redact (2.18.0, #419), whose audience starts
+	 * with exactly this question — one definition, so the two seams can never
+	 * disagree about it.
+	 *
+	 * @return bool
+	 */
+	public static function serving_rest() {
+		return null !== self::$rest_request_override
+			? (bool) self::$rest_request_override
+			: ( defined( 'REST_REQUEST' ) && REST_REQUEST );
+	}
+
+	/**
+	 * is_cookie_authenticated(), for Aura_Worker_Redact (2.18.0, #419): a
+	 * person in wp-admin is never redacted, and "is this a person" is decided
+	 * here and nowhere else.
+	 *
+	 * @return bool
+	 */
+	public static function cookie_authenticated() {
+		return self::is_cookie_authenticated();
+	}
+
+	/**
 	 * Is this a REST request from an agent — not a human, not the public, not
 	 * SiteAgent itself?
 	 *
@@ -2743,10 +2800,7 @@ class Aura_Worker_Rules {
 	 * @return bool
 	 */
 	private static function is_agent_rest_request( $request = null, $require_identity = true ) {
-		$is_rest = null !== self::$rest_request_override
-			? (bool) self::$rest_request_override
-			: ( defined( 'REST_REQUEST' ) && REST_REQUEST );
-		if ( ! $is_rest ) {
+		if ( ! self::serving_rest() ) {
 			return false;
 		}
 		if ( $require_identity && ! is_user_logged_in() ) {
