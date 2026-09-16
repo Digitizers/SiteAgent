@@ -708,7 +708,7 @@ final class RollbackPrimitivesTest extends TestCase {
 				$this->v = $v;
 				parent::__construct();
 			}
-			protected function host_php_writes_verdict() {
+			protected function plugin_dir_php_writes_verdict() {
 				$this->probes++;
 				return $this->v;
 			}
@@ -766,5 +766,77 @@ final class RollbackPrimitivesTest extends TestCase {
 		$this->assertTrue( $restore['success'] );
 		$this->assertSame( 1, $rollback->probes );
 		$this->assertSame( 'ORIGINAL', file_get_contents( $this->dir . '/main.php' ) );
+	}
+
+	public function test_r1_the_preflight_proves_plain_php_writes_in_the_plugins_directory_itself(): void {
+		// Round 1, item 2: extractTo() writes with plain PHP into WP_PLUGIN_DIR,
+		// so that — not wp-content/upgrade through WP_Filesystem — is what the
+		// preflight must prove. Here the transport (and the upgrade path) would
+		// work; plain-PHP .php writes into the plugins directory do not.
+		mkdir( $this->dir . '/assets', 0777, true );
+		file_put_contents( $this->dir . '/readme.txt', 'readme' );
+		file_put_contents( $this->dir . '/assets/x.css', 'body{}' );
+		$rollback = new class() extends Aura_Worker_Rollback {
+			public $probe;
+			protected function plugin_dir_probe() {
+				$this->probe = new class() extends Aura_Worker_Host_Probe {
+					public $writes = array();
+					public function __construct() {
+						parent::__construct( WP_PLUGIN_DIR, true, false );
+					}
+					protected function write_file( $path, $body ) {
+						$this->writes[] = $path;
+						return '.php' === substr( $path, -4 ) ? false : parent::write_file( $path, $body );
+					}
+				};
+				return $this->probe;
+			}
+		};
+		$backup = $rollback->backup_plugin( $this->slug );
+		file_put_contents( $this->dir . '/main.php', 'REPLACED' );
+		$GLOBALS['_option_writes'] = array();
+
+		try {
+			$this->assertSame( 'ok', Aura_Worker_Updater::host_php_writes(), 'the upgrade path itself is fine' );
+			$GLOBALS['_option_writes'] = array();
+
+			$restore = $rollback->restore_plugin( $this->slug, $backup['backup_path'] );
+
+			$this->assertFalse( $restore['success'] );
+			$this->assertSame( 'preflight', $restore['stage'] ?? null );
+			$this->assertSame( 'aura_php_writes_blocked', $restore['code'] ?? null );
+			$this->assertCount( 2, $rollback->probe->writes );
+			foreach ( $rollback->probe->writes as $w ) {
+				$this->assertSame( WP_PLUGIN_DIR, dirname( $w ), 'probed in the plugins directory' );
+			}
+			$this->assertSame( 'REPLACED', file_get_contents( $this->dir . '/main.php' ) );
+			$this->assertFileExists( $this->dir . '/readme.txt' );
+			$this->assertFileExists( $this->dir . '/assets/x.css' );
+			$this->assertSame( array(), glob( WP_PLUGIN_DIR . '/aura-php-probe-*' ) ?: array() );
+			$this->assertNotContains( array( 'set', 'aura_worker_host_probe' ), $GLOBALS['_option_writes'], 'the plugins-directory check is not recorded' );
+		} finally {
+			$this->removeTree( $this->dir . '/assets' );
+		}
+	}
+
+	public function test_r1_the_real_preflight_uses_plain_php_even_without_a_transport_and_records_nothing(): void {
+		$GLOBALS['_wp_filesystem_unavailable'] = true;
+		$GLOBALS['wp_filesystem']              = null;
+		$GLOBALS['_option_writes']             = array();
+		$rollback = new Aura_Worker_Rollback();
+		$backup   = $rollback->backup_plugin( $this->slug );
+		file_put_contents( $this->dir . '/main.php', 'REPLACED' );
+
+		try {
+			$restore = $rollback->restore_plugin( $this->slug, $backup['backup_path'] );
+		} finally {
+			unset( $GLOBALS['_wp_filesystem_unavailable'] );
+			$GLOBALS['wp_filesystem'] = null;
+		}
+
+		$this->assertTrue( $restore['success'] );
+		$this->assertSame( 'ORIGINAL', file_get_contents( $this->dir . '/main.php' ) );
+		$this->assertSame( array(), glob( WP_PLUGIN_DIR . '/aura-php-probe-*' ) ?: array() );
+		$this->assertNotContains( array( 'set', 'aura_worker_host_probe' ), $GLOBALS['_option_writes'] );
 	}
 }

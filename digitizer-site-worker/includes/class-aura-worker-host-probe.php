@@ -32,6 +32,54 @@ class Aura_Worker_Host_Probe {
 	const UNWRITABLE = 'unwritable';
 
 	/**
+	 * Directory probed, with a trailing slash.
+	 *
+	 * @var string
+	 */
+	private $dir;
+
+	/**
+	 * Whether to write with PHP's own functions instead of WP_Filesystem.
+	 *
+	 * @var bool
+	 */
+	private $plain;
+
+	/**
+	 * Whether the verdict is stored in OPTION.
+	 *
+	 * @var bool
+	 */
+	private $record;
+
+	/**
+	 * @param string|null $dir    Directory to probe; null is the upgrade
+	 *                            directory (WP_CONTENT_DIR/upgrade), created
+	 *                            when missing. Any other directory must exist.
+	 * @param bool        $plain  Write with plain PHP (the layer ZipArchive's
+	 *                            extract uses) instead of WP_Filesystem.
+	 * @param bool        $record Store the verdict in OPTION. Only the upgrade
+	 *                            path is recorded: OPTION describes that path.
+	 */
+	public function __construct( $dir = null, $plain = false, $record = true ) {
+		$this->dir    = null === $dir ? WP_CONTENT_DIR . '/upgrade/' : rtrim( (string) $dir, '/\\' ) . '/';
+		$this->plain  = (bool) $plain;
+		$this->record = (bool) $record;
+	}
+
+	/**
+	 * The check a restore needs (SA#95 round 1): `Aura_Worker_Rollback`
+	 * deletes and extracts with plain PHP inside WP_PLUGIN_DIR, whatever
+	 * transport the upgrader uses — so that is the directory and the layer
+	 * proven. Not recorded.
+	 *
+	 * @return self
+	 */
+	public static function for_plugin_dir() {
+		return new self( WP_PLUGIN_DIR, true, false );
+	}
+
+	/**
 	 * Run the probe, record the verdict, and answer it.
 	 *
 	 * Never throws. A probe that cannot finish answers the most it proved:
@@ -48,14 +96,20 @@ class Aura_Worker_Host_Probe {
 			$verdict = $this->probe( $created );
 		} catch ( Throwable $e ) {
 			// $created says how far the probe got (see probe()).
-			$verdict = isset( $created['txt_written'] ) ? self::BLOCKED : self::UNWRITABLE;
+			$verdict = isset( $created['txt_proven'] ) ? self::BLOCKED : self::UNWRITABLE;
 		} finally {
-			unset( $created['txt_written'] );
+			unset( $created['txt_proven'] );
 			$this->cleanup( $created );
 		}
-		$this->record( $verdict );
+		if ( $this->record ) {
+			$this->record( $verdict );
+		}
 		if ( function_exists( 'do_action' ) ) {
-			do_action( 'aura_worker_host_probe_ran', $verdict );
+			try {
+				do_action( 'aura_worker_host_probe_ran', $verdict, $this->dir );
+			} catch ( Throwable $e ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch
+				// A listener's failure is not the probe's answer.
+			}
 		}
 		return $verdict;
 	}
@@ -64,13 +118,16 @@ class Aura_Worker_Host_Probe {
 	 * The probe proper. Every path it may create is registered in $created
 	 * BEFORE the write, so the caller's cleanup reaches it whatever happens.
 	 *
-	 * @param array $created Out: paths to clean up; `txt_written` once the
-	 *                       `.txt` write was proven.
+	 * @param array $created Out: paths to clean up; `txt_proven` once the
+	 *                       `.txt` file was proven created AND deleted.
 	 * @return string
 	 */
 	private function probe( array &$created ) {
-		$dir = WP_CONTENT_DIR . '/upgrade/';
+		$dir = $this->dir;
 		if ( ! is_dir( $dir ) ) {
+			if ( ! $this->record ) {
+				return self::UNWRITABLE; // only the upgrade directory is ours to create
+			}
 			wp_mkdir_p( $dir );
 		}
 
@@ -79,8 +136,13 @@ class Aura_Worker_Host_Probe {
 		if ( ! $this->write_file( $txt, "Aura write probe\n" ) || ! $this->exists( $txt ) ) {
 			return self::UNWRITABLE;
 		}
-		$created['txt_written'] = true;
+		// A delete is judged by looking again (round 1): a .txt file that
+		// stays is a directory PHP cannot clean up after itself in.
 		$this->delete_file( $txt );
+		if ( $this->exists( $txt ) ) {
+			return self::UNWRITABLE;
+		}
+		$created['txt_proven'] = true;
 
 		$php       = $dir . 'aura-php-probe-' . bin2hex( random_bytes( 8 ) ) . '.php';
 		$created[] = $php;
@@ -171,7 +233,7 @@ class Aura_Worker_Host_Probe {
 	 * @return bool Whether the write reported success.
 	 */
 	protected function write_file( $path, $body ) {
-		$fs = $this->filesystem();
+		$fs = $this->plain ? null : $this->filesystem();
 		if ( null !== $fs ) {
 			return (bool) $fs->put_contents( $path, $body, defined( 'FS_CHMOD_FILE' ) ? FS_CHMOD_FILE : 0644 );
 		}
@@ -186,7 +248,7 @@ class Aura_Worker_Host_Probe {
 	 * @return bool
 	 */
 	protected function delete_file( $path ) {
-		$fs = $this->filesystem();
+		$fs = $this->plain ? null : $this->filesystem();
 		if ( null !== $fs ) {
 			return (bool) $fs->delete( $path );
 		}
@@ -212,14 +274,15 @@ class Aura_Worker_Host_Probe {
 	}
 
 	/**
-	 * The refusal a plugin-file mutation answers for a verdict, or null for OK.
-	 * Anything that is not OK or BLOCKED is treated as UNWRITABLE.
+	 * The refusal a plugin-file mutation answers for a verdict, or null for OK
+	 * and for null ("not probed": the upgrader does not write as PHP here).
+	 * Anything else that is not BLOCKED is treated as UNWRITABLE.
 	 *
-	 * @param string $verdict The probe's verdict.
+	 * @param string|null $verdict The probe's verdict.
 	 * @return array|null { success, code, error, in_progress, php_writes }
 	 */
 	public static function refusal( $verdict ) {
-		if ( self::OK === $verdict ) {
+		if ( null === $verdict || self::OK === $verdict ) {
 			return null;
 		}
 		if ( self::BLOCKED === $verdict ) {

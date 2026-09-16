@@ -1499,6 +1499,14 @@ if ( ! function_exists( 'wp_delete_file' ) ) {
 	}
 }
 
+// `_fs_method` models the transport WordPress would pick for the upgrader:
+// 'direct' (the default) or ftpext / ftpsockets / ssh2 (SA#95 round 1).
+if ( ! function_exists( 'get_filesystem_method' ) ) {
+	function get_filesystem_method( $args = array(), $context = '', $allow_relaxed_file_ownership = false ) {
+		return isset( $GLOBALS['_fs_method'] ) ? (string) $GLOBALS['_fs_method'] : 'direct';
+	}
+}
+
 if ( ! function_exists( 'WP_Filesystem' ) ) {
 	function WP_Filesystem() {
 		global $wp_filesystem;

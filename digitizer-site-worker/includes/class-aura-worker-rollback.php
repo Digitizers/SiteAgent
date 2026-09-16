@@ -146,7 +146,13 @@ class Aura_Worker_Rollback {
 		// other file — readme, CSS, JS, images — and then stopped at the first
 		// .php one. So the host is asked first, and anything but a proven `ok`
 		// refuses with nothing deleted: `stage: preflight`.
-		$refusal = Aura_Worker_Host_Probe::refusal( $this->host_php_writes_verdict() );
+		//
+		// Asked where and how the restore itself writes (round 1): the delete
+		// below and extractTo() both use plain PHP inside WP_PLUGIN_DIR,
+		// whatever transport the upgrader uses, so a .txt and a .php file are
+		// created and deleted there with plain PHP. Always — an FTP/SSH
+		// transport does not change the layer this restore writes through.
+		$refusal = Aura_Worker_Host_Probe::refusal( (string) $this->plugin_dir_php_writes_verdict() );
 		if ( null !== $refusal ) {
 			$zip->close();
 			return array(
@@ -155,7 +161,7 @@ class Aura_Worker_Rollback {
 				'code'    => $refusal['code'],
 				'error'   => 'aura_php_writes_blocked' === $refusal['code']
 					? 'Restore refused before deleting anything: this host does not let PHP write or delete .php files, so the backup could not be put back. The plugin directory was not touched.'
-					: 'Restore refused before deleting anything: the upgrade directory (wp-content/upgrade) is not writable. The plugin directory was not touched.',
+					: 'Restore refused before deleting anything: PHP could not create and delete a file in the plugins directory. The plugin directory was not touched.',
 			);
 		}
 
@@ -214,13 +220,23 @@ class Aura_Worker_Rollback {
 	}
 
 	/**
-	 * The host probe verdict restore_plugin() consults before deleting. A
-	 * seam: the unit suite cannot fake a real filesystem permission.
+	 * The probe restore_plugin() runs before deleting: plain PHP, in
+	 * WP_PLUGIN_DIR, not recorded. A seam.
+	 *
+	 * @return Aura_Worker_Host_Probe
+	 */
+	protected function plugin_dir_probe() {
+		return Aura_Worker_Host_Probe::for_plugin_dir();
+	}
+
+	/**
+	 * The verdict restore_plugin() consults before deleting. A seam: the unit
+	 * suite cannot fake a real filesystem permission.
 	 *
 	 * @return string 'ok', 'blocked' or 'unwritable'.
 	 */
-	protected function host_php_writes_verdict() {
-		return ( new Aura_Worker_Host_Probe() )->run();
+	protected function plugin_dir_php_writes_verdict() {
+		return $this->plugin_dir_probe()->run();
 	}
 
 	/**

@@ -63,10 +63,35 @@ class Aura_Worker_Updater {
 	 * The probe verdict every plugin-file mutation consults. A seam: the unit
 	 * suite cannot fake a real filesystem permission.
 	 *
-	 * @return string
+	 * Only where the upgrader writes as PHP (round 1): over ftpext,
+	 * ftpsockets or ssh2 it connects with credentials the probe does not
+	 * have, so a PHP-side probe proves nothing about it — not probed, not
+	 * recorded, not refused.
+	 *
+	 * @return string|null The verdict, or null when not probed.
 	 */
 	protected function host_php_writes_verdict() {
+		if ( 'direct' !== $this->filesystem_method() ) {
+			return null;
+		}
 		return self::host_php_writes();
+	}
+
+	/**
+	 * The transport WordPress's upgrader would use for wp-content — the
+	 * context WP_Upgrader::fs_connect() asks about.
+	 *
+	 * @return string
+	 */
+	protected function filesystem_method() {
+		if ( ! function_exists( 'get_filesystem_method' ) ) {
+			require_once ABSPATH . 'wp-admin/includes/file.php';
+		}
+		try {
+			return (string) get_filesystem_method( array(), WP_CONTENT_DIR );
+		} catch ( Throwable $e ) {
+			return '';
+		}
 	}
 
 	/**
@@ -83,11 +108,12 @@ class Aura_Worker_Updater {
 	 * The host refusal for a verdict, or null when the host lets PHP write
 	 * `.php` files. Probes when no verdict is given.
 	 *
-	 * @param string|null $verdict A verdict already taken, or null to probe now.
+	 * @param string|null|false $verdict A verdict already taken (null: not
+	 *                                   probed), or false to take it now.
 	 * @return array|null
 	 */
-	private function host_refusal( $verdict = null ) {
-		if ( null === $verdict ) {
+	private function host_refusal( $verdict = false ) {
+		if ( false === $verdict ) {
 			$verdict = $this->host_php_writes_verdict();
 		}
 		return Aura_Worker_Host_Probe::refusal( $verdict );
@@ -263,6 +289,8 @@ class Aura_Worker_Updater {
 					'health_checked' => false,
 					'rolled_back'    => false,
 					'restore_error'  => null,
+					'restore_stage'  => null,
+					'restore_code'   => null,
 				)
 			);
 		}
@@ -635,6 +663,10 @@ class Aura_Worker_Updater {
 				'health'        => $health_result,
 				'rolled_back'   => $restored,
 				'restore_error' => $rb['error'],
+				// Why a restore did not happen (round 1): `preflight` means it
+				// refused before deleting anything, and the broken build stands.
+				'restore_stage' => $rb['stage'],
+				'restore_code'  => $rb['code'],
 			);
 		}
 
@@ -652,6 +684,9 @@ class Aura_Worker_Updater {
 				'healthy'       => false,
 				'health'        => $health_result,
 				'rolled_back'   => false,
+				'restore_error' => null,
+				'restore_stage' => null,
+				'restore_code'  => null,
 			);
 		}
 
@@ -687,6 +722,8 @@ class Aura_Worker_Updater {
 			'verified'     => ! empty( $health_result['verified'] ),
 			'health'       => $health_result,
 			'rolled_back'  => false,
+			'restore_stage' => null,
+			'restore_code'  => null,
 		);
 	}
 
@@ -901,12 +938,12 @@ class Aura_Worker_Updater {
 	 * evidence that could not support it, so this returns success only on the
 	 * post-condition: the plugin's own header reads the version we came from.
 	 *
-	 * @return array { restored: bool, error: string|null, stage: string|null }
-	 *               `stage` is restore_plugin()'s failure stage, when it failed.
+	 * @return array { restored: bool, error: string|null, stage: string|null, code: string|null }
+	 *               `stage` and `code` are restore_plugin()'s, when it failed.
 	 */
 	private function attempt_rollback( $rollback, $plugin_slug, $plugin_file, $backup_path, $old_version ) {
 		if ( null === $backup_path || null === $rollback ) {
-			return array( 'restored' => false, 'error' => null, 'stage' => null );
+			return array( 'restored' => false, 'error' => null, 'stage' => null, 'code' => null );
 		}
 		$restore = $rollback->restore_plugin( $plugin_slug, $backup_path );
 		if ( empty( $restore['success'] ) ) {
@@ -914,6 +951,7 @@ class Aura_Worker_Updater {
 				'restored' => false,
 				'error'    => (string) ( $restore['error'] ?? 'restore failed' ),
 				'stage'    => isset( $restore['stage'] ) ? (string) $restore['stage'] : null,
+				'code'     => isset( $restore['code'] ) ? (string) $restore['code'] : null,
 			);
 		}
 		if ( $old_version !== $this->installed_version( $plugin_file ) ) {
@@ -921,9 +959,10 @@ class Aura_Worker_Updater {
 				'restored' => false,
 				'error'    => 'restore completed but the plugin header does not read ' . $old_version,
 				'stage'    => 'verify',
+				'code'     => null,
 			);
 		}
-		return array( 'restored' => true, 'error' => null, 'stage' => null );
+		return array( 'restored' => true, 'error' => null, 'stage' => null, 'code' => null );
 	}
 
 	/**
@@ -1071,6 +1110,8 @@ class Aura_Worker_Updater {
 			'health_checked' => (bool) $health_checked,
 			'rolled_back'    => false,
 			'restore_error'  => null,
+			'restore_stage'  => null,
+			'restore_code'   => null,
 		);
 	}
 
@@ -1096,17 +1137,19 @@ class Aura_Worker_Updater {
 		// with a recursive delete — on a host that refuses .php deletes, that
 		// removed every other file and then stopped. Only a manifest that was
 		// taken, and still matches, skips the restore; anything else restores
-		// as before.
-		if ( null !== $backup_path && null !== $rollback && null !== $manifest
-			&& $manifest === $this->plugin_manifest( WP_PLUGIN_DIR . '/' . $plugin_slug ) ) {
+		// as before. Whether or not a backup exists (round 1): with none, the
+		// directory is still intact, and that is what the operator needs told.
+		if ( null !== $manifest && $manifest === $this->plugin_manifest( WP_PLUGIN_DIR . '/' . $plugin_slug ) ) {
 			$out = array(
 				'success'         => false,
 				'error'           => $error . ' ' . __( 'The install failed before it changed any file in the plugin directory, so nothing was restored: the previous build is intact.', 'digitizer-site-worker' ),
-				'backed_up'       => true,
+				'backed_up'       => null !== $backup_path,
 				'health_checked'  => false,
 				'rolled_back'     => false,
 				'restore_skipped' => 'unchanged',
 				'restore_error'   => null,
+				'restore_stage'   => null,
+				'restore_code'    => null,
 			);
 			if ( '' !== $detail ) {
 				$out['detail'] = $detail;
@@ -1163,6 +1206,8 @@ class Aura_Worker_Updater {
 			'health_checked'=> false,
 			'rolled_back'   => $restored,
 			'restore_error' => $restore_error,
+			'restore_stage' => $rb['stage'],
+			'restore_code'  => $rb['code'],
 		);
 		if ( '' !== $detail ) {
 			$out['detail'] = $detail;
@@ -1210,6 +1255,11 @@ class Aura_Worker_Updater {
 				if ( $is_dir ) {
 					return 'd:' . $st['mode'];
 				}
+				// Only a regular file is hashed: reading a FIFO or a device can
+				// block or never end. Anything else means no manifest (round 1).
+				if ( ! is_file( $path ) ) {
+					throw new RuntimeException( 'not a regular file' );
+				}
 				$bytes += (int) $st['size'];
 				if ( $bytes > $max ) {
 					throw new RuntimeException( 'too large' );
@@ -1225,8 +1275,10 @@ class Aura_Worker_Updater {
 				new RecursiveDirectoryIterator( $dir, RecursiveDirectoryIterator::SKIP_DOTS ),
 				RecursiveIteratorIterator::SELF_FIRST
 			);
+			// The root counts as one entry; a directory of MANIFEST_MAX_ENTRIES
+			// entries in total is manifested, one more is not (round 1).
 			foreach ( $iterator as $entry ) {
-				if ( count( $out ) > static::MANIFEST_MAX_ENTRIES ) {
+				if ( count( $out ) >= static::MANIFEST_MAX_ENTRIES ) {
 					return null;
 				}
 				$path = $entry->getPathname();
@@ -1273,6 +1325,8 @@ class Aura_Worker_Updater {
 			'health_checked' => false,
 			'rolled_back'    => false,
 			'restore_error'  => null,
+			'restore_stage'  => null,
+			'restore_code'   => null,
 		);
 	}
 
@@ -1450,9 +1504,18 @@ class Aura_Worker_Updater {
 		if ( ! $health_result['healthy'] ) {
 			// 4. Auto-rollback.
 			if ( $backup_path ) {
-				$restore_result  = $rollback->restore_plugin( $slug, $backup_path );
-				$entry['status'] = 'rolled_back';
-				$entry['detail'] = 'Health check failed; rollback ' . ( $restore_result['success'] ? 'succeeded' : 'failed: ' . $restore_result['error'] );
+				$restore_result = $rollback->restore_plugin( $slug, $backup_path );
+				if ( ! empty( $restore_result['success'] ) ) {
+					$entry['status'] = 'rolled_back';
+					$entry['detail'] = 'Health check failed; rollback succeeded';
+				} else {
+					// Not rolled back, and said so (round 1): a `preflight` stage
+					// means nothing was deleted and the new build still stands.
+					$entry['status']        = 'failed';
+					$entry['detail']        = 'Health check failed; rollback failed: ' . (string) ( $restore_result['error'] ?? 'restore failed' );
+					$entry['code']          = isset( $restore_result['code'] ) ? (string) $restore_result['code'] : 'aura_rollback_failed';
+					$entry['restore_stage'] = isset( $restore_result['stage'] ) ? (string) $restore_result['stage'] : null;
+				}
 			} else {
 				$entry['status'] = 'failed';
 				$entry['detail'] = 'Health check failed; no backup available for rollback';
@@ -1528,12 +1591,12 @@ class Aura_Worker_Updater {
 	 * @param bool     $busy        Out: true when refused for a held claim.
 	 * @param array|null $refused   Out: the SA#79 multisite refusal, the SA#95
 	 *                              host refusal, or null.
-	 * @param string|null $verdict  A host probe verdict the caller already
-	 *                              took (the batch probes once), or null to
-	 *                              probe here.
+	 * @param string|null|false $verdict A host probe verdict the caller
+	 *                              already took (the batch probes once; null
+	 *                              is "not probed"), or false to probe here.
 	 * @return mixed $work's return, or null when busy or refused.
 	 */
-	private function guarding_self( $plugin_file, $work, &$busy, &$refused = null, $verdict = null ) {
+	private function guarding_self( $plugin_file, $work, &$busy, &$refused = null, $verdict = false ) {
 		$busy    = false;
 		$refused = $this->self_mutation_refusal( $plugin_file );
 		if ( null !== $refused ) {
@@ -1830,14 +1893,13 @@ class Aura_Worker_Updater {
 		require_once plugin_dir_path( __FILE__ ) . 'class-aura-worker-health.php';
 		require_once plugin_dir_path( __FILE__ ) . 'class-aura-worker-rollback.php';
 
-		// SA#95: one probe for the whole batch, taken before the recovery
-		// helper is built — its constructor may create the backup directory,
-		// and a host that refuses .php writes refuses every entry anyway.
-		$verdict  = $this->host_php_writes_verdict();
-		$refusing = null !== Aura_Worker_Host_Probe::refusal( $verdict );
-
+		// SA#95: one probe for the whole batch, taken lazily at the first entry
+		// the multisite refusal lets through (round 1) and reused for the rest.
+		// The recovery helper is built only when an entry actually runs: its
+		// constructor may create the backup directory.
+		$verdict  = false;
 		$results  = array();
-		$rollback = $refusing ? null : new Aura_Worker_Rollback();
+		$rollback = null;
 		$health   = new Aura_Worker_Health();
 		$chunks   = array_chunk( $plugins, max( 1, (int) $chunk_size ) );
 
@@ -1846,7 +1908,13 @@ class Aura_Worker_Updater {
 				// SiteAgent's own entry runs under the self-update claim (Codex
 				// round-23 P1); while a self-update holds it, the entry is skipped
 				// and says why, and the rest of the batch is unaffected.
-				$entry = $this->guarding_self( $plugin_file, function ( $fence ) use ( $plugin_file, $rollback, $health, $create_backup ) {
+				if ( false === $verdict && null === $this->self_mutation_refusal( $plugin_file ) ) {
+					$verdict = $this->host_php_writes_verdict();
+				}
+				$entry = $this->guarding_self( $plugin_file, function ( $fence ) use ( $plugin_file, &$rollback, $health, $create_backup ) {
+					if ( null === $rollback ) {
+						$rollback = $this->new_rollback();
+					}
 					return $this->batch_update_one( $plugin_file, $rollback, $health, $create_backup, $fence );
 				}, $busy, $refused, $verdict );
 				if ( null !== $refused ) {

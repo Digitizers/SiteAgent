@@ -67,6 +67,7 @@ final class HostProbeTest extends TestCase {
 			private $w;
 			private $d;
 			public function __construct( $w, $d ) {
+				parent::__construct(); // the upgrade directory, recorded
 				$this->w = $w;
 				$this->d = $d;
 			}
@@ -189,9 +190,41 @@ final class HostProbeTest extends TestCase {
 
 		$verdict = $probe->run();
 
-		$this->assertSame( 'blocked', $verdict, 'not proven, so not ok' );
+		// Round 1, item 4: a .txt file whose delete was not proven is an
+		// unwritable directory, not a blocked one.
+		$this->assertSame( 'unwritable', $verdict, 'not proven, so not ok' );
 		$this->assertSame( array(), $this->leftovers() );
-		$this->assertSame( 'blocked', get_option( 'aura_worker_host_probe' )['php_writes'] );
+		$this->assertSame( 'unwritable', get_option( 'aura_worker_host_probe' )['php_writes'] );
+	}
+
+	public function test_r1_a_txt_file_that_cannot_be_deleted_answers_unwritable(): void {
+		// Round 1, item 4: the delete reports failure and leaves the file.
+		$probe = $this->probeWith(
+			null,
+			static function ( $path ) {
+				return self::isPhp( $path ) ? null : false;
+			}
+		);
+
+		$this->assertSame( 'unwritable', $probe->run() );
+		$this->assertCount( 1, $probe->writes, 'the .php write is not attempted' );
+		$this->assertSame( array(), $this->leftovers(), 'the cleanup still removes it' );
+	}
+
+	public function test_r1_the_plugins_directory_probe_verifies_its_txt_delete_too(): void {
+		$probe = new class() extends Aura_Worker_Host_Probe {
+			public function __construct() {
+				parent::__construct( WP_PLUGIN_DIR, true, false );
+			}
+			protected function delete_file( $path ) {
+				return '.txt' === substr( $path, -4 ) ? false : parent::delete_file( $path );
+			}
+		};
+		$GLOBALS['_option_writes'] = array();
+
+		$this->assertSame( 'unwritable', $probe->run() );
+		$this->assertSame( array(), glob( WP_PLUGIN_DIR . '/aura-php-probe-*' ) ?: array() );
+		$this->assertSame( array(), $GLOBALS['_option_writes'], 'not recorded' );
 	}
 
 	public function test_a_probe_that_throws_after_creating_the_php_file_still_cleans_it_up(): void {
