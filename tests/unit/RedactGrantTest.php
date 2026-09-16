@@ -256,6 +256,38 @@ final class RedactGrantTest extends TestCase {
 		$this->assertSame( $this->export_body(), $this->echoed( $req, $this->export_body() ) );
 	}
 
+	public function test_a_nested_params_object_is_the_call_the_adapter_runs(): void {
+		// The adapter's extract_params() answers `params['params'] ?? params`.
+		$call = array(
+			'jsonrpc' => '2.0',
+			'id'      => 1,
+			'method'  => 'tools/call',
+			'params'  => array(
+				'name'      => 'export-page',
+				'arguments' => array( 'post_id' => 7 ),
+				'params'    => array( 'name' => 'export-page', 'arguments' => array( 'post_id' => 9 ) ),
+			),
+		);
+		$this->assertSame( array( 'tool' => self::EXPORT, 'params' => array( 'post_id' => 9 ) ), Aura_Worker_Redact::grant_shape( $this->rpc( '/mcp/' . self::SERVER, $call ) ) );
+
+		$outer = $this->rpc( '/mcp/' . self::SERVER, $call );
+		$outer->set_header( 'X-Aura-Unredacted-Grant', $this->grant( self::EXPORT, array( 'post_id' => 7 ) ) );
+		$this->assertRefused( $this->before( $outer ) );
+		$this->assertNotSame( $this->export_body(), $this->echoed( $outer, $this->export_body() ), 'no exemption for post 9 from a grant for post 7' );
+
+		$inner = $this->rpc( '/mcp/' . self::SERVER, $call );
+		$inner->set_header( 'X-Aura-Unredacted-Grant', $this->grant( self::EXPORT, array( 'post_id' => 9 ) ) );
+		$this->assertNull( $this->before( $inner ) );
+		$this->assertSame( $this->export_body(), $this->echoed( $inner, $this->export_body() ) );
+	}
+
+	public function test_a_nested_params_that_is_not_an_object_is_not_the_mcp_row(): void {
+		$call = array( 'jsonrpc' => '2.0', 'id' => 1, 'method' => 'tools/call', 'params' => array( 'name' => 'export-page', 'arguments' => array( 'post_id' => 7 ), 'params' => 'x' ) );
+		$this->assertNull( Aura_Worker_Redact::grant_shape( $this->rpc( '/mcp/' . self::SERVER, $call ) ) );
+		$call['params']['params'] = null; // `??` falls back to the outer object
+		$this->assertSame( array( 'tool' => self::EXPORT, 'params' => array( 'post_id' => 7 ) ), Aura_Worker_Redact::grant_shape( $this->rpc( '/mcp/' . self::SERVER, $call ) ) );
+	}
+
 	public function test_a_name_empty_after_trimming_is_not_the_mcp_row(): void {
 		$req = $this->rpc( '/mcp/' . self::SERVER, array( 'jsonrpc' => '2.0', 'id' => 1, 'method' => 'tools/call', 'params' => array( 'name' => " \t ", 'arguments' => array() ) ) );
 		$this->assertNull( Aura_Worker_Redact::grant_shape( $req ) );

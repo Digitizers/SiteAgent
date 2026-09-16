@@ -249,7 +249,8 @@ class Aura_Worker_Redact {
 	 * refused — the site never swaps it back, so it could only overwrite a
 	 * real value with a dead string. Each parameter source on its own:
 	 * get_params()' precedence can hide one source's value behind a
-	 * same-named key in another.
+	 * same-named key in another. File parameters (`get_file_params()`) are
+	 * out of scope: an upload is not a field the placeholder came back in.
 	 *
 	 * @param WP_REST_Request $request Request.
 	 * @return WP_Error|null
@@ -259,8 +260,15 @@ class Aura_Worker_Redact {
 		if ( in_array( $method, Aura_Worker_Rules::SAFE_METHODS, true ) ) {
 			return null;
 		}
+		$views = array();
 		foreach ( array( 'get_query_params', 'get_body_params', 'get_json_params', 'get_url_params' ) as $source ) {
-			if ( ! method_exists( $request, $source ) || ! self::holds_placeholder( $request->$source() ) ) {
+			if ( method_exists( $request, $source ) ) {
+				$views[] = $request->$source();
+			}
+		}
+		$views[] = self::lazy_form_body( $request, $method );
+		foreach ( $views as $view ) {
+			if ( ! self::holds_placeholder( $view ) ) {
 				continue;
 			}
 			/**
@@ -278,6 +286,44 @@ class Aura_Worker_Redact {
 			);
 		}
 		return null;
+	}
+
+	/**
+	 * The form body core has not parsed yet. For a method other than POST,
+	 * core fills get_body_params() from the raw body only in
+	 * parse_body_params(), which it reaches lazily (get_parameter_order(),
+	 * i.e. the first get_param() or the route's `args` check) — after this
+	 * filter on a route without `args`. The handler's get_param() would
+	 * still see the value, so the raw body is parsed here the way core
+	 * would parse it, as one more view of the body source (never merged).
+	 *
+	 * @param WP_REST_Request $request Request.
+	 * @param string          $method  Upper-case method.
+	 * @return array|null
+	 */
+	private static function lazy_form_body( $request, $method ) {
+		if ( 'POST' === $method || ! method_exists( $request, 'get_body' ) ) {
+			return null;
+		}
+		$body = (string) $request->get_body();
+		if ( empty( $body ) ) {
+			return null; // core: `! empty( $body )`
+		}
+		// WP_REST_Request::get_content_type(), then parse_body_params(): a
+		// missing or slash-less type counts as form-encoded; any other type
+		// is never parsed by core.
+		$type = method_exists( $request, 'get_header' ) ? (string) $request->get_header( 'Content-Type' ) : '';
+		if ( ! empty( $type ) ) {
+			if ( strpos( $type, ';' ) ) {
+				$type = explode( ';', $type, 2 )[0];
+			}
+			$type = trim( strtolower( $type ) );
+			if ( false !== strpos( $type, '/' ) && 'application/x-www-form-urlencoded' !== $type ) {
+				return null;
+			}
+		}
+		parse_str( $body, $params );
+		return $params;
 	}
 
 	/**
@@ -330,6 +376,9 @@ class Aura_Worker_Redact {
 		if ( false === strpos( $bytes, '\\u' ) ) {
 			return false;
 		}
+		// One level of `\u00XX` only, over the whole byte string: a text that
+		// was itself escaped twice may be refused where it need not be. The
+		// guard prevents accidents; it is not a security boundary.
 		$unescaped = preg_replace_callback(
 			'/\\\\u00([0-7][0-9a-fA-F])/',
 			static function ( $m ) {
@@ -502,7 +551,13 @@ class Aura_Worker_Redact {
 		if ( ! isset( $body['method'], $body['params'] ) || 'tools/call' !== $body['method'] || ! is_array( $body['params'] ) ) {
 			return null;
 		}
-		$call = $body['params'];
+		// Exactly the call the adapter runs: ToolsHandler::call_tool() takes
+		// extract_params( params ) = `params['params'] ?? params`, so a nested
+		// `params.params` wins over the outer name and arguments.
+		$call = isset( $body['params']['params'] ) ? $body['params']['params'] : $body['params'];
+		if ( ! is_array( $call ) ) {
+			return null; // the adapter's array return type refuses it
+		}
 		if ( ! isset( $call['name'] ) || ! is_string( $call['name'] ) ) {
 			return null;
 		}

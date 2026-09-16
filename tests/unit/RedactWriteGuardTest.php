@@ -278,4 +278,103 @@ final class RedactWriteGuardTest extends TestCase {
 		$req     = $this->json_request( 'POST', '/wp/v2/pages/7', (string) wp_json_encode( array( 'found' => true, 'record' => null, 'payload' => $payload ) ) );
 		$this->assertNull( $this->before( $req ) );
 	}
+
+	// --- the lazily parsed form body (fix round 1) ------------------------
+
+	/** @return array<string,array{0:string}> */
+	public static function lazy_body_methods(): array {
+		return array( 'PUT' => array( 'PUT' ), 'PATCH' => array( 'PATCH' ), 'DELETE' => array( 'DELETE' ) );
+	}
+
+	/** @dataProvider lazy_body_methods */
+	public function test_a_form_body_core_has_not_parsed_yet_is_checked( string $method ): void {
+		foreach ( array( null, 'application/x-www-form-urlencoded', 'Application/X-WWW-Form-Urlencoded; charset=UTF-8', 'nonsense' ) as $type ) {
+			$this->setUp(); // a fresh counter for each Content-Type
+			$req = new RedactWriteGuardLazyBodyRequest( $method, '/wp/v2/pages/7' );
+			if ( null !== $type ) {
+				$req->set_header( 'Content-Type', $type );
+			}
+			$req->set_body( 'title=x&hook=' . rawurlencode( self::MARK ) );
+			$this->assertSame( array(), $req->get_body_params(), 'core has not parsed the body when the filter runs' );
+			$this->assertNull( $req->get_json_params() );
+
+			$this->assertRefused( $this->before( $req ) );
+			$this->assertSame( 1, $this->refused_count(), (string) $type );
+			$this->assertSame( self::MARK, $req->get_param( 'hook' ), 'what the handler would have written' );
+		}
+	}
+
+	public function test_a_clean_lazy_form_body_passes(): void {
+		$req = new RedactWriteGuardLazyBodyRequest( 'PATCH', '/wp/v2/pages/7' );
+		$req->set_body( 'title=aura+redacted+v1' );
+		$this->assertNull( $this->before( $req ) );
+	}
+
+	public function test_a_post_form_body_is_read_from_the_body_params_only(): void {
+		// POST: core fills the body params from $_POST up front and never
+		// parses the raw body, so the raw body is not a view of its own.
+		$req = new RedactWriteGuardLazyBodyRequest( 'POST', '/wp/v2/pages/7' );
+		$req->set_body( 'hook=' . rawurlencode( self::MARK ) );
+		$this->assertNull( $this->before( $req ) );
+
+		$req = new RedactWriteGuardLazyBodyRequest( 'POST', '/wp/v2/pages/7' );
+		$req->set_body_params( array( 'hook' => self::MARK ) );
+		$this->assertRefused( $this->before( $req ) );
+	}
+
+	public function test_a_json_body_on_put_is_checked_as_json_as_before(): void {
+		$req = $this->json_request( 'PUT', '/wp/v2/pages/7', (string) wp_json_encode( array( 'hook' => self::MARK ) ) );
+		$this->assertRefused( $this->before( $req ) );
+		$clean = $this->json_request( 'PUT', '/wp/v2/pages/7', '{"hook":"https://example.com/x","note":"hook=aura-redacted"}' );
+		$this->assertNull( $this->before( $clean ) );
+	}
+
+	public function test_a_text_plain_body_is_never_parsed(): void {
+		$req = new RedactWriteGuardLazyBodyRequest( 'PUT', '/wp/v2/pages/7' );
+		$req->set_header( 'Content-Type', 'text/plain' );
+		$req->set_body( 'hook=' . rawurlencode( self::MARK ) );
+		$this->assertNull( $this->before( $req ) );
+		$this->assertNull( $req->get_param( 'hook' ), 'core never parses it either' );
+	}
+}
+
+/**
+ * Core's lazy form body (WP 7.0 WP_REST_Request::parse_body_params()): for a
+ * method other than POST, the body params stay empty until get_param() (via
+ * get_parameter_order()) parses a form-encoded or untyped raw body.
+ */
+final class RedactWriteGuardLazyBodyRequest extends WP_REST_Request {
+	private bool $parsed = false;
+	private array $post  = array();
+
+	public function set_body_params( array $params ): void {
+		$this->post = $params;
+	}
+
+	public function get_body_params(): array {
+		return $this->post;
+	}
+
+	public function get_param( string $key ) {
+		if ( 'POST' !== $this->get_method() && '' !== $this->get_body() ) {
+			$this->parse_body_params();
+		}
+		return $this->post[ $key ] ?? parent::get_param( $key );
+	}
+
+	private function parse_body_params(): void {
+		if ( $this->parsed ) {
+			return;
+		}
+		$this->parsed = true;
+		$type         = (string) $this->get_header( 'content-type' );
+		if ( '' !== $type ) {
+			$value = strtolower( strpos( $type, ';' ) ? explode( ';', $type, 2 )[0] : $type );
+			if ( false !== strpos( $value, '/' ) && 'application/x-www-form-urlencoded' !== trim( $value ) ) {
+				return;
+			}
+		}
+		parse_str( $this->get_body(), $params );
+		$this->post = array_merge( $params, $this->post );
+	}
 }
