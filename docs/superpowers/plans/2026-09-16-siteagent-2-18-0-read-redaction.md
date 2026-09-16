@@ -46,7 +46,7 @@
 - **R13 — counters go through `Aura_Worker_Rules::bump_counter()`**, a public wrapper over the private `bump()` that accepts only the four known prefixes; the raw-SQL writer count `UninstallCoverageTest` acknowledges for `class-aura-worker-rules.php` (5) is unchanged, and both new prefixes sit under `aura_worker_`, which `uninstall.php` already sweeps.
 - **R14 — objects in response data.** `stdClass` and other plain objects are walked by public properties and replaced with a `stdClass` only when something changed (the JSON output is the same); `JsonSerializable` is walked through `jsonSerialize()`.
 - **R15 — `arguments` must be a JSON object.** Absent or `null` → `{}`; a non-empty list or a scalar → the shape is not recognised (header ignored, response redacted).
-- **R16 — the URL patterns are a superset of the spec's.** They also accept optional `userinfo@` and `:port`, any number of backslashes before a slash, and are case-insensitive. `https://hooks.zapier.com@evil.tld/` does not match (the host is `evil.tld`).
+- **R16 — the URL patterns are a superset of the spec's.** They also accept optional `userinfo@` and `:port`, any number of backslashes before a slash, and are case-insensitive. IFTTT also matches `/trigger/<event>/[json/]with/key/<key>` (Codex r1 P1 on SiteAgent#109). The URL tail stops before `)`, `]`, `}`, and a match's trailing `.,;:!?` are handed back to the text (Codex r1 P2). `https://hooks.zapier.com@evil.tld/` does not match (the host is `evil.tld`).
 
 ---
 
@@ -251,6 +251,8 @@ final class RedactDetectorsTest extends TestCase {
 			'discord'    => array( 'https://discord.com/api/webhooks/123/tok-en', 'discord' ),
 			'discordapp' => array( 'https://discordapp.com/api/webhooks/123/tok-en', 'discord' ),
 			'ifttt'      => array( 'https://maker.ifttt.com/use/abcDEF123', 'ifttt' ),
+			'ifttt trig' => array( 'https://maker.ifttt.com/trigger/form_sent/with/key/abcDEF-123_x', 'ifttt' ),
+			'ifttt json' => array( 'https://maker.ifttt.com/trigger/form_sent/json/with/key/abcDEF-123_x', 'ifttt' ),
 			'telegram'   => array( 'https://api.telegram.org/bot123456:AA-bb_cc/sendMessage?chat_id=1', 'telegram' ),
 		);
 	}
@@ -285,6 +287,8 @@ final class RedactDetectorsTest extends TestCase {
 			'slack non-hook'    => array( 'https://hooks.slack.com/other/T000' ),
 			'discord non-hook'  => array( 'https://discord.com/channels/1/2' ),
 			'make marketing'    => array( 'https://www.make.com/en/pricing' ),
+			'ifttt non-hook'    => array( 'https://maker.ifttt.com/trigger/form_sent/without/key/abc' ),
+			'ifttt other host'  => array( 'https://ifttt.com/maker_webhooks/settings' ),
 			'telegram no token' => array( 'https://api.telegram.org/botfather/x' ),
 			'self-hosted n8n'   => array( self::N8N ),
 			'no scheme'         => array( 'hooks.zapier.com/hooks/catch/1/' ),
@@ -297,11 +301,30 @@ final class RedactDetectorsTest extends TestCase {
 		$this->assertSame( 0, $n );
 	}
 
-	public function test_only_the_url_is_replaced_and_the_surrounding_markup_survives(): void {
-		$this->assertSame(
-			'<a href="aura-redacted:v1:zapier">send</a>',
-			$this->text( '<a href="https://hooks.zapier.com/hooks/catch/1/">send</a>' )
+	/** @return array<string,array{0:string,1:string}> input, expected */
+	public static function surroundings(): array {
+		return array(
+			'html attribute'   => array( '<a href="https://hooks.zapier.com/hooks/catch/1/">send</a>', '<a href="aura-redacted:v1:zapier">send</a>' ),
+			'markdown link'    => array( '[hook](https://hooks.zapier.com/hooks/catch/1/)', '[hook](aura-redacted:v1:zapier)' ),
+			'parenthesised'    => array( 'the hook (https://hook.eu1.make.com/abc123) fires', 'the hook (aura-redacted:v1:make) fires' ),
+			'bracketed'        => array( '[https://hooks.slack.com/services/T/B/X]', '[aura-redacted:v1:slack]' ),
+			'end of sentence'  => array( 'see https://hook.eu1.make.com/abc.', 'see aura-redacted:v1:make.' ),
+			'comma list'       => array( 'https://hook.eu1.make.com/a1, https://maker.ifttt.com/use/k2; done', 'aura-redacted:v1:make, aura-redacted:v1:ifttt; done' ),
+			'question'         => array( 'is it https://hooks.zapier.com/hooks/catch/1/abc?', 'is it aura-redacted:v1:zapier?' ),
+			'inner punctuation' => array( 'x https://api.telegram.org/bot1:AA-b/sendMessage?chat_id=1.5! y', 'x aura-redacted:v1:telegram! y' ),
 		);
+	}
+
+	/** @dataProvider surroundings */
+	public function test_only_the_url_is_replaced_and_the_surrounding_text_survives( string $in, string $expected ): void {
+		$this->assertSame( $expected, $this->text( $in ) );
+	}
+
+	public function test_a_secret_is_redacted_whole_before_trailing_punctuation(): void {
+		$out = $this->text( 'key: https://maker.ifttt.com/trigger/ev/with/key/dK-9_zz.', $n );
+		$this->assertSame( 'key: aura-redacted:v1:ifttt.', $out );
+		$this->assertSame( 1, $n );
+		$this->assertStringNotContainsString( 'dK-9', $out );
 	}
 
 	// --- §2.2 known fields -----------------------------------------------
@@ -583,8 +606,21 @@ class Aura_Worker_Redact {
 	/** Regex: an optional port, then the slash that ends the host. */
 	const RE_HOST_END = '(?::[0-9]+)?(?:\\\\)*/';
 
-	/** Regex: the rest of the URL — up to whitespace, a quote, `<`, `>` or a bare backslash. Possessive: no backtracking. */
-	const RE_TAIL = '(?:[^\s"\'<>\\\\]++|(?:\\\\)++/)*+~i';
+	/**
+	 * Regex: the rest of the URL. It stops at whitespace, a quote, `<`, `>`,
+	 * a closing `)` `]` `}` or a bare backslash, so a Markdown link or a
+	 * parenthesis keeps its delimiter. Trailing sentence punctuation is
+	 * handed back by redact_text() (TRAILING_PUNCTUATION). Possessive and
+	 * linear: no backtracking, whatever the string's length.
+	 */
+	const RE_TAIL = '(?:[^\s"\'<>\\\\)\]}]++|(?:\\\\)++/)*+~i';
+
+	/**
+	 * Punctuation that ends a sentence rather than a URL: stripped from the
+	 * end of a match and kept in the text (`…/abc.` → `…:make.`). Webhook
+	 * secrets are `[A-Za-z0-9_-]`, so a secret is always replaced whole.
+	 */
+	const TRAILING_PUNCTUATION = '/[.,;:!?]+$/';
 
 	/**
 	 * Known receivers (spec §2.1): full-URL patterns anchored on the
@@ -598,7 +634,8 @@ class Aura_Worker_Redact {
 		array( 'slack', self::RE_HEAD . 'hooks\.slack\.com' . self::RE_HOST_END . 'services' . self::RE_SLASH . self::RE_TAIL ),
 		array( 'discord', self::RE_HEAD . 'discord\.com' . self::RE_HOST_END . 'api' . self::RE_SLASH . 'webhooks' . self::RE_SLASH . self::RE_TAIL ),
 		array( 'discord', self::RE_HEAD . 'discordapp\.com' . self::RE_HOST_END . 'api' . self::RE_SLASH . 'webhooks' . self::RE_SLASH . self::RE_TAIL ),
-		array( 'ifttt', self::RE_HEAD . 'maker\.ifttt\.com' . self::RE_HOST_END . 'use' . self::RE_SLASH . self::RE_TAIL ),
+		// IFTTT Webhooks: `/use/<key>`, `/trigger/<event>/with/key/<key>` and `/trigger/<event>/json/with/key/<key>`.
+		array( 'ifttt', self::RE_HEAD . 'maker\.ifttt\.com' . self::RE_HOST_END . '(?:use' . self::RE_SLASH . '|trigger' . self::RE_SLASH . '[^\s/\\\\"\'<>]+' . self::RE_SLASH . '(?:json' . self::RE_SLASH . ')?with' . self::RE_SLASH . 'key' . self::RE_SLASH . ')' . self::RE_TAIL ),
 		array( 'telegram', self::RE_HEAD . 'api\.telegram\.org' . self::RE_HOST_END . 'bot[0-9]+:[a-z0-9_-]+' . self::RE_SLASH . self::RE_TAIL ),
 	);
 
@@ -664,8 +701,17 @@ class Aura_Worker_Redact {
 			return $text; // no scheme, no URL: the common case never runs a regex
 		}
 		foreach ( self::URL_PATTERNS as $pattern ) {
-			$hits = 0;
-			$out  = preg_replace( $pattern[1], self::PLACEHOLDER . $pattern[0], $text, -1, $hits );
+			$hits        = 0;
+			$placeholder = self::PLACEHOLDER . $pattern[0];
+			$out         = preg_replace_callback(
+				$pattern[1],
+				static function ( $m ) use ( $placeholder ) {
+					return 1 === preg_match( self::TRAILING_PUNCTUATION, $m[0], $tail ) ? $placeholder . $tail[0] : $placeholder;
+				},
+				$text,
+				-1,
+				$hits
+			);
 			if ( null === $out ) {
 				// PCRE gave up (backtrack or JIT limit). Whether the string
 				// holds a receiver URL is unknown, so none of it goes out (R9).
@@ -953,7 +999,7 @@ Expected: PASS (all data-provider cases).
 - [ ] **Step 7: Run the whole suite and the linter**
 
 Run: `composer test` — expected: green; the count grows by this file's tests only.
-Run: `composer lint` — expected: no errors. The new file adds six `WordPress.PHP.DiscouragedPHPFunctions` **warnings** (`base64_*`, `serialize`/`unserialize` in the carrier-3 code — checked while writing this plan with the repo's `phpcs.xml.dist`); the gate fails on errors only and the tree already carries 88 such warnings, so leave them visible rather than suppressing them. `UninstallCoverageTest` stays green: the class writes nothing.
+Run: `composer lint` — expected: no errors. The new file adds five `WordPress.PHP.DiscouragedPHPFunctions` **warnings** (`base64_*`, `serialize`/`unserialize` in the carrier-3 code — checked while writing this plan with the repo's `phpcs.xml.dist`); the gate fails on errors only and the tree already carries 88 such warnings, so leave them visible rather than suppressing them. `UninstallCoverageTest` stays green: the class writes nothing.
 
 - [ ] **Step 8: Commit**
 
@@ -2941,4 +2987,4 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 - **Spec coverage.** §1.1 seam → Task 3 (+ Task 1 Step 1 verification of core's order and the adapter). §1.2 audience → Task 2, seam tests in Task 3. §1.3 grant, both rows, exemption per request, 403, no-key ignore → Task 4. §2.1 → Task 1. §2.2 → Task 1. §2.2a carriers 1–3, bound, byte-for-byte, fail-closed payload, object payload → Task 1 (with R1–R3). §2.3 placeholder → Task 1. §2.4 same value → Tasks 1 and 3. §3 → Task 5 (per source, decoded, escape, cookie allowed, GET skipped, update-widget omission). §4 site half → Tasks 3 and 6. §5 limits → documented in CLAUDE.md (Task 7) and the Rulings. §6 SiteAgent tests → Tasks 1–6; staging → "After the tasks". §7.1 → Task 7.
 - **Placeholder scan.** No TBD/TODO; every code step carries the code.
 - **Name consistency.** `redact`, `redact_text`, `is_audience`, `filter_echo`, `before_callbacks`, `grant_shape`, `holds_placeholder`, `status_fragment`, `record_redacted`, `record_placeholder_refused`, `reset_for_tests`; `Aura_Worker_Rules::serving_rest`, `cookie_authenticated`, `bump_counter`; constants `REDACTED_COUNTER`, `PLACEHOLDER_REFUSED_COUNTER`, `STATUS_VERSION` — used identically in every task.
-- **Dry run.** The assembled class, the Rules/API/tool/bootstrap edits and all six new test files were run while writing this plan against the SiteAgent test bootstrap (PHP 8.5, PHPUnit 10.5 classes, in-memory file patches — nothing written to the repo): all 159 new test cases pass, and the existing suite showed no new failure against an unpatched baseline under the same runner. `composer test` / `composer lint` on the real branch remain the gate, including PHP 7.4.
+- **Dry run.** The assembled class, the Rules/API/tool/bootstrap edits and all six new test files were run while writing this plan against the SiteAgent test bootstrap (PHP 8.5, PHPUnit 10.5 classes, in-memory file patches — nothing written to the repo): all 159 new test cases passed; after the Codex round-1 fixes (IFTTT trigger URLs, URL tail boundary) only `RedactDetectorsTest` was re-run — 76/76, 16 cases more than before, and the existing suite showed no new failure against an unpatched baseline under the same runner. `composer test` / `composer lint` on the real branch remain the gate, including PHP 7.4.
