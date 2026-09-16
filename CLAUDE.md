@@ -224,7 +224,10 @@ before stopping at the first `.php` one.
 - **`restore_skipped: 'unchanged'`.** The self-update takes a bounded manifest
   of its directory (path, size, mtime, mode, content hash of regular files; at
   most 20 000 entries including the root, 64 MB) right before `install()`. A
-  special file (FIFO, device) or either limit means no manifest. A failed
+  special file (FIFO, device), either limit, or a **symlink** — the plugin root
+  itself or any entry under it, file or directory (round 3: a failed clear can
+  empty a link's target while the link is unchanged; targets are not walked) —
+  means no manifest. A failed
   install whose directory still matches is **not** restored — with or without a
   backup: `rolled_back: false`, `restore_skipped: 'unchanged'`, and the message
   says the previous build is intact. A differing or untakeable manifest restores
