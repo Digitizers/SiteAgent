@@ -33,7 +33,7 @@ class Aura_Tool_Audit_Rules extends Aura_Tool_Base {
 		return array(
 			'ruleset'     => 'object|null — { seq, issued_at, received_at, rule_count }; null when no ruleset has ever been accepted (no policy — not "no rules")',
 			'keyed'       => 'bool — whether this site holds a USABLE gateway public key (decodes to a valid Ed25519 key); false means it cannot verify ANY ruleset and must be reconnected',
-			'enforcement' => 'object — { blocked_24h, warned_24h, expired_active: string[], points: string[] } — points lists the enforcement seams in this build',
+			'enforcement' => 'object — { blocked_24h, warned_24h, redacted_24h, placeholder_refused_24h, expired_active: string[], points: string[] } — points lists the enforcement seams in this build; redacted_24h counts agent responses that had a secret replaced, placeholder_refused_24h agent writes refused for carrying a redaction placeholder',
 			'coverage'    => 'object — { total_seen, returned, truncated, cap } bounded-coverage contract (never truncates; counts rules)',
 		);
 	}
@@ -60,10 +60,14 @@ class Aura_Tool_Audit_Rules extends Aura_Tool_Base {
 			),
 			'keyed'       => Aura_Worker_Grant::has_usable_key(),
 			'enforcement' => array(
-				'blocked_24h'    => Aura_Worker_Rules::count_24h( Aura_Worker_Rules::BLOCKED_COUNTER ),
-				'warned_24h'     => Aura_Worker_Rules::count_24h( Aura_Worker_Rules::WARNED_COUNTER ),
-				'expired_active' => Aura_Worker_Rules::expired_keys(),
-				'points'         => array( 'execute_tool', 'rest_updates', 'core_rest_content' ),
+				'blocked_24h'             => Aura_Worker_Rules::count_24h( Aura_Worker_Rules::BLOCKED_COUNTER ),
+				'warned_24h'              => Aura_Worker_Rules::count_24h( Aura_Worker_Rules::WARNED_COUNTER ),
+				'redacted_24h'            => Aura_Worker_Rules::count_24h( Aura_Worker_Redact::REDACTED_COUNTER ),
+				'placeholder_refused_24h' => Aura_Worker_Rules::count_24h( Aura_Worker_Redact::PLACEHOLDER_REFUSED_COUNTER ),
+				'expired_active'          => Aura_Worker_Rules::expired_keys(),
+				// read_redaction = rest_pre_echo_response; placeholder_guard =
+				// the write guard on rest_request_before_callbacks (2.18.0, #419).
+				'points'                  => array( 'execute_tool', 'rest_updates', 'core_rest_content', 'read_redaction', 'placeholder_guard' ),
 			),
 			'coverage'    => array(
 				'total_seen' => count( $rules ),

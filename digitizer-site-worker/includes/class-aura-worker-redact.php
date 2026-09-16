@@ -621,6 +621,17 @@ class Aura_Worker_Redact {
 	}
 
 	/**
+	 * `/status` → `redaction` (spec §4): this build redacts agent reads.
+	 * An object on the wire, like every other `/status` fragment; a site
+	 * without the key predates 2.18.0.
+	 *
+	 * @return stdClass
+	 */
+	public static function status_fragment() {
+		return (object) array( 'v' => self::STATUS_VERSION );
+	}
+
+	/**
 	 * Redact one response body — or any tree. Pure: no hooks, no counters.
 	 *
 	 * @param mixed $data  Response data.
