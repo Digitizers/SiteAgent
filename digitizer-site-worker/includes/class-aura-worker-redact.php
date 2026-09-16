@@ -40,11 +40,30 @@ class Aura_Worker_Redact {
 	/** Regex: a slash, JSON-escaped any number of times (or not at all). */
 	const RE_SLASH = '(?:\\\\)*/';
 
-	/** Regex: scheme, `//`, optional userinfo — the host must follow at once. */
-	const RE_HEAD = '~https?:(?:\\\\)*/(?:\\\\)*/(?:[^\s/\\\\@"\'<>]+@)?';
+	/** Regex: `//`, JSON-escaped any number of times, then optional userinfo — shared by the schemed and protocol-relative prefixes. */
+	const RE_DOUBLE_SLASH_USERINFO = '(?:\\\\)*/(?:\\\\)*/(?:[^\s/\\\\@"\'<>]+@)?';
 
-	/** Regex: an optional port, then the slash that ends the host. */
-	const RE_HOST_END = '(?::[0-9]+)?(?:\\\\)*/';
+	/**
+	 * Regex: the URL's prefix — full scheme (`https://`), protocol-relative
+	 * (`//`), or bare (neither) — the host must follow at once either way.
+	 * A leading negative lookbehind enforces the host boundary (owner
+	 * decision, fix round 1): whatever precedes the prefix — or, for the
+	 * bare form, the host literal itself — must not be a character a
+	 * hostname can contain, so `myhooks.zapier.com` and
+	 * `evilhooks.zapier.com` never match at the `hooks.zapier.com`
+	 * substring; only a genuine boundary (start of string, whitespace,
+	 * quote, punctuation, …) does.
+	 */
+	const RE_HEAD = '~(?<![A-Za-z0-9.-])(?:https?:' . self::RE_DOUBLE_SLASH_USERINFO . '|' . self::RE_DOUBLE_SLASH_USERINFO . ')?';
+
+	/**
+	 * Regex: an optional trailing FQDN dot, an optional port, then the slash
+	 * that ends the host (fix round 1, Codex r1 P3: `hooks.zapier.com./...`
+	 * is the same host as `hooks.zapier.com/...`; the dot never lets a
+	 * lookalike host — `hooks.zapier.com.evil.tld` — through, since nothing
+	 * follows the single dot but the required port/slash).
+	 */
+	const RE_HOST_END = '\.?(?::[0-9]+)?(?:\\\\)*/';
 
 	/**
 	 * Regex (after `&`): the name of an HTML-encoded quote or angle bracket —
@@ -92,7 +111,10 @@ class Aura_Worker_Redact {
 		// IFTTT Webhooks: `/use/<key>`, `/trigger/<event>/with/key/<key>` and `/trigger/<event>/json/with/key/<key>`.
 		array( 'ifttt', self::RE_HEAD . 'maker\.ifttt\.com' . self::RE_HOST_END . '(?:use' . self::RE_SLASH . '|trigger' . self::RE_SLASH . '[^\s/\\\\"\'<>]+' . self::RE_SLASH . '(?:json' . self::RE_SLASH . ')?with' . self::RE_SLASH . 'key' . self::RE_SLASH . ')' . self::RE_TAIL ),
 		// Telegram: Bot API `/bot<token>/<method>` and file downloads `/file/bot<token>/<path>`.
-		array( 'telegram', self::RE_HEAD . 'api\.telegram\.org' . self::RE_HOST_END . '(?:file' . self::RE_SLASH . ')?bot[0-9]+:[a-z0-9_-]+' . self::RE_SLASH . self::RE_TAIL ),
+		// The token itself ends at `/`, `?`, `#` or the end of the URL — the
+		// slash is only where a path follows (fix round 1, Codex r1 P3):
+		// `.../bot123:AAbb` and `.../bot123:AAbb?x=1` are bare tokens too.
+		array( 'telegram', self::RE_HEAD . 'api\.telegram\.org' . self::RE_HOST_END . '(?:file' . self::RE_SLASH . ')?bot[0-9]+:[a-z0-9_-]+' . '(?:' . self::RE_SLASH . ')?' . self::RE_TAIL ),
 	);
 
 	/**
@@ -106,6 +128,16 @@ class Aura_Worker_Redact {
 
 	/** Carrier 1 (spec §2.2a): the Elementor post metas stored as JSON strings. */
 	const JSON_META_KEYS = array( '_elementor_data', '_elementor_page_settings' );
+
+	/**
+	 * Key names, beyond SECRET_KEYS and JSON_META_KEYS, that this class also
+	 * treats structurally — checked the same way inside an opaque object
+	 * (fix round 1, Codex r1 P4): `content` is the MCP text-carrier field
+	 * (walk_entry's `'content' === $key` branch), so an opaque object naming
+	 * a property `content` may itself hold a text carrier this class cannot
+	 * verify clean, and fails the payload closed the same as a secret key.
+	 */
+	const STRUCTURAL_KEYS = array( 'content' );
 
 	/** JSON decodes allowed along one path (spec §2.2a). A payload decode is not counted (Ruling R2). */
 	const MAX_JSON_DECODES = 2;
@@ -153,8 +185,14 @@ class Aura_Worker_Redact {
 	 */
 	public static function redact_text( $text, &$count ) {
 		$text = (string) $text;
-		if ( false === stripos( $text, 'http' ) ) {
-			return $text; // no scheme, no URL: the common case never runs a regex
+		if ( false === strpos( $text, '/' ) ) {
+			// Every receiver's RE_HOST_END requires a slash right after the
+			// host — schemed, protocol-relative or bare (owner decision, fix
+			// round 1: `http` is no longer a reliable fast-reject signal now
+			// that a scheme is optional) — and a JSON-escaped slash (`\/`)
+			// still contains a literal `/`. No slash, no URL anywhere in the
+			// string: the common case never runs a regex.
+			return $text;
 		}
 		foreach ( self::URL_PATTERNS as $pattern ) {
 			$hits        = 0;
@@ -324,7 +362,12 @@ class Aura_Worker_Redact {
 			// A snapshot capture stores each meta as { existed, value } (R1).
 			return self::walk_with_carrier( $value, 'value', $depth, $in_payload, $count );
 		}
-		if ( 'content' === $key && is_array( $value ) ) {
+		// Only MCP's `content` — a LIST of `{ type, text }` blocks — takes
+		// this path (fix round 1, Codex r1 P1): an associative array under
+		// this key (a snapshot answer, or anything else object-shaped) is
+		// not that carrier and must fall through to the ordinary walk below,
+		// which is where is_snapshot_answer() is checked.
+		if ( 'content' === $key && is_array( $value ) && self::is_list( $value ) ) {
 			foreach ( $value as $i => $item ) {
 				$before = $count;
 				$new    = self::is_text_block( $item )
@@ -337,6 +380,25 @@ class Aura_Worker_Redact {
 			return self::redact_keys( $value, $count );
 		}
 		return self::walk( $value, $depth, $in_payload, $count );
+	}
+
+	/**
+	 * Whether $arr is a sequential, zero-based list — MCP's `content` field
+	 * is one; a snapshot answer's `{ found, record, payload }` is not (fix
+	 * round 1, Codex r1 P1).
+	 *
+	 * @param array $arr Array.
+	 * @return bool
+	 */
+	private static function is_list( array $arr ) {
+		$i = 0;
+		foreach ( $arr as $key => $value ) {
+			if ( $key !== $i ) {
+				return false;
+			}
+			++$i;
+		}
+		return true;
 	}
 
 	/**
@@ -353,6 +415,14 @@ class Aura_Worker_Redact {
 		$is_object = $container instanceof stdClass;
 		if ( ! $is_object && ! is_array( $container ) ) {
 			return self::walk( $container, $depth, $in_payload, $count );
+		}
+		if ( ! $is_object && self::is_snapshot_answer( $container ) ) {
+			// The carrier field's own container is itself a snapshot answer
+			// (fix round 1, Codex r1 P1) — e.g. `_elementor_data` decoded
+			// into `{ found, record, payload }` rather than the ordinary
+			// `{ existed, value }` meta shape. The ordinary array walk
+			// already covers it, carrier field or not.
+			return self::walk_array( $container, $depth, $in_payload, $count );
 		}
 		$fields = $is_object ? get_object_vars( $container ) : $container;
 		$before = $count;
@@ -480,7 +550,8 @@ class Aura_Worker_Redact {
 
 	/**
 	 * Could this opaque object hold a secret? Its serialized form is checked
-	 * for a receiver URL and for any key name the detectors act on (R3).
+	 * for a receiver URL and for any key name the detectors act on (R3) —
+	 * SECRET_KEYS, JSON_META_KEYS, and STRUCTURAL_KEYS.
 	 *
 	 * A key name is found as a whole serialized string (`s:8:"webhooks";`)
 	 * or as the tail of a private/protected property's mangled name
@@ -496,7 +567,7 @@ class Aura_Worker_Redact {
 		if ( self::redact_text( $bytes, $scratch ) !== $bytes ) {
 			return true;
 		}
-		foreach ( array_merge( self::SECRET_KEYS, self::JSON_META_KEYS ) as $key ) {
+		foreach ( array_merge( self::SECRET_KEYS, self::JSON_META_KEYS, self::STRUCTURAL_KEYS ) as $key ) {
 			$name = '(?:s:' . strlen( $key ) . ':"|\x00)' . preg_quote( $key, '/' ) . '";';
 			if ( 1 === preg_match( '/' . $name . '/', $bytes ) ) {
 				return true;

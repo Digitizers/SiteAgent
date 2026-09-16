@@ -157,6 +157,17 @@ final class RedactDetectorsTest extends TestCase {
 			'discord versioned'   => array( 'https://discord.com/api/v10/webhooks/123/tok-en', 'discord' ),
 			'discord ptb'         => array( 'https://ptb.discord.com/api/webhooks/123/tok-en', 'discord' ),
 			'discordapp canary'   => array( 'https://canary.discordapp.com/api/v9/webhooks/123/tok-en', 'discord' ),
+			// Fix round 1 (Codex r1 P3): a trailing FQDN dot is still the same host.
+			'zapier trailing dot' => array( 'https://hooks.zapier.com./hooks/catch/1/abc', 'zapier' ),
+			// Fix round 1 (Codex r1 P3): the token ends at the end of the URL / a query string, not only at a path slash.
+			'telegram bare'       => array( 'https://api.telegram.org/bot123:AAbb', 'telegram' ),
+			'telegram bare query' => array( 'https://api.telegram.org/bot123:AAbb?x=1', 'telegram' ),
+			// Fix round 1 (owner decision): a receiver URL written without a
+			// scheme is still redacted — bare and protocol-relative — as
+			// long as the host starts at a genuine boundary. Flips the old
+			// lookalikes['no scheme'] case into a positive one.
+			'zapier bare'              => array( 'hooks.zapier.com/hooks/catch/1/', 'zapier' ),
+			'zapier protocol-relative' => array( '//hooks.zapier.com/hooks/catch/1/', 'zapier' ),
 		);
 	}
 
@@ -199,13 +210,35 @@ final class RedactDetectorsTest extends TestCase {
 			'ifttt other host'  => array( 'https://ifttt.com/maker_webhooks/settings' ),
 			'telegram no token' => array( 'https://api.telegram.org/botfather/x' ),
 			'self-hosted n8n'   => array( self::N8N ),
-			'no scheme'         => array( 'hooks.zapier.com/hooks/catch/1/' ),
+			// Fix round 1 (owner decision): the schemeless forms must keep
+			// the same host-boundary discipline as the schemed ones.
+			'bare prefixed host'      => array( 'myhooks.zapier.com/hooks/catch/1/' ),
+			'bare evil prefixed host' => array( 'evilhooks.zapier.com/hooks/catch/1/' ),
+			'bare suffixed host'      => array( 'hooks.zapier.com.evil.tld/hooks/catch/1/' ),
+			'protocol-relative prefixed host' => array( '//myhooks.zapier.com/hooks/catch/1/' ),
+			'protocol-relative suffixed host' => array( '//hooks.zapier.com.evil.tld/hooks/catch/1/' ),
 		);
 	}
 
 	/** @dataProvider lookalikes */
 	public function test_lookalikes_are_not_caught( string $text ): void {
 		$this->assertSame( $text, $this->text( $text, $n ) );
+		$this->assertSame( 0, $n );
+	}
+
+	/**
+	 * Fix round 1 (owner decision): the host boundary is a fixed-width
+	 * negative lookbehind and RE_TAIL is possessive, so making the scheme
+	 * optional must not open a catastrophic-backtracking path — a long
+	 * near-miss (no scheme, so the host literal is attempted at every
+	 * position) must still run in effectively linear time.
+	 */
+	public function test_a_long_near_miss_input_does_not_time_out(): void {
+		$text  = str_repeat( 'xhooks.zapier.com/a evil.hooks.zapier.com/a ', 20000 );
+		$start = microtime( true );
+		$out   = $this->text( $text, $n );
+		$this->assertLessThan( 2.0, microtime( true ) - $start, 'a near-miss host repeated thousands of times must not blow up' );
+		$this->assertSame( $text, $out );
 		$this->assertSame( 0, $n );
 	}
 
@@ -540,5 +573,95 @@ final class RedactDetectorsTest extends TestCase {
 		$answer = array( 'found' => true, 'record' => array( 'id' => 'snap_w' ), 'payload' => null, 'withheld' => true );
 		$this->assertSame( $answer, Aura_Worker_Redact::redact( $answer, $n ) );
 		$this->assertSame( 0, $n );
+	}
+
+	// --- fix round 1 (Codex r1 P1): 'content' is not a fail-open key name -
+
+	/** An answer shaped like snapshot_get's, holding a webhooks secret in its payload. */
+	private function snapshot_answer_with_secret( string $snapshot_id ): array {
+		$captured = array( 'extra' => array( 'webhooks' => self::N8N ) );
+		return array(
+			'found'   => true,
+			'record'  => array( 'id' => $snapshot_id ),
+			'payload' => base64_encode( serialize( $captured ) ),
+		);
+	}
+
+	public function test_a_snapshot_answer_under_an_associative_content_key_is_still_redacted(): void {
+		// Before the fix, 'content' === $key short-circuited into the
+		// MCP-list loop for ANY array value, so an associative array here —
+		// this answer's { found, record, payload } — never reached
+		// is_snapshot_answer() and its payload went out unredacted (n=0).
+		$answer = $this->snapshot_answer_with_secret( 'snap_content' );
+
+		$out = Aura_Worker_Redact::redact( array( 'content' => $answer ), $n );
+
+		$this->assertGreaterThanOrEqual( 1, $n );
+		$this->assertIsString( $out['content']['payload'] );
+		$bytes = (string) base64_decode( $out['content']['payload'], true );
+		$this->assertStringNotContainsString( 'n8n.example.com', $bytes );
+		$back = unserialize( $bytes, array( 'allowed_classes' => false ) );
+		$this->assertSame( 'aura-redacted:v1:field', $back['extra']['webhooks'] );
+	}
+
+	public function test_a_list_valued_content_still_takes_the_mcp_text_carrier_path(): void {
+		// The list-only guard must not break the ordinary MCP carrier.
+		$out = Aura_Worker_Redact::redact( $this->mcp_result( 'see ' . self::N8N . ' https://hooks.zapier.com/hooks/catch/1/' ), $n );
+		$this->assertSame( 1, $n );
+		$this->assertSame( 'see ' . self::N8N . ' aura-redacted:v1:zapier', $out['result']['content'][0]['text'] );
+	}
+
+	public function test_a_snapshot_answer_stored_as_an_array_under_elementor_data_is_still_redacted(): void {
+		// Same gap, reached through walk_with_carrier(): '_elementor_data'
+		// decoded into an ARRAY (not a string) is normally { existed, value }
+		// (R1), but when it is itself a snapshot answer the container must
+		// be checked for that shape before its fields are walked one by one.
+		$answer = $this->snapshot_answer_with_secret( 'snap_elementor' );
+
+		$out = Aura_Worker_Redact::redact( array( '_elementor_data' => $answer ), $n );
+
+		$this->assertGreaterThanOrEqual( 1, $n );
+		$this->assertIsString( $out['_elementor_data']['payload'] );
+		$bytes = (string) base64_decode( $out['_elementor_data']['payload'], true );
+		$this->assertStringNotContainsString( 'n8n.example.com', $bytes );
+		$back = unserialize( $bytes, array( 'allowed_classes' => false ) );
+		$this->assertSame( 'aura-redacted:v1:field', $back['extra']['webhooks'] );
+	}
+
+	public function test_an_ordinary_elementor_data_meta_shape_is_unaffected_by_the_fix(): void {
+		// { existed, value } must still go through redact_carrier() on 'value'.
+		$post = array( 'meta' => array( '_elementor_data' => array( 'existed' => true, 'value' => wp_json_encode( $this->form_tree( self::N8N ) ) ) ) );
+		$out  = Aura_Worker_Redact::redact( $post, $n );
+		$this->assertSame( 1, $n );
+		$this->assertTrue( $out['meta']['_elementor_data']['existed'] );
+		$tree = json_decode( $out['meta']['_elementor_data']['value'] );
+		$this->assertSame( 'aura-redacted:v1:field', $tree[0]->elements[0]->settings->webhooks );
+	}
+
+	// --- fix round 1 (Codex r1 P4) ------------------------------------------
+
+	public function test_an_opaque_object_naming_a_content_property_fails_the_payload_closed(): void {
+		// 'content' — the MCP text-carrier key — must be checked the same
+		// way SECRET_KEYS and JSON_META_KEYS are: an opaque object cannot be
+		// unpacked to prove a nested text carrier clean. The webhook here is
+		// a self-hosted (unlisted-host) URL, so neither the raw-bytes URL
+		// scan nor the pre-fix key list would have caught it — the secret
+		// would have gone out unredacted inside the otherwise-untouched
+		// payload instead of the payload failing closed.
+		$probe  = new SA_Redact_Unserialize_Probe( array( 'content' => self::N8N ) );
+		$bytes  = serialize( $probe );
+		$this->assertStringContainsString( 's:7:"content";', $bytes, 'fixture: the key is literally "content"' );
+		$answer = array(
+			'found'   => true,
+			'record'  => array( 'id' => 'snap_opaque_content' ),
+			'payload' => base64_encode( serialize( array( 'extra' => $probe ) ) ),
+		);
+
+		$out = Aura_Worker_Redact::redact( $answer, $n );
+
+		$this->assertSame( 1, $n );
+		$this->assertNull( $out['payload'] );
+		$this->assertTrue( $out['payload_redacted'] );
+		$this->assertArrayNotHasKey( '_sa_redact_probe_woke', $GLOBALS, 'no class was instantiated' );
 	}
 }
