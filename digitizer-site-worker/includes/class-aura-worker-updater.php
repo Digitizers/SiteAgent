@@ -1217,9 +1217,10 @@ class Aura_Worker_Updater {
 
 	/**
 	 * A bounded description of a plugin directory (SA#95): for every entry,
-	 * its type, size, mtime, mode and — for a file — a hash of its bytes; a
-	 * link by its target, never followed. Equal manifests before and after a
-	 * failed install mean the install changed nothing there.
+	 * its type, size, mtime, mode and — for a file — a hash of its bytes. A
+	 * symlink anywhere (the root included) means no manifest. Equal
+	 * manifests before and after a failed install mean the install changed
+	 * nothing there.
 	 *
 	 * The hash and mode go beyond "size and mtime" on purpose: mtime is whole
 	 * seconds, and a same-size rewrite inside the second the manifest was
@@ -1236,8 +1237,13 @@ class Aura_Worker_Updater {
 	private function plugin_manifest( $dir ) {
 		clearstatcache();
 		try {
+			// No manifest through a symlink (SA#95 round 3), at the root or
+			// anywhere below: a failed clear can follow a link and empty its
+			// target while the link itself is unchanged, so a manifest of the
+			// link would call that "unchanged" and skip an owed restore.
+			// Link targets are not walked; the conservative restore runs.
 			if ( is_link( $dir ) ) {
-				return array( '' => 'l:' . (string) readlink( $dir ) );
+				return null;
 			}
 			if ( ! is_dir( $dir ) ) {
 				return array( '' => 'absent' );
@@ -1246,7 +1252,7 @@ class Aura_Worker_Updater {
 			$max      = static::MANIFEST_MAX_BYTES;
 			$describe = static function ( $path, $is_link, $is_dir ) use ( &$bytes, $max ) {
 				if ( $is_link ) {
-					return 'l:' . (string) readlink( $path );
+					throw new RuntimeException( 'symlink' );
 				}
 				$st = stat( $path );
 				if ( false === $st ) {

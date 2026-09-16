@@ -2464,4 +2464,91 @@ final class SelfUpdateRecoveryTest extends TestCase {
 		$this->assertSame( 0, $rollback->restores );
 		$this->assertSame( 0, $updater->probes );
 	}
+
+	// -----------------------------------------------------------------
+	// SA#95 fix round 3 — no manifest through a symlink.
+	// -----------------------------------------------------------------
+
+	/** Skip (never pass vacuously) when the sandbox cannot make a symlink. */
+	private function requireSymlinks(): void {
+		$probe = WP_CONTENT_DIR . '/sa-symlink-probe-' . bin2hex( random_bytes( 4 ) );
+		$ok    = function_exists( 'symlink' ) && @symlink( WP_CONTENT_DIR, $probe ) && is_link( $probe );
+		if ( is_link( $probe ) ) {
+			unlink( $probe );
+		}
+		if ( ! $ok ) {
+			$this->markTestSkipped( 'this sandbox cannot create symlinks, so the symlink manifest cases cannot be exercised' );
+		}
+	}
+
+	public function test_r3_a_symlinked_plugin_root_emptied_through_the_link_is_restored(): void {
+		// The link itself survives a failed clear that followed it and emptied
+		// the target; a manifest of the link alone would call that unchanged.
+		$this->requireSymlinks();
+		$target = WP_CONTENT_DIR . '/sa-link-target-' . bin2hex( random_bytes( 4 ) );
+		$this->rmdir( $this->dir );
+		mkdir( $target, 0777, true );
+		file_put_contents( $target . '/digitizer-site-worker.php', $this->build( 'OLD BUILD', AURA_WORKER_VERSION ) );
+		file_put_contents( $target . '/readme.txt', 'readme' );
+		$this->assertTrue( symlink( $target, $this->dir ) );
+		$GLOBALS['_install_result'] = new WP_Error( 'fs', 'clear failed partway' );
+		$GLOBALS['_install_effect'] = function () use ( $target ) {
+			unlink( $target . '/digitizer-site-worker.php' );
+			unlink( $target . '/readme.txt' );
+		};
+		$updater = $this->onHost( 'ok' );
+
+		try {
+			$res = $updater->self_update( 'https://github.com/Digitizers/SiteAgent/releases/download/v9.9.9/x.zip' );
+
+			$this->assertTrue( is_link( $this->dir ) || is_dir( $this->dir ) );
+			$this->assertArrayNotHasKey( 'restore_skipped', $res, 'an emptied target is not "unchanged"' );
+			$this->assertTrue( $res['backed_up'] );
+			$this->assertSame( 1, $this->restoresRun( $updater ), 'the restore runs' );
+			$this->assertTrue( $res['rolled_back'], (string) ( $res['restore_error'] ?? '' ) );
+			$this->assertSame( 'OLD BUILD', $this->onDisk() );
+		} finally {
+			if ( is_link( $this->dir ) ) {
+				unlink( $this->dir );
+			}
+			$this->rmdir( $target );
+		}
+	}
+
+	/** @return array<string,array{0:string}> */
+	public static function internal_links(): array {
+		return array(
+			'a symlinked subdirectory' => array( 'dir' ),
+			'a symlinked file'         => array( 'file' ),
+		);
+	}
+
+	/**
+	 * @dataProvider internal_links
+	 */
+	public function test_r3_a_symlink_inside_the_plugin_means_no_manifest_and_the_restore_runs( string $kind ): void {
+		$this->requireSymlinks();
+		mkdir( $this->dir . '/assets' );
+		file_put_contents( $this->dir . '/assets/x.css', 'body{}' );
+		file_put_contents( $this->dir . '/readme.txt', 'readme' );
+		$this->assertTrue(
+			'dir' === $kind
+				? symlink( $this->dir . '/assets', $this->dir . '/linked' )
+				: symlink( $this->dir . '/readme.txt', $this->dir . '/linked.txt' )
+		);
+		$m = new ReflectionMethod( Aura_Worker_Updater::class, 'plugin_manifest' );
+		if ( PHP_VERSION_ID < 80100 ) {
+			$m->setAccessible( true );
+		}
+		$this->assertNull( $m->invoke( new Aura_Worker_Updater(), $this->dir ), 'no manifest through a link' );
+		$GLOBALS['_install_result'] = null; // a failed install that changed nothing visible
+		$GLOBALS['_install_effect'] = null;
+		$updater = $this->onHost( 'ok' );
+
+		$res = $updater->self_update( 'https://github.com/Digitizers/SiteAgent/releases/download/v9.9.9/x.zip' );
+
+		$this->assertTrue( $res['backed_up'], 'an internal link is archived' );
+		$this->assertArrayNotHasKey( 'restore_skipped', $res );
+		$this->assertSame( 1, $this->restoresRun( $updater ), 'no manifest, so the conservative restore runs' );
+	}
 }
