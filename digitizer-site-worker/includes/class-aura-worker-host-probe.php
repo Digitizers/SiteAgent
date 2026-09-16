@@ -161,16 +161,23 @@ class Aura_Worker_Host_Probe {
 	 */
 	private function cleanup( array $paths ) {
 		foreach ( $paths as $path ) {
-			if ( ! $this->exists( $path ) ) {
-				continue;
-			}
+			// Every step is caught (round 4): a host that turns warnings into
+			// exceptions does so for `@unlink()` too, and the probe's verdict
+			// must still come back.
 			try {
-				$this->delete_file( $path );
+				if ( ! $this->exists( $path ) ) {
+					continue;
+				}
+				try {
+					$this->delete_file( $path );
+				} catch ( Throwable $e ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch
+					// Tried once; the retry below is the second attempt.
+				}
+				if ( $this->exists( $path ) ) {
+					@unlink( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.unlink_unlink
+				}
 			} catch ( Throwable $e ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch
-				// Tried once; the retry below is the second attempt.
-			}
-			if ( $this->exists( $path ) ) {
-				@unlink( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.unlink_unlink
+				// Given up quietly.
 			}
 		}
 	}

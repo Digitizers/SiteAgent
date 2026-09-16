@@ -290,4 +290,38 @@ final class HostProbeTest extends TestCase {
 		$this->assertNotContains( array( 'set', 'aura_worker_host_probe' ), $GLOBALS['_option_writes'] );
 		$this->assertFalse( get_option( 'aura_worker_host_probe' ) );
 	}
+
+	public function test_r4_a_cleanup_whose_last_fallback_warns_under_a_throwing_handler_still_returns_the_verdict(): void {
+		// Some hosts turn every warning into an exception, @ or not. Here the
+		// .php file is created, the filesystem delete refuses, and the final
+		// @unlink() fails with a warning because its directory is read-only.
+		$upgrade = $this->upgrade;
+		$probe   = $this->probeWith(
+			null,
+			static function ( $path ) use ( $upgrade ) {
+				if ( self::isPhp( $path ) ) {
+					chmod( $upgrade, 0555 );
+					return false;
+				}
+				return null;
+			}
+		);
+		set_error_handler(
+			static function ( $errno, $errstr, $errfile = '', $errline = 0 ) {
+				throw new ErrorException( $errstr, 0, $errno, $errfile, $errline );
+			}
+		);
+
+		try {
+			$verdict = $probe->run();
+		} finally {
+			restore_error_handler();
+			chmod( $upgrade, 0777 );
+		}
+		if ( 0 === count( $this->leftovers() ) ) {
+			$this->markTestSkipped( 'chmod 0555 is not enforced here (running as root?), so the last unlink cannot be made to fail' );
+		}
+
+		$this->assertSame( 'blocked', $verdict );
+	}
 }

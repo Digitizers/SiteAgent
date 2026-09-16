@@ -165,6 +165,21 @@ class Aura_Worker_Rollback {
 			);
 		}
 
+		// And the tree this restore would delete (round 4). WP_PLUGIN_DIR being
+		// writable says nothing about this plugin's own directories: one with
+		// other ownership, mode or ACLs lets the recursive clear below delete
+		// everything writable around it and then stop. Read-only check.
+		$problem = $this->target_tree_problem( $plugin_dir );
+		if ( null !== $problem ) {
+			$zip->close();
+			return array(
+				'success' => false,
+				'stage'   => 'preflight',
+				'code'    => 'aura_upgrade_dir_unwritable',
+				'error'   => 'Restore refused before deleting anything: ' . $problem . ' The plugin directory was not touched.',
+			);
+		}
+
 		// Open the archive BEFORE deleting anything. The old order deleted the
 		// directory first and then discovered it could not read the backup —
 		// turning a recoverable state into an empty one.
@@ -217,6 +232,54 @@ class Aura_Worker_Rollback {
 		$this->invalidate_opcache( $plugin_dir );
 
 		return array( 'success' => true );
+	}
+
+	/**
+	 * Why the installed tree could not be removed completely, or null when it
+	 * can (SA#95 round 4). Reads only: every real directory under the plugin,
+	 * the root included, must be writable (removing an entry needs a writable
+	 * parent), and so must WP_PLUGIN_DIR (to remove the root). Symlinks are
+	 * never followed — the clear unlinks them as links, which needs only their
+	 * (already checked) parent. A walk that cannot finish is a problem too.
+	 *
+	 * @param string $plugin_dir Absolute plugin directory.
+	 * @return string|null
+	 */
+	protected function target_tree_problem( $plugin_dir ) {
+		if ( ! is_dir( $plugin_dir ) && ! is_link( $plugin_dir ) ) {
+			return null; // nothing to delete
+		}
+		clearstatcache();
+		if ( ! is_writable( WP_PLUGIN_DIR ) ) {
+			return 'the plugins directory is not writable, so the plugin directory could not be removed.';
+		}
+		if ( is_link( $plugin_dir ) ) {
+			return null; // removed as a link, from the writable plugins directory
+		}
+		if ( ! is_writable( $plugin_dir ) ) {
+			return 'the plugin directory itself is not writable, so its files could not be removed.';
+		}
+		try {
+			$iterator = new RecursiveIteratorIterator(
+				new RecursiveDirectoryIterator( $plugin_dir, RecursiveDirectoryIterator::SKIP_DOTS ),
+				RecursiveIteratorIterator::SELF_FIRST
+			);
+			foreach ( $iterator as $entry ) {
+				if ( $entry->isLink() || ! $entry->isDir() ) {
+					continue;
+				}
+				$path = $entry->getPathname();
+				if ( ! is_writable( $path ) || ! is_readable( $path ) ) {
+					return sprintf(
+						'the directory %s inside the plugin is not writable, so its contents could not be removed.',
+						ltrim( substr( $path, strlen( $plugin_dir ) ), '/\\' )
+					);
+				}
+			}
+		} catch ( Throwable $e ) {
+			return 'the plugin directory could not be read completely, so it cannot be proven removable.';
+		}
+		return null;
 	}
 
 	/**

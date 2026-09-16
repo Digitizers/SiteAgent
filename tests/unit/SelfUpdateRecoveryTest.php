@@ -151,6 +151,24 @@ final class SelfUpdateRecoveryTest extends TestCase {
 		};
 	}
 
+	/**
+	 * A self-update whose recovery helper has the round-4 tree preflight
+	 * switched off: the SA#104 `stage: clear` handling it sits in front of
+	 * stays tested. (The preflight itself is RollbackPrimitivesTest's.)
+	 */
+	private function selfUpdateBehindTheTreePreflight(): array {
+		$updater = new class() extends Aura_Worker_Updater {
+			protected function new_rollback() {
+				return new class() extends Aura_Worker_Rollback {
+					protected function target_tree_problem( $plugin_dir ) {
+						return null;
+					}
+				};
+			}
+		};
+		return $updater->self_update( 'https://github.com/Digitizers/SiteAgent/releases/download/v9.9.9/x.zip' );
+	}
+
 	private function selfUpdate(): array {
 		$updater = new Aura_Worker_Updater();
 		return $updater->self_update( 'https://github.com/Digitizers/SiteAgent/releases/download/v9.9.9/x.zip' );
@@ -1152,7 +1170,7 @@ final class SelfUpdateRecoveryTest extends TestCase {
 		};
 
 		try {
-			$res = $this->selfUpdate();
+			$res = $this->selfUpdateBehindTheTreePreflight();
 			if ( ! $locked ) {
 				$this->markTestSkipped( 'filesystem does not enforce the mode (running as root?)' );
 			}
@@ -1178,7 +1196,7 @@ final class SelfUpdateRecoveryTest extends TestCase {
 		};
 
 		try {
-			$res = $this->selfUpdate();
+			$res = $this->selfUpdateBehindTheTreePreflight();
 			if ( ! $locked ) {
 				$this->markTestSkipped( 'filesystem does not enforce the mode (running as root?)' );
 			}
@@ -1222,7 +1240,7 @@ final class SelfUpdateRecoveryTest extends TestCase {
 		$handler = false;
 
 		try {
-			$res = $this->selfUpdate();
+			$res = $this->selfUpdateBehindTheTreePreflight();
 		} finally {
 			if ( $handler ) {
 				restore_error_handler();
