@@ -573,6 +573,7 @@ final class RollbackPrimitivesTest extends TestCase {
 			$this->assertSame( 'LINKED CODE', @file_get_contents( $target . '/inner.php' ), 'the target was deleted through a link that could not be removed' );
 			$this->assertFalse( $res['success'] );
 			$this->assertStringContainsString( 'Could not remove', $res['error'] );
+			$this->assertSame( 'clear', $res['stage'] ?? null, 'nothing was extracted — callers must be able to tell (SA#104)' );
 			$this->assertTrue( is_link( $this->dir . '/linked' ) );
 		} finally {
 			chmod( $this->dir, 0777 );

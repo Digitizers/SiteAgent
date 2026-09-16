@@ -842,6 +842,308 @@ final class SelfUpdateRecoveryTest extends TestCase {
 		$this->assertSame( array(), $GLOBALS['_wp_http_calls'], 'no probe: there is nothing a probe could tell apart' );
 	}
 
+	// -----------------------------------------------------------------
+	// SA#104 — the same-version refusal is decided from the VERIFIED
+	// PACKAGE, before the backup and the install; SA#95 ask 2 — once the
+	// package is known to carry another version, an unchanged header after
+	// install() means the upgrader did not replace the files.
+	// -----------------------------------------------------------------
+
+	/** Temp files a test handed to download_url(); removed in cleanup. */
+	private array $packages = array();
+
+	/**
+	 * A real zip the stubbed download_url() hands back, and its sha256 — the
+	 * verified-download path. `$entries` maps archive path => contents.
+	 */
+	private function verifiedPackage( array $entries ): string {
+		$tmp = tempnam( sys_get_temp_dir(), 'sa_pkg_' );
+		$zip = new ZipArchive();
+		$this->assertTrue( $zip->open( $tmp, ZipArchive::OVERWRITE ) );
+		foreach ( $entries as $name => $body ) {
+			$zip->addFromString( $name, $body );
+		}
+		$zip->close();
+		$this->packages[]                  = $tmp;
+		$GLOBALS['_download_url_result'] = $tmp;
+		return hash_file( 'sha256', $tmp );
+	}
+
+	/** A package whose main file carries `$version` (and `$constant`, default the same). */
+	private function packageCarrying( string $version, ?string $constant = null ): string {
+		return $this->verifiedPackage(
+			array(
+				'digitizer-site-worker/digitizer-site-worker.php' => $this->build( 'NEW BUILD', $version, $constant ),
+				'digitizer-site-worker/readme.txt'                => "=== SiteAgent ===\n",
+			)
+		);
+	}
+
+	private function verifiedSelfUpdate( string $sha, ?Aura_Worker_Updater $updater = null ): array {
+		$updater = $updater ?? new Aura_Worker_Updater();
+		try {
+			return $updater->self_update( 'https://github.com/Digitizers/SiteAgent/releases/download/v9.9.9/x.zip', $sha );
+		} finally {
+			unset( $GLOBALS['_download_url_result'] );
+		}
+	}
+
+	/** Every file under the plugin directory, with its bytes' hash. */
+	private function snapshotDir(): array {
+		$out = array();
+		$it  = new RecursiveIteratorIterator( new RecursiveDirectoryIterator( $this->dir, RecursiveDirectoryIterator::SKIP_DOTS ) );
+		foreach ( $it as $f ) {
+			$out[ substr( $f->getPathname(), strlen( $this->dir ) ) ] = hash_file( 'sha256', $f->getPathname() );
+		}
+		ksort( $out );
+		return $out;
+	}
+
+	private function backupsTaken(): array {
+		return glob( WP_CONTENT_DIR . '/aura-backups/*.zip' ) ?: array();
+	}
+
+	private function cleanupPackages(): void {
+		foreach ( $this->packages as $p ) {
+			if ( file_exists( $p ) ) {
+				unlink( $p );
+			}
+		}
+		$this->packages = array();
+	}
+
+	public function test_a_verified_package_carrying_the_running_version_is_refused_before_anything_is_touched(): void {
+		file_put_contents( $this->dir . '/readme.txt', "=== SiteAgent ===\n" );
+		$sha    = $this->packageCarrying( AURA_WORKER_VERSION );
+		$pkg    = $GLOBALS['_download_url_result'];
+		$before = $this->snapshotDir();
+
+		try {
+			$res = $this->verifiedSelfUpdate( $sha );
+
+			$this->assertFalse( $res['success'] );
+			$this->assertSame( 'aura_self_update_same_version', $res['code'] ?? null );
+			$this->assertStringContainsString( 'nothing', strtolower( $res['error'] ) );
+			$this->assertStringContainsString( AURA_WORKER_VERSION, $res['error'] );
+			$this->assertStringNotContainsString( 'could NOT be restored', $res['error'] );
+			$this->assertFalse( $res['backed_up'] );
+			$this->assertFalse( $res['rolled_back'] );
+			$this->assertFalse( $res['installed'] );
+			$this->assertSame( AURA_WORKER_VERSION, $res['old_version'] );
+			$this->assertSame( AURA_WORKER_VERSION, $res['new_version'] );
+			$this->assertNotContains( 'Plugin_Upgrader::install', $GLOBALS['_mutations'], 'no install for a request that is refused' );
+			$this->assertSame( array(), $this->backupsTaken(), 'no backup for a request that is refused' );
+			$this->assertSame( $before, $this->snapshotDir(), 'the live plugin directory must be untouched' );
+			$this->assertSame( array(), $GLOBALS['_wp_http_calls'] );
+			$this->assertFileDoesNotExist( $pkg, 'the downloaded package is cleaned up' );
+			$this->assertNull( sa_read_option_uncached( Aura_Worker_Updater::SELF_UPDATE_LOCK ), 'the refusal releases the claim' );
+		} finally {
+			$this->cleanupPackages();
+		}
+	}
+
+	public function test_a_verified_package_whose_CONSTANT_names_the_running_version_is_refused_early_too(): void {
+		$sha    = $this->packageCarrying( '9.9.9', AURA_WORKER_VERSION );
+		$before = $this->snapshotDir();
+
+		try {
+			$res = $this->verifiedSelfUpdate( $sha );
+
+			$this->assertFalse( $res['success'] );
+			$this->assertSame( 'aura_self_update_same_version', $res['code'] ?? null );
+			$this->assertNotContains( 'Plugin_Upgrader::install', $GLOBALS['_mutations'] );
+			$this->assertSame( array(), $this->backupsTaken() );
+			$this->assertSame( $before, $this->snapshotDir() );
+		} finally {
+			$this->cleanupPackages();
+		}
+	}
+
+	public function test_a_verified_package_carrying_another_version_proceeds_as_before(): void {
+		$sha = $this->packageCarrying( '9.9.9' );
+		$pkg = $GLOBALS['_download_url_result'];
+
+		try {
+			$res = $this->verifiedSelfUpdate( $sha );
+
+			$this->assertTrue( $res['success'], $res['error'] ?? '' );
+			$this->assertArrayNotHasKey( 'code', $res );
+			$this->assertTrue( $res['backed_up'] );
+			$this->assertTrue( $res['verified'] );
+			$this->assertContains( 'Plugin_Upgrader::install', $GLOBALS['_mutations'] );
+			$this->assertSame( 'NEW BUILD', $this->onDisk() );
+			$this->assertFileDoesNotExist( $pkg );
+		} finally {
+			$this->cleanupPackages();
+		}
+	}
+
+	public function test_without_ZipArchive_the_early_check_falls_through_to_the_post_install_backstop(): void {
+		$sha     = $this->packageCarrying( AURA_WORKER_VERSION );
+		$updater = new class() extends Aura_Worker_Updater {
+			protected function package_inspection_available() {
+				return false;
+			}
+		};
+		$GLOBALS['_install_effect'] = function () {
+			$this->installNewBuild( true, AURA_WORKER_VERSION );
+		};
+
+		try {
+			$res = $this->verifiedSelfUpdate( $sha, $updater );
+
+			$this->assertFalse( $res['success'] );
+			$this->assertContains( 'Plugin_Upgrader::install', $GLOBALS['_mutations'], 'today\'s path: the install runs' );
+			$this->assertTrue( $res['backed_up'] );
+			$this->assertTrue( $res['rolled_back'] );
+			$this->assertStringContainsString( 'same-version', $res['error'] );
+			$this->assertSame( 'aura_self_update_version_unchanged', $res['code'] ?? null );
+		} finally {
+			$this->cleanupPackages();
+		}
+	}
+
+	public function test_an_unreadable_archive_falls_through_to_the_post_install_backstop(): void {
+		// The bytes match the digest but are not a zip this process can open.
+		$tmp = tempnam( sys_get_temp_dir(), 'sa_pkg_' );
+		file_put_contents( $tmp, 'not a zip at all' );
+		$this->packages[]                  = $tmp;
+		$GLOBALS['_download_url_result'] = $tmp;
+		$sha                             = hash_file( 'sha256', $tmp );
+
+		try {
+			$res = $this->verifiedSelfUpdate( $sha );
+
+			$this->assertTrue( $res['success'], $res['error'] ?? '' );
+			$this->assertContains( 'Plugin_Upgrader::install', $GLOBALS['_mutations'] );
+			$this->assertTrue( $res['backed_up'] );
+		} finally {
+			$this->cleanupPackages();
+		}
+	}
+
+	public function test_an_archive_without_the_main_file_where_WordPress_loads_it_falls_through(): void {
+		// A header in some OTHER php file, or the right file under a different
+		// top-level directory, is not what the upgrader will put at
+		// SELF_PLUGIN_FILE, so it decides nothing.
+		$sha = $this->verifiedPackage(
+			array(
+				'digitizer-site-worker-main/digitizer-site-worker.php' => $this->build( 'NEW BUILD', AURA_WORKER_VERSION ),
+				'digitizer-site-worker/other.php'                      => $this->build( 'NEW BUILD', AURA_WORKER_VERSION ),
+			)
+		);
+
+		try {
+			$res = $this->verifiedSelfUpdate( $sha );
+
+			$this->assertArrayNotHasKey( 'code', $res );
+			$this->assertContains( 'Plugin_Upgrader::install', $GLOBALS['_mutations'] );
+			$this->assertTrue( $res['success'], $res['error'] ?? '' );
+		} finally {
+			$this->cleanupPackages();
+		}
+	}
+
+	public function test_a_verified_other_version_that_leaves_the_old_header_on_disk_says_the_files_were_not_replaced(): void {
+		// SA#95 ask 2: install() reports success but the upgrader never replaced
+		// the directory. The sha-bound package carries 9.9.9, so "a package
+		// carrying the version already running" would be false.
+		$sha = $this->packageCarrying( '9.9.9' );
+		$GLOBALS['_install_effect'] = function () {
+			// the upgrader "succeeds" and leaves the old files in place
+		};
+
+		try {
+			$res = $this->verifiedSelfUpdate( $sha );
+
+			$this->assertFalse( $res['success'] );
+			$this->assertSame( 'aura_self_update_not_replaced', $res['code'] ?? null );
+			$this->assertStringContainsString( 'did not replace', $res['error'] );
+			$this->assertStringContainsString( '9.9.9', $res['error'] );
+			$this->assertStringNotContainsString( 'same-version', $res['error'] );
+			$this->assertStringNotContainsString( 'carrying the version already running', $res['error'] );
+			$this->assertTrue( $res['rolled_back'] );
+			$this->assertSame( 'OLD BUILD', $this->onDisk() );
+		} finally {
+			$this->cleanupPackages();
+		}
+	}
+
+	public function test_an_unverified_update_that_leaves_the_old_header_names_both_possible_causes(): void {
+		// No digest: no local archive, so nothing can say which of the two
+		// happened. The message must not claim either one.
+		$GLOBALS['_install_effect'] = function () {
+		};
+
+		$res = $this->selfUpdate();
+
+		$this->assertFalse( $res['success'] );
+		$this->assertSame( 'aura_self_update_version_unchanged', $res['code'] ?? null );
+		$this->assertStringContainsString( 'same-version', $res['error'] );
+		$this->assertStringContainsString( 'did not replace', $res['error'] );
+	}
+
+	/** Make the plugin directory read-only to PHP; false when the mode is not enforced. */
+	private function lockPluginDir(): bool {
+		chmod( $this->dir, 0555 );
+		if ( @file_put_contents( $this->dir . '/probe', 'x' ) !== false ) {
+			chmod( $this->dir, 0777 );
+			unlink( $this->dir . '/probe' );
+			return false;
+		}
+		return true;
+	}
+
+	public function test_a_restore_that_could_not_clear_the_directory_does_not_report_a_missing_plugin_whose_main_file_is_there(): void {
+		// SA#104 part 2: the rollback refuses to extract over a directory it
+		// could not remove. That leaves what the install left — here the main
+		// file, readable — not a missing plugin.
+		$locked = false;
+		$GLOBALS['_install_result'] = false;
+		$GLOBALS['_install_effect'] = function () use ( &$locked ) {
+			$locked = $this->lockPluginDir();
+		};
+
+		try {
+			$res = $this->selfUpdate();
+			if ( ! $locked ) {
+				$this->markTestSkipped( 'filesystem does not enforce the mode (running as root?)' );
+			}
+
+			$this->assertFalse( $res['rolled_back'] );
+			$this->assertStringContainsString( 'Could not remove', (string) $res['restore_error'] );
+			$this->assertStringNotContainsString( 'may be missing or incomplete', $res['error'] );
+			$this->assertStringContainsString( 'not extracted', $res['error'] );
+			$this->assertStringContainsString( 'reads version ' . AURA_WORKER_VERSION, $res['error'] );
+		} finally {
+			chmod( $this->dir, 0777 );
+		}
+	}
+
+	public function test_a_restore_that_could_not_clear_the_directory_and_left_no_main_file_still_warns(): void {
+		$locked = false;
+		$GLOBALS['_install_result'] = false;
+		$GLOBALS['_install_effect'] = function () use ( &$locked ) {
+			unlink( $this->dir . '/digitizer-site-worker.php' );
+			// Not empty, or removing it needs no write access to it at all.
+			file_put_contents( $this->dir . '/readme.txt', 'left behind' );
+			$locked = $this->lockPluginDir();
+		};
+
+		try {
+			$res = $this->selfUpdate();
+			if ( ! $locked ) {
+				$this->markTestSkipped( 'filesystem does not enforce the mode (running as root?)' );
+			}
+
+			$this->assertFalse( $res['rolled_back'] );
+			$this->assertStringContainsString( 'could NOT be restored', $res['error'] );
+			$this->assertStringContainsString( 'may be missing or incomplete', $res['error'] );
+		} finally {
+			chmod( $this->dir, 0777 );
+		}
+	}
+
 	public function test_the_generic_single_update_of_siteagent_waits_on_the_same_claim(): void {
 		// `/aura/v1/update/plugin` accepts SiteAgent's own file and replaced it
 		// with no claim taken, so it could land between a self-update's backup,
