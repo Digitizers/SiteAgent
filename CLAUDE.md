@@ -42,6 +42,7 @@ digitizer-site-worker/                                      # Repo root (develop
         ├── class-aura-worker-security.php   # Three-layer authentication and permission callbacks
         ├── class-aura-worker-health.php     # Site health report (PHP/DB/disk, error-log tail)
         ├── class-aura-worker-rollback.php   # Zip backup + restore of plugin directories
+        ├── class-aura-worker-host-probe.php # Can PHP write/delete .php files here? (SA#95)
         ├── class-aura-worker-magic-link.php # Short-lived one-time admin login links
         ├── class-aura-worker-mcp.php        # MCP server + tool registration
         ├── class-aura-worker-tools.php      # MCP tool base + registry
@@ -64,6 +65,7 @@ To create an installable ZIP: `cd` to the repo root and run `zip -r digitizer-si
 | `Aura_Worker_Security` | `includes/class-aura-worker-security.php` | Implements IP whitelist, domain whitelist, site token verification, and capability checks |
 | `Aura_Worker_Health` | `includes/class-aura-worker-health.php` | Builds site health report (PHP/DB/disk, recent error-log tail) |
 | `Aura_Worker_Rollback` | `includes/class-aura-worker-rollback.php` | Zip backup + restore of plugin directories |
+| `Aura_Worker_Host_Probe` | `includes/class-aura-worker-host-probe.php` | The SA#95 host write probe (`run()`), its recorded verdict (`recorded()`) and the refusal it maps to (`refusal()`) |
 | `Aura_Worker_Magic_Link` | `includes/class-aura-worker-magic-link.php` | Short-lived one-time admin login links |
 | `Aura_Worker_MCP` | `includes/class-aura-worker-mcp.php` | MCP server endpoint + tool registration |
 | `Aura_Worker_Tools` | `includes/class-aura-worker-tools.php` | MCP tool base class (`Aura_Tool_Base`) + registry; individual tools live in `includes/tools/` |
@@ -167,6 +169,87 @@ and `app_password_probe_unproven: { count, at, owner }` (bounded, saturating) wh
 could not prove an Application Password gone. Both are always JSON **objects** — the key's
 presence is the signal, and the shape must not change with its contents.
 
+### Plugin-file mutations on hosts that block `.php` writes (SA#95)
+
+On some hosts (WP Engine, proven live) PHP gets `Permission denied` creating,
+overwriting, renaming-to or deleting a `.php`/`.phtml` file, while other
+extensions, `mkdir` and `rmdir` work. Every Aura-driven plugin update fails there
+during unpack, and the restore that followed deleted the plugin's non-PHP files
+before stopping at the first `.php` one.
+
+- **The upgrade-path probe.** `Aura_Worker_Updater::host_php_writes()` (→
+  `Aura_Worker_Host_Probe::run()`) writes and deletes
+  `aura-php-probe-<hex>.txt`, then `aura-php-probe-<hex>.php`, in
+  `WP_CONTENT_DIR/upgrade/` through `WP_Filesystem` (plain PHP when no transport
+  initialises), always cleans up, and records `aura_worker_host_probe`. It
+  answers `ok`, `blocked` (the `.txt` was created and deleted, the `.php` could
+  not be) or `unwritable` (the `.txt` could not be created **or** stayed after
+  its delete). A probe that throws answers the most it proved — never `ok`.
+- **Only where the upgrader writes as PHP.** The gate probes only when
+  `get_filesystem_method( array(), WP_CONTENT_DIR )` is `direct`. Over `ftpext`,
+  `ftpsockets` or `ssh2` the upgrader uses credentials the probe does not have:
+  the verdict is "not probed" (`null`) — no probe, no option write, no refusal.
+- **Refusals.** After the multisite refusal and before any claim, download,
+  backup or write, `self_update()`, the generic single update and every batch
+  entry refuse **any** plugin — not only SiteAgent — with
+  `code: aura_php_writes_blocked` (`php_writes: blocked`) or
+  `aura_upgrade_dir_unwritable` (`php_writes: unwritable`), `in_progress: false`,
+  HTTP 500 as before. The batch probes once, lazily, at the first entry the
+  multisite refusal lets through, and builds its recovery helper only when an
+  entry runs. The self-update adds its recovery fields, all saying nothing
+  happened; a batch entry keeps `status`/`detail` and adds `code`.
+  `update_plugin_safely` goes through the batch and returns the entry's `code`
+  and message (`error`). Themes, core and translations are not gated.
+- **The guarded rollback skips the upgrade-directory probe** (round 2): it never
+  writes to `wp-content/upgrade`, so `restore_plugin_guarded()` passes the gate a
+  "not probed" verdict. It keeps the multisite refusal and the claim/busy
+  handling, and relies on `restore_plugin()`'s plugins-directory preflight
+  below — a blocked `WP_PLUGIN_DIR` answers `stage: preflight` with its code; an
+  unwritable upgrade directory alone does not block a recovery.
+- **`stage: preflight` — the restore's own check.**
+  `Aura_Worker_Rollback::restore_plugin()` deletes and extracts with **plain PHP
+  inside `WP_PLUGIN_DIR`**, whatever the transport, so before its delete it
+  proves exactly that: a `.txt` and a `.php` file created and deleted there with
+  `file_put_contents`/`unlink` (`Aura_Worker_Host_Probe::for_plugin_dir()`, not
+  recorded; it runs over FTP/SSH too). It then checks, reading only, that the
+  **target tree** can be removed (round 4, `target_tree_problem()`):
+  `WP_PLUGIN_DIR` writable, the plugin root writable, and every real directory
+  under it writable and readable — symlinks are not followed (they are unlinked
+  as links from an already-checked parent); a walk that cannot finish fails.
+  Anything but `ok`, or any tree problem, answers
+  `{ success: false, stage: 'preflight', code, error }` with nothing deleted —
+  a tree problem uses `aura_upgrade_dir_unwritable` and names the directory.
+  Tests that exercise the deleter's own guards (`stage: clear`) switch
+  `target_tree_problem()` off through a subclass. The probe's cleanup catches
+  every step, the last `@unlink()` included, so a warnings-to-exceptions host
+  still gets the verdict.
+  Seams: `plugin_dir_probe()` / `plugin_dir_php_writes_verdict()`.
+- **A refused restore says so.** Self-update results carry `restore_stage` and
+  `restore_code` (`null` when not applicable); a health-check rollback refused by
+  its preflight reports `rolled_back: false`, `restore_stage: 'preflight'`. A
+  batch entry whose rollback did not succeed is `status: failed` (never
+  `rolled_back`) with `code` (the restore's, else `aura_rollback_failed`) and
+  `restore_stage`. The self-update's failed-restore message says the directory
+  holds what the failed install left.
+- **`restore_skipped: 'unchanged'`.** The self-update takes a bounded manifest
+  of its directory (path, size, mtime, mode, content hash of regular files; at
+  most 20 000 entries including the root, 64 MB) right before `install()`. A
+  special file (FIFO, device), either limit, or a **symlink** — the plugin root
+  itself or any entry under it, file or directory (round 3: a failed clear can
+  empty a link's target while the link is unchanged; targets are not walked) —
+  means no manifest. A failed
+  install whose directory still matches is **not** restored — with or without a
+  backup: `rolled_back: false`, `restore_skipped: 'unchanged'`, and the message
+  says the previous build is intact. A differing or untakeable manifest restores
+  as before. (The batch restores only after a *successful* update fails its
+  health check, so it has no such path.)
+- **`/status`** carries `host: { php_writes, checked_at }` — the recorded
+  upgrade-path verdict, both `null` until a mutation has probed. `/status` never
+  probes. Seams: `write_file()` / `delete_file()` on the probe,
+  `host_php_writes_verdict()` / `filesystem_method()` / `new_rollback()` on the
+  updater, `new_updater()` on `update_plugin_safely`; the test stub's
+  `get_filesystem_method()` reads `$GLOBALS['_fs_method']`.
+
 ---
 
 ## WordPress Options
@@ -182,6 +265,7 @@ presence is the signal, and the shape must not change with its contents.
 | `aura_worker_ruleset` | The signed operator ruleset this site holds (seq, client, site_ref) |
 | `aura_worker_grant_pubkey` | The gateway's Ed25519 public key; empty = an unkeyed (manual) site |
 | `aura_worker_unbound` | **2.13.0** — the unbind marker: `{ at, site, site_ref, client, seq, app_password_uuids[], app_password_users{} }`. Autoload `no`, read uncached; its presence refuses every mutation |
+| `aura_worker_host_probe` | **SA#95** — the last host write probe: `{ php_writes: ok\|blocked\|unwritable, checked_at }`. Autoload `no`; reported by `/status` as `host` |
 | `aura_worker_app_password_probe_unproven` | **2.13.0** — bounded `{ count, at, owner }`: a probe that could not prove an Application Password gone |
 
 All options are cleaned up in `uninstall.php`.

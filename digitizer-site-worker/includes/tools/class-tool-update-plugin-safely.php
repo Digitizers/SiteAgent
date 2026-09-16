@@ -46,6 +46,7 @@ class Aura_Tool_Update_Plugin_Safely extends Aura_Tool_Base {
 			'rollback_performed'  => 'bool — whether a rollback was triggered',
 			'health_check_passed' => 'bool — result of post-update health check',
 			'error'               => 'string|null — error message if failed',
+			'code'                => 'string|null — machine-readable refusal code (e.g. aura_php_writes_blocked), when the updater gave one',
 		);
 	}
 
@@ -131,20 +132,29 @@ class Aura_Tool_Update_Plugin_Safely extends Aura_Tool_Base {
 			: null;
 
 		// Delegate to the batch updater (single plugin, chunk_size=1).
-		require_once plugin_dir_path( __FILE__ ) . '../class-aura-worker-updater.php';
-		$updater = new Aura_Worker_Updater();
+		$updater = $this->new_updater();
 		$batch   = $updater->batch_update_plugins( array( $plugin_file ), 1, $create_backup );
 
-		// Pull per-plugin result.
-		$plugin_result = isset( $batch['results'][ $plugin_file ] )
-			? $batch['results'][ $plugin_file ]
-			: array();
+		// Pull this plugin's entry. `results` is a LIST of
+		// { plugin, status, detail[, code, restore_stage] } entries; reading it
+		// by plugin file (as this did) always missed, so every call reported
+		// failure and dropped the refusal's code and message (SA#95 round 1).
+		$plugin_result = array();
+		foreach ( isset( $batch['results'] ) && is_array( $batch['results'] ) ? $batch['results'] : array() as $candidate ) {
+			if ( is_array( $candidate ) && isset( $candidate['plugin'] ) && $plugin_file === $candidate['plugin'] ) {
+				$plugin_result = $candidate;
+				break;
+			}
+		}
+		$status = isset( $plugin_result['status'] ) ? (string) $plugin_result['status'] : '';
+		$detail = isset( $plugin_result['detail'] ) ? (string) $plugin_result['detail'] : '';
 
-		$success              = ! empty( $plugin_result['success'] );
-		$rollback_performed   = ! empty( $plugin_result['rolled_back'] );
-		$health_check_passed  = ! empty( $plugin_result['health_passed'] );
-		$new_version          = isset( $plugin_result['new_version'] ) ? $plugin_result['new_version'] : null;
-		$error                = isset( $plugin_result['error'] ) ? $plugin_result['error'] : null;
+		$success             = 'updated' === $status;
+		$rollback_performed  = 'rolled_back' === $status;
+		$health_check_passed = 'updated' === $status;
+		$new_version         = null;
+		$code                = isset( $plugin_result['code'] ) ? (string) $plugin_result['code'] : null;
+		$error               = $success ? null : ( '' !== $detail ? $detail : 'The update did not report a result for this plugin' );
 
 		// If batch doesn't expose per-plugin detail, fall back to re-reading plugin data.
 		if ( $success && null === $new_version ) {
@@ -163,7 +173,19 @@ class Aura_Tool_Update_Plugin_Safely extends Aura_Tool_Base {
 			'rollback_performed'  => $rollback_performed,
 			'health_check_passed' => $health_check_passed,
 			'error'               => $error,
+			'code'                => $code,
 		);
+	}
+
+	/**
+	 * The updater this tool delegates to. A seam, so a test can hand it one
+	 * whose host probe answers what the test needs.
+	 *
+	 * @return Aura_Worker_Updater
+	 */
+	protected function new_updater() {
+		require_once plugin_dir_path( __FILE__ ) . '../class-aura-worker-updater.php';
+		return new Aura_Worker_Updater();
 	}
 
 	/**

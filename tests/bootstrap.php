@@ -1482,6 +1482,13 @@ if ( ! function_exists( 'wp_mkdir_p' ) ) {
 	}
 }
 
+if ( ! function_exists( 'wp_is_writable' ) ) {
+	// Core's own answer off Windows: the plain PHP check.
+	function wp_is_writable( string $path ): bool {
+		return is_writable( $path );
+	}
+}
+
 if ( ! function_exists( 'wp_delete_file' ) ) {
 	function wp_delete_file( string $file ): bool {
 		// `_wp_delete_file_fail` names ONE path whose delete refuses without
@@ -1496,6 +1503,14 @@ if ( ! function_exists( 'wp_delete_file' ) ) {
 			$GLOBALS['_mutations'][] = 'wp_delete_file';
 		}
 		return $ok;
+	}
+}
+
+// `_fs_method` models the transport WordPress would pick for the upgrader:
+// 'direct' (the default) or ftpext / ftpsockets / ssh2 (SA#95 round 1).
+if ( ! function_exists( 'get_filesystem_method' ) ) {
+	function get_filesystem_method( $args = array(), $context = '', $allow_relaxed_file_ownership = false ) {
+		return isset( $GLOBALS['_fs_method'] ) ? (string) $GLOBALS['_fs_method'] : 'direct';
 	}
 }
 
@@ -1639,6 +1654,7 @@ if ( ! function_exists( 'get_plugin_data' ) ) {
 
 if ( ! function_exists( 'download_url' ) ) {
 	function download_url( $url, $timeout = 300, $signature_verification = false ) {
+		$GLOBALS['_download_url_calls'][] = $url; // witnessed, so a refusal can prove it downloaded nothing (SA#95)
 		return isset( $GLOBALS['_download_url_result'] ) ? $GLOBALS['_download_url_result'] : '';
 	}
 }

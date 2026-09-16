@@ -66,7 +66,7 @@ final class SelfUpdateRecoveryTest extends TestCase {
 	}
 
 	protected function tearDown(): void {
-		unset( $GLOBALS['_install_effect'], $GLOBALS['_install_result'], $GLOBALS['_http_error'], $GLOBALS['_http_effect'] );
+		unset( $GLOBALS['_install_effect'], $GLOBALS['_install_result'], $GLOBALS['_http_error'], $GLOBALS['_http_effect'], $GLOBALS['_fs_method'] );
 		$GLOBALS['_is_multisite'] = false; // the two multisite refusal tests set it; nothing else in this class does
 		delete_option( 'aura_worker_boot' );
 		foreach ( array_keys( $GLOBALS['_options'] ?? array() ) as $k ) {
@@ -149,6 +149,24 @@ final class SelfUpdateRecoveryTest extends TestCase {
 			$this->installNewBuild( false );
 			$this->diedInOurCode();
 		};
+	}
+
+	/**
+	 * A self-update whose recovery helper has the round-4 tree preflight
+	 * switched off: the SA#104 `stage: clear` handling it sits in front of
+	 * stays tested. (The preflight itself is RollbackPrimitivesTest's.)
+	 */
+	private function selfUpdateBehindTheTreePreflight(): array {
+		$updater = new class() extends Aura_Worker_Updater {
+			protected function new_rollback() {
+				return new class() extends Aura_Worker_Rollback {
+					protected function target_tree_problem( $plugin_dir ) {
+						return null;
+					}
+				};
+			}
+		};
+		return $updater->self_update( 'https://github.com/Digitizers/SiteAgent/releases/download/v9.9.9/x.zip' );
 	}
 
 	private function selfUpdate(): array {
@@ -1106,7 +1124,10 @@ final class SelfUpdateRecoveryTest extends TestCase {
 			$this->assertStringContainsString( '9.9.9', $res['error'] );
 			$this->assertStringNotContainsString( 'same-version', $res['error'] );
 			$this->assertStringNotContainsString( 'carrying the version already running', $res['error'] );
-			$this->assertTrue( $res['rolled_back'] );
+			// SA#95 ask 3: the directory is exactly what it was before install(),
+			// so there is nothing to restore — and restoring would start a delete.
+			$this->assertFalse( $res['rolled_back'] );
+			$this->assertSame( 'unchanged', $res['restore_skipped'] ?? null );
 			$this->assertSame( 'OLD BUILD', $this->onDisk() );
 		} finally {
 			$this->cleanupPackages();
@@ -1149,7 +1170,7 @@ final class SelfUpdateRecoveryTest extends TestCase {
 		};
 
 		try {
-			$res = $this->selfUpdate();
+			$res = $this->selfUpdateBehindTheTreePreflight();
 			if ( ! $locked ) {
 				$this->markTestSkipped( 'filesystem does not enforce the mode (running as root?)' );
 			}
@@ -1175,7 +1196,7 @@ final class SelfUpdateRecoveryTest extends TestCase {
 		};
 
 		try {
-			$res = $this->selfUpdate();
+			$res = $this->selfUpdateBehindTheTreePreflight();
 			if ( ! $locked ) {
 				$this->markTestSkipped( 'filesystem does not enforce the mode (running as root?)' );
 			}
@@ -1219,7 +1240,7 @@ final class SelfUpdateRecoveryTest extends TestCase {
 		$handler = false;
 
 		try {
-			$res = $this->selfUpdate();
+			$res = $this->selfUpdateBehindTheTreePreflight();
 		} finally {
 			if ( $handler ) {
 				restore_error_handler();
@@ -1723,5 +1744,829 @@ final class SelfUpdateRecoveryTest extends TestCase {
 		$this->assertNull( sa_read_option_uncached( Aura_Worker_Updater::SELF_UPDATE_LOCK ), 'no claim taken' );
 		$this->assertSame( array(), $GLOBALS['_wp_http_calls'], 'no download' );
 		$this->assertSame( 'OLD BUILD', $this->onDisk(), 'nothing written' );
+	}
+
+	// -----------------------------------------------------------------
+	// SA#95 — hosts where PHP cannot write or delete .php files.
+	// -----------------------------------------------------------------
+
+	/**
+	 * An updater on a host whose probe answers `$verdict`, and whose recovery
+	 * helper answers `$rollback_verdict` to its own pre-delete probe. Counts
+	 * the probes and every restore_plugin() call, so a test can say what did
+	 * NOT run.
+	 */
+	private function onHost( string $verdict, string $rollback_verdict = 'ok' ): Aura_Worker_Updater {
+		return new class( $verdict, $rollback_verdict ) extends Aura_Worker_Updater {
+			public $probes    = 0;
+			public $rollbacks = array();
+			private $verdict;
+			private $rollback_verdict;
+			public function __construct( $verdict, $rollback_verdict ) {
+				$this->verdict          = $verdict;
+				$this->rollback_verdict = $rollback_verdict;
+			}
+			protected function host_php_writes_verdict() {
+				if ( 'direct' !== $this->filesystem_method() ) {
+					return null; // the production rule: not probed over FTP/SSH
+				}
+				$this->probes++;
+				return $this->verdict;
+			}
+			public function recoveryHelper() {
+				return $this->new_rollback();
+			}
+			protected function new_rollback() {
+				$r = new class( $this->rollback_verdict ) extends Aura_Worker_Rollback {
+					public $restores = 0;
+					private $v;
+					public function __construct( $v ) {
+						$this->v = $v;
+						parent::__construct();
+					}
+					protected function plugin_dir_php_writes_verdict() {
+						return $this->v;
+					}
+					public function restore_plugin( $plugin_slug, $backup_path ) {
+						$this->restores++;
+						return parent::restore_plugin( $plugin_slug, $backup_path );
+					}
+				};
+				$this->rollbacks[] = $r;
+				return $r;
+			}
+		};
+	}
+
+	private function restoresRun( Aura_Worker_Updater $updater ): int {
+		$n = 0;
+		foreach ( $updater->rollbacks as $r ) {
+			$n += $r->restores;
+		}
+		return $n;
+	}
+
+	/** Every file AND directory under $dir, with bytes' hash (files) — for "untouched". */
+	private function treeOf( string $dir ): array {
+		$out = array();
+		$it  = new RecursiveIteratorIterator( new RecursiveDirectoryIterator( $dir, RecursiveDirectoryIterator::SKIP_DOTS ), RecursiveIteratorIterator::SELF_FIRST );
+		foreach ( $it as $f ) {
+			$rel         = substr( $f->getPathname(), strlen( $dir ) );
+			$out[ $rel ] = $f->isDir() ? 'dir' : hash_file( 'sha256', $f->getPathname() ) . '@' . filemtime( $f->getPathname() );
+		}
+		ksort( $out );
+		return $out;
+	}
+
+	private function assertRefusedBeforeAnything( array $res, string $code ): void {
+		$this->assertFalse( $res['success'] );
+		$this->assertSame( $code, $res['code'] ?? null );
+		$this->assertFalse( $res['in_progress'] );
+		$this->assertFalse( $res['installed'] );
+		$this->assertFalse( $res['backed_up'] );
+		$this->assertFalse( $res['health_checked'] );
+		$this->assertFalse( $res['rolled_back'] );
+		$this->assertNull( $res['restore_error'] );
+		$this->assertStringContainsString( 'Nothing on the site was changed', $res['error'] );
+	}
+
+	public function test_a_host_that_blocks_php_writes_refuses_the_self_update_before_any_claim_download_backup_or_install(): void {
+		file_put_contents( $this->dir . '/readme.txt', "=== SiteAgent ===\n" );
+		$backups = WP_CONTENT_DIR . '/aura-backups';
+		$this->rmdir( $backups );
+		$sha    = $this->packageCarrying( '9.9.9' );
+		$before = $this->treeOf( $this->dir );
+		$GLOBALS['_download_url_calls'] = array();
+		$updater = $this->onHost( 'blocked' );
+
+		try {
+			$res = $this->verifiedSelfUpdate( $sha, $updater );
+		} finally {
+			$this->cleanupPackages();
+		}
+
+		$this->assertRefusedBeforeAnything( $res, 'aura_php_writes_blocked' );
+		$this->assertSame( 'blocked', $res['php_writes'] );
+		$this->assertSame( 1, $updater->probes );
+		$this->assertStringContainsString( 'does not let PHP write or delete .php files', $res['error'] );
+		$this->assertNull( sa_read_option_uncached( Aura_Worker_Updater::SELF_UPDATE_LOCK ), 'no claim taken' );
+		$this->assertSame( array(), $GLOBALS['_download_url_calls'], 'no download' );
+		$this->assertNotContains( 'Plugin_Upgrader::install', $GLOBALS['_mutations'], 'no install' );
+		$this->assertDirectoryDoesNotExist( $backups, 'no backup, not even the backup directory' );
+		$this->assertSame( array(), $updater->rollbacks, 'no recovery helper built' );
+		$this->assertSame( $before, $this->treeOf( $this->dir ), 'the plugin directory is byte-for-byte unchanged' );
+		$this->assertSame( array(), $GLOBALS['_wp_http_calls'], 'no loopback' );
+	}
+
+	public function test_an_unwritable_upgrade_directory_refuses_the_self_update_with_its_own_code(): void {
+		$updater = $this->onHost( 'unwritable' );
+
+		$res = $updater->self_update( 'https://github.com/Digitizers/SiteAgent/releases/download/v9.9.9/x.zip' );
+
+		$this->assertRefusedBeforeAnything( $res, 'aura_upgrade_dir_unwritable' );
+		$this->assertSame( 'unwritable', $res['php_writes'] );
+		$this->assertNotContains( 'Plugin_Upgrader::install', $GLOBALS['_mutations'] );
+		$this->assertSame( 'OLD BUILD', $this->onDisk() );
+		$this->assertNull( sa_read_option_uncached( Aura_Worker_Updater::SELF_UPDATE_LOCK ) );
+	}
+
+	public function test_a_host_whose_probe_answers_ok_updates_exactly_as_before(): void {
+		$updater = $this->onHost( 'ok' );
+
+		$res = $updater->self_update( 'https://github.com/Digitizers/SiteAgent/releases/download/v9.9.9/x.zip' );
+
+		$this->assertTrue( $res['success'] );
+		$this->assertTrue( $res['backed_up'] );
+		$this->assertFalse( $res['rolled_back'] );
+		$this->assertArrayNotHasKey( 'code', $res );
+		$this->assertSame( 1, $updater->probes );
+		$this->assertSame( 'NEW BUILD', $this->onDisk() );
+	}
+
+	public function test_the_multisite_refusal_still_wins_over_a_blocked_host(): void {
+		$GLOBALS['_is_multisite'] = true;
+		$updater = $this->onHost( 'blocked' );
+
+		$res = $updater->self_update( 'https://github.com/Digitizers/SiteAgent/releases/download/v9.9.9/x.zip' );
+
+		$this->assertSame( 'aura_self_update_multisite_unsupported', $res['code'] );
+		$this->assertSame( 0, $updater->probes, 'multisite refuses before the probe' );
+
+		$single = $updater->update_plugin( Aura_Worker_Updater::SELF_PLUGIN_FILE );
+		$this->assertSame( 'aura_self_update_multisite_unsupported', $single['code'] );
+
+		$batch = $updater->batch_update_plugins( array( Aura_Worker_Updater::SELF_PLUGIN_FILE ), 5, false );
+		$this->assertSame( 'aura_self_update_multisite_unsupported', $batch['results'][0]['code'] );
+	}
+
+	public function test_a_blocked_host_refuses_the_generic_single_update_of_any_plugin(): void {
+		$updater = $this->onHost( 'blocked' );
+
+		$res = $updater->update_plugin( 'akismet/akismet.php' );
+
+		$this->assertFalse( $res['success'] );
+		$this->assertSame( 'aura_php_writes_blocked', $res['code'] ?? null );
+		$this->assertSame( 'blocked', $res['php_writes'] );
+		$this->assertFalse( $res['in_progress'] );
+		$this->assertNotContains( 'Plugin_Upgrader::upgrade', $GLOBALS['_mutations'] );
+
+		$self = $updater->update_plugin( Aura_Worker_Updater::SELF_PLUGIN_FILE );
+		$this->assertSame( 'aura_php_writes_blocked', $self['code'] ?? null );
+		$this->assertNull( sa_read_option_uncached( Aura_Worker_Updater::SELF_UPDATE_LOCK ), 'no claim taken' );
+		$this->assertNotContains( 'Plugin_Upgrader::upgrade', $GLOBALS['_mutations'] );
+	}
+
+	public function test_a_blocked_host_refuses_every_batch_entry_and_touches_nothing(): void {
+		$other = WP_PLUGIN_DIR . '/akismet';
+		$this->rmdir( $other );
+		mkdir( $other . '/assets', 0777, true );
+		file_put_contents( $other . '/akismet.php', "<?php\n/**\n * Plugin Name: Akismet\n * Version: 1.0\n */\n" );
+		file_put_contents( $other . '/readme.txt', 'akismet' );
+		file_put_contents( $other . '/assets/x.css', 'body{}' );
+		$before  = $this->treeOf( $other );
+		$backups = WP_CONTENT_DIR . '/aura-backups';
+		$this->rmdir( $backups );
+		$updater = $this->onHost( 'blocked' );
+
+		try {
+			$out = $updater->batch_update_plugins( array( 'akismet/akismet.php', Aura_Worker_Updater::SELF_PLUGIN_FILE ), 5, true );
+
+			foreach ( $out['results'] as $entry ) {
+				$this->assertSame( 'failed', $entry['status'] );
+				$this->assertSame( 'aura_php_writes_blocked', $entry['code'] ?? null );
+				$this->assertStringContainsString( '.php files', $entry['detail'] );
+			}
+			$this->assertSame( array( 'akismet/akismet.php', Aura_Worker_Updater::SELF_PLUGIN_FILE ), array_column( $out['results'], 'plugin' ) );
+			$this->assertSame( 2, $out['summary']['failed'] );
+			$this->assertSame( 1, $updater->probes, 'one probe per batch' );
+			$this->assertNotContains( 'Plugin_Upgrader::upgrade', $GLOBALS['_mutations'] );
+			$this->assertDirectoryDoesNotExist( $backups, 'no backup taken, no backup directory created' );
+			$this->assertSame( $before, $this->treeOf( $other ) );
+			$this->assertNull( sa_read_option_uncached( Aura_Worker_Updater::SELF_UPDATE_LOCK ), 'no claim taken' );
+		} finally {
+			$this->rmdir( $other );
+		}
+	}
+
+	public function test_a_blocked_host_refuses_the_guarded_rollback_before_deleting_anything(): void {
+		// The regression that matters: a restore on such a host deleted every
+		// non-PHP file, then stopped at the first .php one.
+		$slug = 'sa-host-fixture';
+		$dir  = WP_PLUGIN_DIR . '/' . $slug;
+		$this->rmdir( $dir );
+		mkdir( $dir . '/assets', 0777, true );
+		file_put_contents( $dir . '/main.php', '<?php // ORIGINAL' );
+		file_put_contents( $dir . '/readme.txt', 'readme' );
+		file_put_contents( $dir . '/assets/x.css', 'body{}' );
+		$rollback = new Aura_Worker_Rollback();
+		$backup   = $rollback->backup_plugin( $slug );
+		$this->assertTrue( $backup['success'], $backup['error'] ?? '' );
+		file_put_contents( $dir . '/main.php', '<?php // CURRENT' );
+		$before  = $this->treeOf( $dir );
+		// Round 2: the guarded rollback is refused by restore_plugin()'s own
+		// plugins-directory preflight, not by the upgrade-directory gate.
+		$updater  = $this->onHost( 'ok', 'blocked' );
+		$rollback = $updater->recoveryHelper();
+
+		try {
+			$res = $updater->restore_plugin_guarded( $rollback, $slug, $backup['backup_path'] );
+
+			$this->assertFalse( $res['success'] );
+			$this->assertSame( 'preflight', $res['stage'] ?? null );
+			$this->assertSame( 'aura_php_writes_blocked', $res['code'] ?? null );
+			$this->assertSame( $before, $this->treeOf( $dir ), 'every file is still there, readme.txt and assets/x.css included' );
+			$this->assertFileExists( $dir . '/readme.txt' );
+			$this->assertFileExists( $dir . '/assets/x.css' );
+			$this->assertNotContains( 'SA_Test_Filesystem::delete', $GLOBALS['_mutations'] );
+
+			// SiteAgent's own guarded restore: the same.
+			$self_backup = $rollback->backup_plugin( $this->slug );
+			$this->assertTrue( $self_backup['success'] );
+			file_put_contents( $this->dir . '/digitizer-site-worker.php', $this->build( 'NEW BUILD', '9.9.9' ) );
+			$self = $updater->restore_plugin_guarded( $rollback, $this->slug, $self_backup['backup_path'] );
+			$this->assertSame( 'preflight', $self['stage'] ?? null );
+			$this->assertSame( 'aura_php_writes_blocked', $self['code'] ?? null );
+			$this->assertSame( 'NEW BUILD', $this->onDisk() );
+			$this->assertNull( sa_read_option_uncached( Aura_Worker_Updater::SELF_UPDATE_LOCK ), 'the claim is released' );
+			$this->assertSame( 2, $rollback->restores, 'refused inside restore_plugin(), by its preflight' );
+			$this->assertSame( 0, $updater->probes, 'the upgrade-directory probe is not asked' );
+		} finally {
+			$this->rmdir( $dir );
+		}
+	}
+
+	public function test_a_failed_install_that_changed_nothing_is_not_restored(): void {
+		// What WP Engine does: PclZip fails to unpack, install() answers null,
+		// and the live directory was never touched. Restoring would only start
+		// a delete the host will not let finish.
+		file_put_contents( $this->dir . '/readme.txt', "=== SiteAgent ===\n" );
+		mkdir( $this->dir . '/assets' );
+		file_put_contents( $this->dir . '/assets/x.css', 'body{}' );
+		$before = $this->treeOf( $this->dir );
+		$GLOBALS['_install_result'] = null;
+		$GLOBALS['_install_effect'] = null;
+		$updater = $this->onHost( 'ok' );
+
+		$res = $updater->self_update( 'https://github.com/Digitizers/SiteAgent/releases/download/v9.9.9/x.zip' );
+
+		$this->assertFalse( $res['success'] );
+		$this->assertTrue( $res['backed_up'] );
+		$this->assertFalse( $res['rolled_back'] );
+		$this->assertSame( 'unchanged', $res['restore_skipped'] ?? null );
+		$this->assertNull( $res['restore_error'] );
+		$this->assertSame( 0, $this->restoresRun( $updater ), 'restore_plugin() is not called' );
+		$this->assertStringContainsString( 'before it changed any file', $res['error'] );
+		$this->assertStringNotContainsString( 'could NOT be restored', $res['error'] );
+		$this->assertSame( $before, $this->treeOf( $this->dir ), 'the directory is intact' );
+	}
+
+	public function test_a_wp_error_install_that_changed_nothing_is_not_restored_either(): void {
+		file_put_contents( $this->dir . '/readme.txt', "=== SiteAgent ===\n" );
+		$before = $this->treeOf( $this->dir );
+		$GLOBALS['_install_result'] = new WP_Error( 'copy_failed_pclzip', 'Could not copy file.' );
+		$GLOBALS['_install_effect'] = null;
+		$updater = $this->onHost( 'ok' );
+
+		$res = $updater->self_update( 'https://github.com/Digitizers/SiteAgent/releases/download/v9.9.9/x.zip' );
+
+		$this->assertFalse( $res['success'] );
+		$this->assertFalse( $res['rolled_back'] );
+		$this->assertSame( 'unchanged', $res['restore_skipped'] ?? null );
+		$this->assertSame( 0, $this->restoresRun( $updater ) );
+		$this->assertStringContainsString( 'Could not copy file.', $res['error'] );
+		$this->assertSame( $before, $this->treeOf( $this->dir ) );
+	}
+
+	public function test_a_failed_install_that_did_change_the_directory_is_still_restored(): void {
+		file_put_contents( $this->dir . '/readme.txt', "=== SiteAgent ===\n" );
+		$GLOBALS['_install_result'] = new WP_Error( 'fs', 'filesystem exploded' );
+		$GLOBALS['_install_effect'] = function () {
+			unlink( $this->dir . '/readme.txt' );
+		};
+		$updater = $this->onHost( 'ok' );
+
+		$res = $updater->self_update( 'https://github.com/Digitizers/SiteAgent/releases/download/v9.9.9/x.zip' );
+
+		$this->assertFalse( $res['success'] );
+		$this->assertSame( 1, $this->restoresRun( $updater ) );
+		$this->assertTrue( $res['rolled_back'], (string) ( $res['restore_error'] ?? '' ) );
+		$this->assertArrayNotHasKey( 'restore_skipped', $res );
+		$this->assertFileExists( $this->dir . '/readme.txt', 'the restore put it back' );
+		$this->assertSame( 'OLD BUILD', $this->onDisk() );
+	}
+
+	public function test_a_restore_refused_by_its_preflight_says_the_directory_was_not_touched(): void {
+		// The install changed the directory, so a restore is owed — but the
+		// recovery helper's own probe says the host blocks .php writes. It
+		// refuses before deleting, and the message says what is on disk.
+		file_put_contents( $this->dir . '/readme.txt', "=== SiteAgent ===\n" );
+		$GLOBALS['_install_result'] = false;
+		$GLOBALS['_install_effect'] = function () {
+			file_put_contents( $this->dir . '/new-file.txt', 'x' );
+		};
+		$updater = $this->onHost( 'ok', 'blocked' );
+
+		$res = $updater->self_update( 'https://github.com/Digitizers/SiteAgent/releases/download/v9.9.9/x.zip' );
+
+		$this->assertFalse( $res['success'] );
+		$this->assertFalse( $res['rolled_back'] );
+		$this->assertSame( 1, $this->restoresRun( $updater ) );
+		$this->assertNotNull( $res['restore_error'] );
+		$this->assertStringContainsString( 'refused before deleting anything', $res['error'] );
+		$this->assertStringContainsString( 'reads version ' . AURA_WORKER_VERSION, $res['error'] );
+		$this->assertStringNotContainsString( 'may be missing or incomplete', $res['error'] );
+		$this->assertFileExists( $this->dir . '/readme.txt' );
+		$this->assertFileExists( $this->dir . '/new-file.txt', 'nothing was deleted' );
+	}
+
+	// -----------------------------------------------------------------
+	// SA#95 fix round 1.
+	// -----------------------------------------------------------------
+
+	private function probeActions(): int {
+		return count(
+			array_filter(
+				$GLOBALS['_did_actions'] ?? array(),
+				static function ( $a ) {
+					return 'aura_worker_host_probe_ran' === $a['tag'];
+				}
+			)
+		);
+	}
+
+	private function probeFiles(): array {
+		clearstatcache();
+		return array_merge(
+			glob( WP_CONTENT_DIR . '/upgrade/aura-php-probe-*' ) ?: array(),
+			glob( WP_PLUGIN_DIR . '/aura-php-probe-*' ) ?: array()
+		);
+	}
+
+	private function hostProbeWrites(): array {
+		return array_values(
+			array_filter(
+				$GLOBALS['_option_writes'] ?? array(),
+				static function ( $w ) {
+					return 'aura_worker_host_probe' === $w[1];
+				}
+			)
+		);
+	}
+
+	/** A plugin directory other than SiteAgent's, with non-PHP files. */
+	private function otherPlugin( string $slug ): string {
+		$dir = WP_PLUGIN_DIR . '/' . $slug;
+		$this->rmdir( $dir );
+		mkdir( $dir . '/assets', 0777, true );
+		file_put_contents( $dir . '/' . $slug . '.php', "<?php\n/**\n * Plugin Name: Other\n * Version: 1.0\n */\n" );
+		file_put_contents( $dir . '/readme.txt', 'readme' );
+		file_put_contents( $dir . '/assets/x.css', 'body{}' );
+		return $dir;
+	}
+
+	public function test_r1_a_non_direct_filesystem_method_is_not_probed_and_not_refused(): void {
+		// Item 1: over FTP/SSH the upgrader writes with credentials the probe
+		// does not have, so a PHP-side probe proves nothing about it.
+		foreach ( array( 'ftpext', 'ftpsockets', 'ssh2' ) as $method ) {
+			$GLOBALS['_fs_method']     = $method;
+			$GLOBALS['_did_actions']   = array();
+			$GLOBALS['_option_writes'] = array();
+			$GLOBALS['_mutations']     = array();
+			$updater = new Aura_Worker_Updater();
+
+			$single = $updater->update_plugin( 'akismet/akismet.php' );
+			$batch  = $updater->batch_update_plugins( array( 'akismet/akismet.php' ), 5, false );
+
+			$this->assertTrue( $single['success'], $method );
+			$this->assertSame( 'updated', $batch['results'][0]['status'], $method );
+			$this->assertContains( 'Plugin_Upgrader::upgrade', $GLOBALS['_mutations'], $method );
+			$this->assertSame( 0, $this->probeActions(), $method . ': no probe' );
+			$this->assertSame( array(), $this->hostProbeWrites(), $method . ': nothing recorded' );
+			$this->assertSame( array(), $this->probeFiles() );
+		}
+
+		$GLOBALS['_did_actions']   = array();
+		$GLOBALS['_option_writes'] = array();
+		$res = ( new Aura_Worker_Updater() )->self_update( 'https://github.com/Digitizers/SiteAgent/releases/download/v9.9.9/x.zip' );
+		$this->assertTrue( $res['success'] );
+		$this->assertSame( 'NEW BUILD', $this->onDisk() );
+		$this->assertSame( 0, $this->probeActions() );
+		$this->assertSame( array(), $this->hostProbeWrites() );
+	}
+
+	public function test_r1_a_direct_filesystem_method_is_probed(): void {
+		$GLOBALS['_fs_method'] = 'direct';
+		$GLOBALS['_did_actions'] = array();
+
+		$res = ( new Aura_Worker_Updater() )->update_plugin( 'akismet/akismet.php' );
+
+		$this->assertTrue( $res['success'] );
+		$this->assertSame( 1, $this->probeActions() );
+		$this->assertSame( 'ok', get_option( 'aura_worker_host_probe' )['php_writes'] );
+	}
+
+	public function test_r1_a_non_direct_method_still_runs_the_restore_preflight(): void {
+		// Item 2: the extract writes with plain PHP whatever the transport is,
+		// so the restore's own plugins-directory check still runs — and refuses.
+		$GLOBALS['_fs_method'] = 'ftpext';
+		$slug = 'sa-host-fixture-r1';
+		$dir  = $this->otherPlugin( $slug );
+		$updater  = $this->onHost( 'ok', 'blocked' );
+		$rollback = $updater->recoveryHelper();
+		$backup   = $rollback->backup_plugin( $slug );
+		$this->assertTrue( $backup['success'] );
+		file_put_contents( $dir . '/' . $slug . '.php', '<?php // CURRENT' );
+		$before = $this->treeOf( $dir );
+
+		try {
+			$res = $updater->restore_plugin_guarded( $rollback, $slug, $backup['backup_path'] );
+
+			$this->assertSame( 0, $updater->probes, 'the upgrade-path gate is not asked over FTP' );
+			$this->assertSame( 1, $rollback->restores );
+			$this->assertFalse( $res['success'] );
+			$this->assertSame( 'preflight', $res['stage'] ?? null );
+			$this->assertSame( 'aura_php_writes_blocked', $res['code'] ?? null );
+			$this->assertSame( $before, $this->treeOf( $dir ) );
+		} finally {
+			$this->rmdir( $dir );
+		}
+	}
+
+	public function test_r1_a_multisite_batch_of_only_siteagent_never_probes(): void {
+		// Item 3.
+		$GLOBALS['_is_multisite']  = true;
+		$GLOBALS['_did_actions']   = array();
+		$GLOBALS['_option_writes'] = array();
+
+		$out = ( new Aura_Worker_Updater() )->batch_update_plugins( array( Aura_Worker_Updater::SELF_PLUGIN_FILE ), 5, true );
+
+		$this->assertSame( 'failed', $out['results'][0]['status'] );
+		$this->assertSame( 'aura_self_update_multisite_unsupported', $out['results'][0]['code'] ?? null );
+		$this->assertSame( 0, $this->probeActions(), 'no probe' );
+		$this->assertSame( array(), $this->hostProbeWrites(), 'no option write' );
+		$this->assertSame( array(), $this->probeFiles(), 'no probe files' );
+	}
+
+	public function test_r1_a_batch_probes_once_at_the_first_entry_that_passes_the_multisite_refusal(): void {
+		$GLOBALS['_is_multisite'] = true;
+		$updater = $this->onHost( 'blocked' );
+
+		$out = $updater->batch_update_plugins( array( Aura_Worker_Updater::SELF_PLUGIN_FILE, 'akismet/akismet.php', 'other/other.php' ), 5, false );
+
+		$this->assertSame( 1, $updater->probes );
+		$this->assertSame( 'aura_self_update_multisite_unsupported', $out['results'][0]['code'] );
+		$this->assertSame( 'aura_php_writes_blocked', $out['results'][1]['code'] );
+		$this->assertSame( 'aura_php_writes_blocked', $out['results'][2]['code'] );
+	}
+
+	public function test_r1_a_self_update_whose_health_check_rollback_is_refused_says_so(): void {
+		// Item 5.
+		$this->brokenBuild();
+		$updater = $this->onHost( 'ok', 'blocked' );
+
+		$res = $updater->self_update( 'https://github.com/Digitizers/SiteAgent/releases/download/v9.9.9/x.zip' );
+
+		$this->assertFalse( $res['success'] );
+		$this->assertFalse( $res['rolled_back'] );
+		$this->assertSame( 'preflight', $res['restore_stage'] ?? 'missing' );
+		$this->assertSame( 'aura_php_writes_blocked', $res['restore_code'] ?? 'missing' );
+		$this->assertSame( 'NEW BUILD', $this->onDisk(), 'nothing deleted, nothing restored' );
+	}
+
+	public function test_r1_a_healthy_self_update_carries_null_restore_stage_and_code(): void {
+		$res = $this->onHost( 'ok' )->self_update( 'https://github.com/Digitizers/SiteAgent/releases/download/v9.9.9/x.zip' );
+
+		$this->assertTrue( $res['success'] );
+		$this->assertArrayHasKey( 'restore_stage', $res );
+		$this->assertNull( $res['restore_stage'] );
+		$this->assertArrayHasKey( 'restore_code', $res );
+		$this->assertNull( $res['restore_code'] );
+	}
+
+	public function test_r1_a_batch_entry_whose_health_check_rollback_is_refused_is_failed_not_rolled_back(): void {
+		$slug = 'akismet';
+		$dir  = $this->otherPlugin( $slug );
+		$before = $this->treeOf( $dir );
+		$GLOBALS['_http_response'] = array( 'response' => array( 'code' => 500 ), 'body' => '' );
+		$updater = $this->onHost( 'ok', 'blocked' );
+
+		try {
+			$out = $updater->batch_update_plugins( array( 'akismet/akismet.php' ), 5, true );
+
+			$entry = $out['results'][0];
+			$this->assertSame( 'failed', $entry['status'] );
+			$this->assertSame( 'aura_php_writes_blocked', $entry['code'] ?? null );
+			$this->assertSame( 'preflight', $entry['restore_stage'] ?? null );
+			$this->assertStringContainsString( 'rollback failed', $entry['detail'] );
+			$this->assertSame( 0, $out['summary']['rolled_back'] );
+			$this->assertSame( $before, $this->treeOf( $dir ) );
+		} finally {
+			$this->rmdir( $dir );
+		}
+	}
+
+	public function test_r1_a_batch_entry_whose_health_check_rollback_succeeds_is_still_rolled_back(): void {
+		$dir = $this->otherPlugin( 'akismet' );
+		$GLOBALS['_http_response'] = array( 'response' => array( 'code' => 500 ), 'body' => '' );
+
+		try {
+			$out = $this->onHost( 'ok' )->batch_update_plugins( array( 'akismet/akismet.php' ), 5, true );
+
+			$this->assertSame( 'rolled_back', $out['results'][0]['status'] );
+			$this->assertArrayNotHasKey( 'code', $out['results'][0] );
+		} finally {
+			$this->rmdir( $dir );
+		}
+	}
+
+	/** An updater whose recovery helper can take no backup (no ZipArchive). */
+	private function withoutBackups(): Aura_Worker_Updater {
+		return new class() extends Aura_Worker_Updater {
+			public $restores = 0;
+			protected function new_rollback() {
+				$outer = $this;
+				return new class( $outer ) extends Aura_Worker_Rollback {
+					private $outer;
+					public function __construct( $outer ) {
+						$this->outer = $outer;
+						parent::__construct();
+					}
+					public function backup_plugin( $plugin_slug ) {
+						return array( 'success' => false, 'error' => 'ZipArchive is not available on this site' );
+					}
+					public function restore_plugin( $plugin_slug, $backup_path ) {
+						$this->outer->restores++;
+						return parent::restore_plugin( $plugin_slug, $backup_path );
+					}
+				};
+			}
+		};
+	}
+
+	public function test_r1_an_unchanged_directory_is_reported_intact_even_without_a_backup(): void {
+		// Item 6.
+		file_put_contents( $this->dir . '/readme.txt', "=== SiteAgent ===\n" );
+		$before = $this->treeOf( $this->dir );
+		$GLOBALS['_install_result'] = null;
+		$GLOBALS['_install_effect'] = null;
+		$updater = $this->withoutBackups();
+
+		$res = $updater->self_update( 'https://github.com/Digitizers/SiteAgent/releases/download/v9.9.9/x.zip' );
+
+		$this->assertFalse( $res['success'] );
+		$this->assertFalse( $res['backed_up'] );
+		$this->assertFalse( $res['rolled_back'] );
+		$this->assertSame( 'unchanged', $res['restore_skipped'] ?? null );
+		$this->assertStringContainsString( 'the previous build is intact', $res['error'] );
+		$this->assertStringNotContainsString( 'may be missing', $res['error'] );
+		$this->assertSame( 0, $updater->restores );
+		$this->assertSame( $before, $this->treeOf( $this->dir ) );
+	}
+
+	public function test_r1_a_throwing_probe_listener_does_not_escape(): void {
+		// Item 7.
+		add_action( 'aura_worker_host_probe_ran', function () {
+			throw new RuntimeException( 'listener exploded' );
+		} );
+
+		try {
+			$this->assertSame( 'ok', Aura_Worker_Updater::host_php_writes() );
+			$this->assertSame( array(), $this->probeFiles() );
+		} finally {
+			unset( $GLOBALS['_filters']['aura_worker_host_probe_ran'] );
+		}
+	}
+
+	private function withManifestLimits( int $entries, int $bytes ): Aura_Worker_Updater {
+		if ( 1 === $entries ) {
+			return new class() extends Aura_Worker_Updater {
+				const MANIFEST_MAX_ENTRIES = 1;
+			};
+		}
+		if ( 2 === $entries ) {
+			return new class() extends Aura_Worker_Updater {
+				const MANIFEST_MAX_ENTRIES = 2;
+			};
+		}
+		return new class() extends Aura_Worker_Updater {
+			const MANIFEST_MAX_BYTES = 1;
+		};
+	}
+
+	/** The fixture dir holds exactly two entries: the root and the main file. */
+	private function unchangedFailedInstall( Aura_Worker_Updater $updater ): array {
+		$GLOBALS['_install_result'] = null;
+		$GLOBALS['_install_effect'] = null;
+		return $updater->self_update( 'https://github.com/Digitizers/SiteAgent/releases/download/v9.9.9/x.zip' );
+	}
+
+	public function test_r1_a_directory_over_the_entry_limit_gets_no_manifest_and_is_restored(): void {
+		$res = $this->unchangedFailedInstall( $this->withManifestLimits( 1, 0 ) );
+
+		$this->assertArrayNotHasKey( 'restore_skipped', $res, 'two entries exceed a limit of one' );
+		$this->assertTrue( $res['rolled_back'], (string) ( $res['restore_error'] ?? '' ) );
+	}
+
+	public function test_r1_a_directory_exactly_at_the_entry_limit_is_manifested(): void {
+		$res = $this->unchangedFailedInstall( $this->withManifestLimits( 2, 0 ) );
+
+		$this->assertSame( 'unchanged', $res['restore_skipped'] ?? null );
+	}
+
+	public function test_r1_a_directory_over_the_byte_limit_gets_no_manifest_and_is_restored(): void {
+		$res = $this->unchangedFailedInstall( $this->withManifestLimits( 0, 1 ) );
+
+		$this->assertArrayNotHasKey( 'restore_skipped', $res );
+		$this->assertTrue( $res['rolled_back'], (string) ( $res['restore_error'] ?? '' ) );
+	}
+
+	public function test_r1_a_special_file_is_not_hashed_and_leaves_no_manifest(): void {
+		if ( ! function_exists( 'posix_mkfifo' ) ) {
+			$this->markTestSkipped( 'posix_mkfifo is not available' );
+		}
+		$fifo = $this->dir . '/pipe';
+		$this->assertTrue( posix_mkfifo( $fifo, 0600 ) );
+
+		// Hashing a FIFO blocks for ever; not hashing it means no manifest.
+		$res = $this->unchangedFailedInstall( new Aura_Worker_Updater() );
+
+		$this->assertFalse( $res['success'] );
+		$this->assertArrayNotHasKey( 'restore_skipped', $res );
+	}
+
+	public function test_r1_update_plugin_safely_passes_the_refusal_through(): void {
+		// Item 8.
+		$blocked = $this->onHost( 'blocked' );
+		// The tool registry instantiates every declared Aura_Tool_Base subclass
+		// with no arguments, this anonymous one included — so the updater is
+		// optional, and without it the tool behaves exactly like its parent.
+		$tool    = new class( $blocked ) extends Aura_Tool_Update_Plugin_Safely {
+			private $u;
+			public function __construct( $u = null ) {
+				$this->u = $u;
+			}
+			protected function new_updater() {
+				return $this->u ? $this->u : parent::new_updater();
+			}
+		};
+
+		$res = $tool->execute( array( 'plugin_slug' => 'akismet' ) );
+
+		$this->assertFalse( $res['success'] );
+		$this->assertSame( 'akismet/akismet.php', $res['plugin_file'] );
+		$this->assertSame( 'aura_php_writes_blocked', $res['code'] ?? null );
+		$this->assertStringContainsString( 'does not let PHP write or delete .php files', (string) $res['error'] );
+		$this->assertFalse( $res['rollback_performed'] );
+		$this->assertNotContains( 'Plugin_Upgrader::upgrade', $GLOBALS['_mutations'] );
+	}
+
+	public function test_r1_update_plugin_safely_reports_a_successful_update(): void {
+		$tool = new Aura_Tool_Update_Plugin_Safely();
+
+		$res = $tool->execute( array( 'plugin_slug' => 'akismet', 'create_backup' => false ) );
+
+		$this->assertTrue( $res['success'] );
+		$this->assertTrue( $res['health_check_passed'] );
+		$this->assertNull( $res['error'] );
+	}
+
+	// -----------------------------------------------------------------
+	// SA#95 fix round 2 — the guarded rollback never uses wp-content/upgrade.
+	// -----------------------------------------------------------------
+
+	public function test_r2_an_unwritable_upgrade_directory_does_not_block_a_guarded_rollback(): void {
+		// The rollback extracts an existing backup into WP_PLUGIN_DIR; its own
+		// plugins-directory preflight passes here, so the recovery must run.
+		$slug = 'sa-host-fixture-r2';
+		$dir  = $this->otherPlugin( $slug );
+		$updater  = $this->onHost( 'unwritable', 'ok' );
+		$rollback = $updater->recoveryHelper();
+		$backup   = $rollback->backup_plugin( $slug );
+		$this->assertTrue( $backup['success'] );
+		file_put_contents( $dir . '/' . $slug . '.php', '<?php // CURRENT' );
+
+		try {
+			$res = $updater->restore_plugin_guarded( $rollback, $slug, $backup['backup_path'] );
+
+			$this->assertTrue( $res['success'], (string) ( $res['error'] ?? '' ) );
+			$this->assertSame( 0, $updater->probes, 'the upgrade-directory probe is not asked' );
+			$this->assertSame( 1, $rollback->restores );
+			$this->assertStringContainsString( 'Plugin Name: Other', file_get_contents( $dir . '/' . $slug . '.php' ), 'restored' );
+
+			// SiteAgent's own guarded rollback: the same, under the claim.
+			$self_backup = $rollback->backup_plugin( $this->slug );
+			file_put_contents( $this->dir . '/digitizer-site-worker.php', $this->build( 'NEW BUILD', '9.9.9' ) );
+			$self = $updater->restore_plugin_guarded( $rollback, $this->slug, $self_backup['backup_path'] );
+			$this->assertTrue( $self['success'], (string) ( $self['error'] ?? '' ) );
+			$this->assertSame( 0, $updater->probes );
+			$this->assertSame( 'OLD BUILD', $this->onDisk() );
+			$this->assertNull( sa_read_option_uncached( Aura_Worker_Updater::SELF_UPDATE_LOCK ), 'the claim is released' );
+		} finally {
+			$this->rmdir( $dir );
+		}
+	}
+
+	public function test_r2_the_guarded_rollback_still_refuses_on_multisite_and_while_busy(): void {
+		$updater  = $this->onHost( 'unwritable', 'ok' );
+		$rollback = $updater->recoveryHelper();
+		$backup   = $rollback->backup_plugin( $this->slug );
+
+		$holder = Aura_Worker_Magic_Link::take_claim( Aura_Worker_Updater::SELF_UPDATE_LOCK, 10 * MINUTE_IN_SECONDS );
+		$busy   = $updater->restore_plugin_guarded( $rollback, $this->slug, $backup['backup_path'] );
+		$this->assertTrue( $busy['in_progress'] );
+		Aura_Worker_Magic_Link::release_claim( Aura_Worker_Updater::SELF_UPDATE_LOCK, $holder );
+
+		$GLOBALS['_is_multisite'] = true;
+		$ms = $updater->restore_plugin_guarded( $rollback, $this->slug, $backup['backup_path'] );
+		$this->assertSame( 'aura_self_update_multisite_unsupported', $ms['code'] );
+		$this->assertSame( 0, $rollback->restores );
+		$this->assertSame( 0, $updater->probes );
+	}
+
+	// -----------------------------------------------------------------
+	// SA#95 fix round 3 — no manifest through a symlink.
+	// -----------------------------------------------------------------
+
+	/** Skip (never pass vacuously) when the sandbox cannot make a symlink. */
+	private function requireSymlinks(): void {
+		$probe = WP_CONTENT_DIR . '/sa-symlink-probe-' . bin2hex( random_bytes( 4 ) );
+		$ok    = function_exists( 'symlink' ) && @symlink( WP_CONTENT_DIR, $probe ) && is_link( $probe );
+		if ( is_link( $probe ) ) {
+			unlink( $probe );
+		}
+		if ( ! $ok ) {
+			$this->markTestSkipped( 'this sandbox cannot create symlinks, so the symlink manifest cases cannot be exercised' );
+		}
+	}
+
+	public function test_r3_a_symlinked_plugin_root_emptied_through_the_link_is_restored(): void {
+		// The link itself survives a failed clear that followed it and emptied
+		// the target; a manifest of the link alone would call that unchanged.
+		$this->requireSymlinks();
+		$target = WP_CONTENT_DIR . '/sa-link-target-' . bin2hex( random_bytes( 4 ) );
+		$this->rmdir( $this->dir );
+		mkdir( $target, 0777, true );
+		file_put_contents( $target . '/digitizer-site-worker.php', $this->build( 'OLD BUILD', AURA_WORKER_VERSION ) );
+		file_put_contents( $target . '/readme.txt', 'readme' );
+		$this->assertTrue( symlink( $target, $this->dir ) );
+		$GLOBALS['_install_result'] = new WP_Error( 'fs', 'clear failed partway' );
+		$GLOBALS['_install_effect'] = function () use ( $target ) {
+			unlink( $target . '/digitizer-site-worker.php' );
+			unlink( $target . '/readme.txt' );
+		};
+		$updater = $this->onHost( 'ok' );
+
+		try {
+			$res = $updater->self_update( 'https://github.com/Digitizers/SiteAgent/releases/download/v9.9.9/x.zip' );
+
+			$this->assertTrue( is_link( $this->dir ) || is_dir( $this->dir ) );
+			$this->assertArrayNotHasKey( 'restore_skipped', $res, 'an emptied target is not "unchanged"' );
+			$this->assertTrue( $res['backed_up'] );
+			$this->assertSame( 1, $this->restoresRun( $updater ), 'the restore runs' );
+			$this->assertTrue( $res['rolled_back'], (string) ( $res['restore_error'] ?? '' ) );
+			$this->assertSame( 'OLD BUILD', $this->onDisk() );
+		} finally {
+			if ( is_link( $this->dir ) ) {
+				unlink( $this->dir );
+			}
+			$this->rmdir( $target );
+		}
+	}
+
+	/** @return array<string,array{0:string}> */
+	public static function internal_links(): array {
+		return array(
+			'a symlinked subdirectory' => array( 'dir' ),
+			'a symlinked file'         => array( 'file' ),
+		);
+	}
+
+	/**
+	 * @dataProvider internal_links
+	 */
+	public function test_r3_a_symlink_inside_the_plugin_means_no_manifest_and_the_restore_runs( string $kind ): void {
+		$this->requireSymlinks();
+		mkdir( $this->dir . '/assets' );
+		file_put_contents( $this->dir . '/assets/x.css', 'body{}' );
+		file_put_contents( $this->dir . '/readme.txt', 'readme' );
+		$this->assertTrue(
+			'dir' === $kind
+				? symlink( $this->dir . '/assets', $this->dir . '/linked' )
+				: symlink( $this->dir . '/readme.txt', $this->dir . '/linked.txt' )
+		);
+		$m = new ReflectionMethod( Aura_Worker_Updater::class, 'plugin_manifest' );
+		if ( PHP_VERSION_ID < 80100 ) {
+			$m->setAccessible( true );
+		}
+		$this->assertNull( $m->invoke( new Aura_Worker_Updater(), $this->dir ), 'no manifest through a link' );
+		$GLOBALS['_install_result'] = null; // a failed install that changed nothing visible
+		$GLOBALS['_install_effect'] = null;
+		$updater = $this->onHost( 'ok' );
+
+		$res = $updater->self_update( 'https://github.com/Digitizers/SiteAgent/releases/download/v9.9.9/x.zip' );
+
+		$this->assertTrue( $res['backed_up'], 'an internal link is archived' );
+		$this->assertArrayNotHasKey( 'restore_skipped', $res );
+		$this->assertSame( 1, $this->restoresRun( $updater ), 'no manifest, so the conservative restore runs' );
 	}
 }

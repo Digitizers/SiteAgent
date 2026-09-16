@@ -600,6 +600,10 @@ class Aura_Worker_API {
 			'db_tables'           => count( $wpdb->get_results( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $wpdb->prefix ) . '%' ) ) ), // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching
 			'disk_usage'          => $this->get_disk_usage(),
 			'server_software'     => isset( $_SERVER['SERVER_SOFTWARE'] ) ? sanitize_text_field( wp_unslash( $_SERVER['SERVER_SOFTWARE'] ) ) : '',
+			// SA#95: the last host write probe — can PHP write and delete .php
+			// files here? Read from its option only; a read endpoint never
+			// probes. Both null until a plugin mutation has asked.
+			'host'                => Aura_Worker_Host_Probe::recorded(),
 			'timestamp'           => gmdate( 'c' ),
 		);
 

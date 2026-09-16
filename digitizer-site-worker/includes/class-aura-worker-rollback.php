@@ -9,6 +9,8 @@
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
+require_once __DIR__ . '/class-aura-worker-host-probe.php';
+
 class Aura_Worker_Rollback {
 
 	/**
@@ -123,7 +125,7 @@ class Aura_Worker_Rollback {
 	 *
 	 * @param string $plugin_slug  The plugin folder name.
 	 * @param string $backup_path  Absolute path to the backup zip.
-	 * @return array { success: bool, error?: string, stage?: 'clear'|'extract' }
+	 * @return array { success: bool, error?: string, stage?: 'preflight'|'clear'|'extract', code?: string }
 	 */
 	public function restore_plugin( $plugin_slug, $backup_path ) {
 		if ( ! class_exists( 'ZipArchive' ) ) {
@@ -139,6 +141,45 @@ class Aura_Worker_Rollback {
 			return array( 'success' => false, 'error' => 'Failed to open backup archive' );
 		}
 
+		// Never start a delete this host will not let finish (SA#95). On a host
+		// that refuses .php writes, the recursive delete below removed every
+		// other file — readme, CSS, JS, images — and then stopped at the first
+		// .php one. So the host is asked first, and anything but a proven `ok`
+		// refuses with nothing deleted: `stage: preflight`.
+		//
+		// Asked where and how the restore itself writes (round 1): the delete
+		// below and extractTo() both use plain PHP inside WP_PLUGIN_DIR,
+		// whatever transport the upgrader uses, so a .txt and a .php file are
+		// created and deleted there with plain PHP. Always — an FTP/SSH
+		// transport does not change the layer this restore writes through.
+		$refusal = Aura_Worker_Host_Probe::refusal( (string) $this->plugin_dir_php_writes_verdict() );
+		if ( null !== $refusal ) {
+			$zip->close();
+			return array(
+				'success' => false,
+				'stage'   => 'preflight',
+				'code'    => $refusal['code'],
+				'error'   => 'aura_php_writes_blocked' === $refusal['code']
+					? 'Restore refused before deleting anything: this host does not let PHP write or delete .php files, so the backup could not be put back. The plugin directory was not touched.'
+					: 'Restore refused before deleting anything: PHP could not create and delete a file in the plugins directory. The plugin directory was not touched.',
+			);
+		}
+
+		// And the tree this restore would delete (round 4). WP_PLUGIN_DIR being
+		// writable says nothing about this plugin's own directories: one with
+		// other ownership, mode or ACLs lets the recursive clear below delete
+		// everything writable around it and then stop. Read-only check.
+		$problem = $this->target_tree_problem( $plugin_dir );
+		if ( null !== $problem ) {
+			$zip->close();
+			return array(
+				'success' => false,
+				'stage'   => 'preflight',
+				'code'    => 'aura_upgrade_dir_unwritable',
+				'error'   => 'Restore refused before deleting anything: ' . $problem . ' The plugin directory was not touched.',
+			);
+		}
+
 		// Open the archive BEFORE deleting anything. The old order deleted the
 		// directory first and then discovered it could not read the backup —
 		// turning a recoverable state into an empty one.
@@ -150,8 +191,9 @@ class Aura_Worker_Rollback {
 		// is a half-restored plugin reported as a clean rollback. Better to
 		// refuse and say so than to claim a recovery that did not happen.
 		//
-		// `stage` tells the two failures apart for a caller that has to say what
-		// is on disk (SA#104): `clear` means nothing was extracted — the
+		// `stage` tells the failures apart for a caller that has to say what
+		// is on disk (SA#104): `preflight` (above, SA#95) means nothing at all
+		// was deleted, `clear` means nothing was extracted — the
 		// directory holds what was there before, less whatever the removal got
 		// to before it failed — while `extract` means the directory was removed
 		// and the backup did not fully land.
@@ -190,6 +232,74 @@ class Aura_Worker_Rollback {
 		$this->invalidate_opcache( $plugin_dir );
 
 		return array( 'success' => true );
+	}
+
+	/**
+	 * Why the installed tree could not be removed completely, or null when it
+	 * can (SA#95 round 4). Reads only: every real directory under the plugin,
+	 * the root included, must be writable (removing an entry needs a writable
+	 * parent), and so must WP_PLUGIN_DIR (to remove the root). Symlinks are
+	 * never followed — the clear unlinks them as links, which needs only their
+	 * (already checked) parent. A walk that cannot finish is a problem too.
+	 *
+	 * @param string $plugin_dir Absolute plugin directory.
+	 * @return string|null
+	 */
+	protected function target_tree_problem( $plugin_dir ) {
+		if ( ! is_dir( $plugin_dir ) && ! is_link( $plugin_dir ) ) {
+			return null; // nothing to delete
+		}
+		clearstatcache();
+		if ( ! wp_is_writable( WP_PLUGIN_DIR ) ) {
+			return 'the plugins directory is not writable, so the plugin directory could not be removed.';
+		}
+		if ( is_link( $plugin_dir ) ) {
+			return null; // removed as a link, from the writable plugins directory
+		}
+		if ( ! wp_is_writable( $plugin_dir ) ) {
+			return 'the plugin directory itself is not writable, so its files could not be removed.';
+		}
+		try {
+			$iterator = new RecursiveIteratorIterator(
+				new RecursiveDirectoryIterator( $plugin_dir, RecursiveDirectoryIterator::SKIP_DOTS ),
+				RecursiveIteratorIterator::SELF_FIRST
+			);
+			foreach ( $iterator as $entry ) {
+				if ( $entry->isLink() || ! $entry->isDir() ) {
+					continue;
+				}
+				$path = $entry->getPathname();
+				if ( ! wp_is_writable( $path ) || ! is_readable( $path ) ) {
+					return sprintf(
+						'the directory %s inside the plugin is not writable, so its contents could not be removed.',
+						ltrim( substr( $path, strlen( $plugin_dir ) ), '/\\' )
+					);
+				}
+			}
+		} catch ( Throwable $e ) {
+			return 'the plugin directory could not be read completely, so it cannot be proven removable.';
+		}
+		return null;
+	}
+
+	/**
+	 * The probe restore_plugin() runs before deleting: plain PHP, in
+	 * WP_PLUGIN_DIR, not recorded. A seam.
+	 *
+	 * @return Aura_Worker_Host_Probe
+	 */
+	protected function plugin_dir_probe() {
+		return Aura_Worker_Host_Probe::for_plugin_dir();
+	}
+
+	/**
+	 * The verdict restore_plugin() consults before deleting. A seam: the unit
+	 * suite cannot fake a real filesystem permission.
+	 *
+	 * @return string 'ok', 'blocked' or 'unwritable'.
+	 */
+	protected function plugin_dir_php_writes_verdict() {
+		return $this->plugin_dir_probe()->run();
 	}
 
 	/**

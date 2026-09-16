@@ -34,6 +34,16 @@ final class RollbackPrimitivesTest extends TestCase {
 			unlink( $f );
 		}
 		@chmod( WP_PLUGIN_DIR, 0777 );
+		// Round 4 locks directories inside the fixture; give them back first.
+		if ( is_dir( $this->dir ) && ! is_link( $this->dir ) ) {
+			@chmod( $this->dir, 0777 );
+			foreach ( glob( $this->dir . '/*', GLOB_ONLYDIR ) ?: array() as $sub ) {
+				if ( ! is_link( $sub ) ) {
+					@chmod( $sub, 0777 );
+					$this->removeTree( $sub );
+				}
+			}
+		}
 		if ( is_dir( $this->dir ) ) {
 			foreach ( scandir( $this->dir ) as $f ) {
 				if ( '.' !== $f && '..' !== $f ) {
@@ -42,6 +52,39 @@ final class RollbackPrimitivesTest extends TestCase {
 			}
 			rmdir( $this->dir );
 		}
+	}
+
+	/**
+	 * A recovery helper whose round-4 tree preflight is switched off, so the
+	 * deleter's own guards — the defence behind that preflight — stay tested.
+	 */
+	private function deleterOnly(): Aura_Worker_Rollback {
+		return new class() extends Aura_Worker_Rollback {
+			protected function target_tree_problem( $plugin_dir ) {
+				return null;
+			}
+		};
+	}
+
+	/** True when a 0555 directory really refuses a write (not root). */
+	private function modesAreEnforced( string $dir ): bool {
+		$probe = $dir . '/.sa-mode-probe';
+		if ( false !== @file_put_contents( $probe, 'x' ) ) {
+			@unlink( $probe );
+			return false;
+		}
+		return true;
+	}
+
+	/** Every file under the fixture, with its bytes. */
+	private function filesOf( string $dir ): array {
+		$out = array();
+		$it  = new RecursiveIteratorIterator( new RecursiveDirectoryIterator( $dir, RecursiveDirectoryIterator::SKIP_DOTS ) );
+		foreach ( $it as $f ) {
+			$out[ substr( $f->getPathname(), strlen( $dir ) ) ] = file_get_contents( $f->getPathname() );
+		}
+		ksort( $out );
+		return $out;
 	}
 
 	/** Remove a link as a link, or a real directory with everything under it. */
@@ -553,7 +596,7 @@ final class RollbackPrimitivesTest extends TestCase {
 		mkdir( $target, 0777, true );
 		file_put_contents( $target . '/inner.php', 'LINKED CODE' );
 		symlink( $target, $this->dir . '/linked' );
-		$rollback = new Aura_Worker_Rollback();
+		$rollback = $this->deleterOnly(); // the deleter's own guard, behind the round-4 tree preflight
 		$backup   = $rollback->backup_plugin( $this->slug );
 		$this->assertTrue( $backup['success'], $backup['error'] ?? '' );
 
@@ -601,7 +644,7 @@ final class RollbackPrimitivesTest extends TestCase {
 		// during recovery instead of returning `rolled_back: false` with a
 		// `restore_error` (Codex round-19 P1) — the backup side's round-6 lesson,
 		// unlearnt on the restore side.
-		$rollback = new Aura_Worker_Rollback();
+		$rollback = $this->deleterOnly(); // the deleter's own guard, behind the round-4 tree preflight
 		$backup   = $rollback->backup_plugin( $this->slug );
 		$this->assertTrue( $backup['success'], $backup['error'] ?? '' );
 
@@ -697,5 +740,216 @@ final class RollbackPrimitivesTest extends TestCase {
 		$listed = $rollback->list_backups( $this->slug );
 		$this->assertCount( 2, $listed, 'list_backups must still recognise the suffixed names' );
 		$this->assertSame( $this->slug, $listed[0]['plugin_slug'] );
+	}
+
+	/** A recovery helper whose pre-delete host probe answers $verdict. */
+	private function rollbackOnHost( string $verdict ): Aura_Worker_Rollback {
+		return new class( $verdict ) extends Aura_Worker_Rollback {
+			public $probes = 0;
+			private $v;
+			public function __construct( $v ) {
+				$this->v = $v;
+				parent::__construct();
+			}
+			protected function plugin_dir_php_writes_verdict() {
+				$this->probes++;
+				return $this->v;
+			}
+		};
+	}
+
+	/** @return array<string,array{0:string,1:string}> */
+	public static function refusing_hosts(): array {
+		return array(
+			'php writes blocked'   => array( 'blocked', 'aura_php_writes_blocked' ),
+			'upgrade dir unwritable' => array( 'unwritable', 'aura_upgrade_dir_unwritable' ),
+		);
+	}
+
+	/**
+	 * @dataProvider refusing_hosts
+	 */
+	public function test_a_restore_on_a_host_that_would_not_let_it_finish_never_starts_the_delete( string $verdict, string $code ): void {
+		// SA#95: on WP Engine the recursive delete removed every non-PHP file,
+		// then failed on the first .php one — `stage: clear`, and the plugin's
+		// readme, CSS, JS and images gone for nothing.
+		mkdir( $this->dir . '/assets', 0777, true );
+		file_put_contents( $this->dir . '/readme.txt', 'readme' );
+		file_put_contents( $this->dir . '/assets/x.css', 'body{}' );
+		$rollback = $this->rollbackOnHost( $verdict );
+		$backup   = $rollback->backup_plugin( $this->slug );
+		$this->assertTrue( $backup['success'] );
+		file_put_contents( $this->dir . '/main.php', 'REPLACED' );
+		$GLOBALS['_mutations'] = array();
+
+		try {
+			$restore = $rollback->restore_plugin( $this->slug, $backup['backup_path'] );
+
+			$this->assertFalse( $restore['success'] );
+			$this->assertSame( 'preflight', $restore['stage'] ?? null );
+			$this->assertSame( $code, $restore['code'] ?? null );
+			$this->assertStringContainsString( 'not touched', $restore['error'] );
+			$this->assertSame( 1, $rollback->probes );
+			$this->assertSame( 'REPLACED', file_get_contents( $this->dir . '/main.php' ), 'nothing extracted' );
+			$this->assertFileExists( $this->dir . '/readme.txt' );
+			$this->assertFileExists( $this->dir . '/assets/x.css' );
+			$this->assertNotContains( 'SA_Test_Filesystem::delete', $GLOBALS['_mutations'] );
+		} finally {
+			$this->removeTree( $this->dir . '/assets' );
+		}
+	}
+
+	public function test_a_restore_on_a_host_whose_probe_answers_ok_proceeds(): void {
+		$rollback = $this->rollbackOnHost( 'ok' );
+		$backup   = $rollback->backup_plugin( $this->slug );
+		file_put_contents( $this->dir . '/main.php', 'REPLACED' );
+
+		$restore = $rollback->restore_plugin( $this->slug, $backup['backup_path'] );
+
+		$this->assertTrue( $restore['success'] );
+		$this->assertSame( 1, $rollback->probes );
+		$this->assertSame( 'ORIGINAL', file_get_contents( $this->dir . '/main.php' ) );
+	}
+
+	public function test_r1_the_preflight_proves_plain_php_writes_in_the_plugins_directory_itself(): void {
+		// Round 1, item 2: extractTo() writes with plain PHP into WP_PLUGIN_DIR,
+		// so that — not wp-content/upgrade through WP_Filesystem — is what the
+		// preflight must prove. Here the transport (and the upgrade path) would
+		// work; plain-PHP .php writes into the plugins directory do not.
+		mkdir( $this->dir . '/assets', 0777, true );
+		file_put_contents( $this->dir . '/readme.txt', 'readme' );
+		file_put_contents( $this->dir . '/assets/x.css', 'body{}' );
+		$rollback = new class() extends Aura_Worker_Rollback {
+			public $probe;
+			protected function plugin_dir_probe() {
+				$this->probe = new class() extends Aura_Worker_Host_Probe {
+					public $writes = array();
+					public function __construct() {
+						parent::__construct( WP_PLUGIN_DIR, true, false );
+					}
+					protected function write_file( $path, $body ) {
+						$this->writes[] = $path;
+						return '.php' === substr( $path, -4 ) ? false : parent::write_file( $path, $body );
+					}
+				};
+				return $this->probe;
+			}
+		};
+		$backup = $rollback->backup_plugin( $this->slug );
+		file_put_contents( $this->dir . '/main.php', 'REPLACED' );
+		$GLOBALS['_option_writes'] = array();
+
+		try {
+			$this->assertSame( 'ok', Aura_Worker_Updater::host_php_writes(), 'the upgrade path itself is fine' );
+			$GLOBALS['_option_writes'] = array();
+
+			$restore = $rollback->restore_plugin( $this->slug, $backup['backup_path'] );
+
+			$this->assertFalse( $restore['success'] );
+			$this->assertSame( 'preflight', $restore['stage'] ?? null );
+			$this->assertSame( 'aura_php_writes_blocked', $restore['code'] ?? null );
+			$this->assertCount( 2, $rollback->probe->writes );
+			foreach ( $rollback->probe->writes as $w ) {
+				$this->assertSame( WP_PLUGIN_DIR, dirname( $w ), 'probed in the plugins directory' );
+			}
+			$this->assertSame( 'REPLACED', file_get_contents( $this->dir . '/main.php' ) );
+			$this->assertFileExists( $this->dir . '/readme.txt' );
+			$this->assertFileExists( $this->dir . '/assets/x.css' );
+			$this->assertSame( array(), glob( WP_PLUGIN_DIR . '/aura-php-probe-*' ) ?: array() );
+			$this->assertNotContains( array( 'set', 'aura_worker_host_probe' ), $GLOBALS['_option_writes'], 'the plugins-directory check is not recorded' );
+		} finally {
+			$this->removeTree( $this->dir . '/assets' );
+		}
+	}
+
+	public function test_r1_the_real_preflight_uses_plain_php_even_without_a_transport_and_records_nothing(): void {
+		$GLOBALS['_wp_filesystem_unavailable'] = true;
+		$GLOBALS['wp_filesystem']              = null;
+		$GLOBALS['_option_writes']             = array();
+		$rollback = new Aura_Worker_Rollback();
+		$backup   = $rollback->backup_plugin( $this->slug );
+		file_put_contents( $this->dir . '/main.php', 'REPLACED' );
+
+		try {
+			$restore = $rollback->restore_plugin( $this->slug, $backup['backup_path'] );
+		} finally {
+			unset( $GLOBALS['_wp_filesystem_unavailable'] );
+			$GLOBALS['wp_filesystem'] = null;
+		}
+
+		$this->assertTrue( $restore['success'] );
+		$this->assertSame( 'ORIGINAL', file_get_contents( $this->dir . '/main.php' ) );
+		$this->assertSame( array(), glob( WP_PLUGIN_DIR . '/aura-php-probe-*' ) ?: array() );
+		$this->assertNotContains( array( 'set', 'aura_worker_host_probe' ), $GLOBALS['_option_writes'] );
+	}
+
+	// --- Round 4: the target tree must be deletable before anything is. ---
+
+	public function test_r4_a_non_writable_nested_directory_refuses_the_restore_before_deleting_anything(): void {
+		// WP_PLUGIN_DIR itself is writable, so the plugins-directory probe says
+		// ok — but the clear would delete the writable parts of this plugin and
+		// then stop at the locked subdirectory.
+		mkdir( $this->dir . '/assets/locked', 0777, true );
+		file_put_contents( $this->dir . '/readme.txt', 'readme' );
+		file_put_contents( $this->dir . '/assets/x.css', 'body{}' );
+		file_put_contents( $this->dir . '/assets/locked/y.js', 'js' );
+		$rollback = new Aura_Worker_Rollback();
+		$backup   = $rollback->backup_plugin( $this->slug );
+		$this->assertTrue( $backup['success'] );
+		file_put_contents( $this->dir . '/main.php', 'REPLACED' );
+		$before = $this->filesOf( $this->dir );
+		chmod( $this->dir . '/assets/locked', 0555 );
+
+		try {
+			if ( ! $this->modesAreEnforced( $this->dir . '/assets/locked' ) ) {
+				$this->markTestSkipped( 'chmod 0555 is not enforced here (running as root?), so a non-writable directory cannot be modelled' );
+			}
+			$restore = $rollback->restore_plugin( $this->slug, $backup['backup_path'] );
+
+			$this->assertFalse( $restore['success'] );
+			$this->assertSame( 'preflight', $restore['stage'] ?? null );
+			$this->assertSame( 'aura_upgrade_dir_unwritable', $restore['code'] ?? null );
+			$this->assertStringContainsString( 'assets/locked', $restore['error'] );
+			$this->assertSame( $before, $this->filesOf( $this->dir ), 'every file survives' );
+		} finally {
+			chmod( $this->dir . '/assets/locked', 0777 );
+		}
+	}
+
+	public function test_r4_a_non_writable_plugin_root_refuses_the_restore_before_deleting_anything(): void {
+		file_put_contents( $this->dir . '/readme.txt', 'readme' );
+		$rollback = new Aura_Worker_Rollback();
+		$backup   = $rollback->backup_plugin( $this->slug );
+		file_put_contents( $this->dir . '/main.php', 'REPLACED' );
+		$before = $this->filesOf( $this->dir );
+		chmod( $this->dir, 0555 );
+
+		try {
+			if ( ! $this->modesAreEnforced( $this->dir ) ) {
+				$this->markTestSkipped( 'chmod 0555 is not enforced here (running as root?), so a non-writable directory cannot be modelled' );
+			}
+			$restore = $rollback->restore_plugin( $this->slug, $backup['backup_path'] );
+
+			$this->assertFalse( $restore['success'] );
+			$this->assertSame( 'preflight', $restore['stage'] ?? null );
+			$this->assertSame( 'aura_upgrade_dir_unwritable', $restore['code'] ?? null );
+			$this->assertSame( $before, $this->filesOf( $this->dir ) );
+		} finally {
+			chmod( $this->dir, 0777 );
+		}
+	}
+
+	public function test_r4_a_normal_nested_tree_is_restored(): void {
+		mkdir( $this->dir . '/assets/deep', 0777, true );
+		file_put_contents( $this->dir . '/assets/deep/y.js', 'js' );
+		$rollback = new Aura_Worker_Rollback();
+		$backup   = $rollback->backup_plugin( $this->slug );
+		file_put_contents( $this->dir . '/main.php', 'REPLACED' );
+
+		$restore = $rollback->restore_plugin( $this->slug, $backup['backup_path'] );
+
+		$this->assertTrue( $restore['success'], (string) ( $restore['error'] ?? '' ) );
+		$this->assertSame( 'ORIGINAL', file_get_contents( $this->dir . '/main.php' ) );
+		$this->assertSame( 'js', file_get_contents( $this->dir . '/assets/deep/y.js' ) );
 	}
 }
