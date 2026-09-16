@@ -240,15 +240,6 @@ class Aura_Worker_Updater {
 		$plugin_file = self::SELF_PLUGIN_FILE;
 		$plugin_slug = 'digitizer-site-worker';
 
-		// Under the same contract as the backup itself: anything the recovery
-		// setup does that could end the request instead of reporting failure
-		// leaves a site unable to self-update at all (Codex round-13).
-		try {
-			$rollback = new Aura_Worker_Rollback();
-		} catch ( Throwable $e ) {
-			$rollback = null;
-		}
-
 		$skin     = new Automatic_Upgrader_Skin();
 		$upgrader = new Plugin_Upgrader( $skin );
 
@@ -259,6 +250,7 @@ class Aura_Worker_Updater {
 		// straight from the URL (back-compat).
 		$install_source  = $zip_url;
 		$tmp             = '';
+		$package_header  = null; // the verified archive's own Version header, once read (SA#95/#104)
 		$expected_sha256 = strtolower( trim( (string) $expected_sha256 ) );
 		if ( '' !== $expected_sha256 ) {
 			if ( ! function_exists( 'download_url' ) ) {
@@ -280,6 +272,25 @@ class Aura_Worker_Updater {
 				);
 			}
 			$install_source = $tmp;
+
+			// SA#104: a package carrying the version already running is refused
+			// by the post-install check below — but only after this plugin was
+			// backed up and install() had written over its live directory, and a
+			// refusal that was always coming touched (and on one host damaged)
+			// the installed plugin every time it was asked. The verified archive
+			// already says which version it carries, so ask it first and refuse
+			// with nothing changed. An archive that cannot be read here decides
+			// nothing: the update goes on exactly as before, and the
+			// post-install check stays the backstop.
+			$package_version = $this->verified_package_version( $tmp );
+			if ( null !== $package_version
+				&& ( $old_version === $package_version['header'] || $old_version === $package_version['constant'] ) ) {
+				wp_delete_file( $tmp );
+				return $this->self_update_same_version_refused( $old_version, $package_version );
+			}
+			if ( null !== $package_version ) {
+				$package_header = $package_version['header'];
+			}
 		}
 
 		// The lease is renewed before each phase that could take a while, so a
@@ -288,6 +299,21 @@ class Aura_Worker_Updater {
 		// means another self-update took over: stop before touching the files.
 		if ( ! $this->keep_self_update_claim( $fence ) ) {
 			return $this->self_update_claim_lost();
+		}
+
+		// The recovery helper is BUILT only here, once nothing above can refuse
+		// (Codex #105 round-3 P2): its constructor creates wp-content/aura-backups/
+		// with an .htaccess and index.php, and a refusal that says nothing on the
+		// site was changed must not have done that. Its class was loaded at the
+		// top, from the old build; only the construction moved.
+		//
+		// Under the same contract as the backup itself: anything the recovery
+		// setup does that could end the request instead of reporting failure
+		// leaves a site unable to self-update at all (Codex round-13).
+		try {
+			$rollback = new Aura_Worker_Rollback();
+		} catch ( Throwable $e ) {
+			$rollback = null;
 		}
 
 		// Back up this plugin's own directory so a bad build can be undone.
@@ -430,19 +456,33 @@ class Aura_Worker_Updater {
 		// (Codex round-23 P1). Aura never sends a same-version package — the
 		// rollout compares versions first — so refusing costs nothing real, and
 		// it is refused like any other malformed install: restored, and said so.
+		//
+		// On the verified path a same-version package is refused before the
+		// backup (SA#104), so it is the backstop there. Reaching it with the
+		// archive's own header already read — and different — has one
+		// explanation left: install() reported success and the files on disk were
+		// never replaced (SA#95). Without that reading (no digest, or an archive
+		// that could not be inspected) the two causes cannot be told apart, and
+		// the message names both.
 		if ( $new_version === $old_version ) {
-			return $this->self_update_install_failed(
-				$rollback,
-				$plugin_slug,
-				$plugin_file,
-				$backup_path,
-				$old_version,
-				sprintf(
-					/* translators: %s: the version already installed */
-					__( 'Self-update refused a package carrying the version already running (%s): a same-version build cannot be told apart from the old one by its boot records.', 'digitizer-site-worker' ),
-					$new_version
+			$not_replaced = null !== $package_header && '' !== $package_header && $package_header !== $old_version;
+			$message      = $not_replaced
+				? sprintf(
+					/* translators: 1: plugin directory, 2: the version still on disk, 3: the version the verified package carries */
+					__( 'Self-update did not take: install() reported success, but the files at %1$s still carry %2$s while the verified package carries %3$s — the upgrader did not replace the plugin directory.', 'digitizer-site-worker' ),
+					WP_PLUGIN_DIR . '/' . $plugin_slug,
+					$new_version,
+					$package_header
 				)
-			);
+				: sprintf(
+					/* translators: 1: the version already installed, 2: plugin directory */
+					__( 'Self-update refused: after install() the plugin still reads the version already running (%1$s). Either the package carries that same version — a same-version build cannot be told apart from the old one by its boot records — or the upgrader did not replace the files at %2$s.', 'digitizer-site-worker' ),
+					$new_version,
+					WP_PLUGIN_DIR . '/' . $plugin_slug
+				);
+			$out         = $this->self_update_install_failed( $rollback, $plugin_slug, $plugin_file, $backup_path, $old_version, $message );
+			$out['code'] = $not_replaced ? 'aura_self_update_not_replaced' : 'aura_self_update_version_unchanged';
+			return $out;
 		}
 
 		// Ask the next boot of this plugin to announce itself. Armed HERE — after
@@ -568,19 +608,24 @@ class Aura_Worker_Updater {
 	 * is the identifier the new build's beacon writers will use; the header is
 	 * what the verdict looks records up by; the two must be the same string.
 	 *
+	 * Unreadable counts as absent (Codex #105 round-1 P1): the only caller
+	 * treats null as a failed install, and a read that warns must not escape
+	 * a host's warning-to-exception handler mid-update.
+	 *
 	 * @param string $plugin_file Plugin file relative to WP_PLUGIN_DIR.
-	 * @return string|null Null when the define cannot be found.
+	 * @return string|null Null when the file cannot be read or the define cannot be found.
 	 */
 	private function installed_constant_version( $plugin_file ) {
 		$path = WP_PLUGIN_DIR . '/' . $plugin_file;
-		if ( ! file_exists( $path ) ) {
+		if ( ! is_file( $path ) || ! is_readable( $path ) ) {
 			return null;
 		}
-		$src = (string) file_get_contents( $path ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
-		if ( preg_match( "/define\\(\\s*'AURA_WORKER_VERSION'\\s*,\\s*'([^']*)'\\s*\\)/", $src, $m ) ) {
-			return $m[1];
+		try {
+			$src = file_get_contents( $path ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+		} catch ( Throwable $e ) {
+			return null;
 		}
-		return null;
+		return is_string( $src ) ? $this->constant_version_from_source( $src ) : null;
 	}
 
 	/**
@@ -588,18 +633,30 @@ class Aura_Worker_Updater {
 	 * The one post-condition a rollback can be held to: the old build is back
 	 * only if the file on disk says so.
 	 *
+	 * Unreadable counts as absent (Codex #105 round-1 P1). It is read during
+	 * recovery, where a warning turned into an exception by the host would end
+	 * the request instead of reporting the failed restore — so the read is
+	 * checked first and cannot throw. Every caller already takes null as "not
+	 * the version expected": the post-install check fails the install, the
+	 * rollback verify reports not restored, and the failed-restore message
+	 * keeps its missing-or-incomplete warning.
+	 *
 	 * @param string $plugin_file Plugin file relative to WP_PLUGIN_DIR.
-	 * @return string|null
+	 * @return string|null Null when the file is missing or unreadable.
 	 */
 	private function installed_version( $plugin_file ) {
 		$path = WP_PLUGIN_DIR . '/' . $plugin_file;
-		if ( ! file_exists( $path ) ) {
+		if ( ! is_file( $path ) || ! is_readable( $path ) ) {
 			return null;
 		}
-		if ( function_exists( 'wp_clean_plugins_cache' ) ) {
-			wp_clean_plugins_cache( false );
+		try {
+			if ( function_exists( 'wp_clean_plugins_cache' ) ) {
+				wp_clean_plugins_cache( false );
+			}
+			$data = get_plugin_data( $path, false, false );
+		} catch ( Throwable $e ) {
+			return null;
 		}
-		$data = get_plugin_data( $path, false, false );
 		return isset( $data['Version'] ) ? (string) $data['Version'] : null;
 	}
 
@@ -756,23 +813,29 @@ class Aura_Worker_Updater {
 	 * evidence that could not support it, so this returns success only on the
 	 * post-condition: the plugin's own header reads the version we came from.
 	 *
-	 * @return array { restored: bool, error: string|null }
+	 * @return array { restored: bool, error: string|null, stage: string|null }
+	 *               `stage` is restore_plugin()'s failure stage, when it failed.
 	 */
 	private function attempt_rollback( $rollback, $plugin_slug, $plugin_file, $backup_path, $old_version ) {
 		if ( null === $backup_path || null === $rollback ) {
-			return array( 'restored' => false, 'error' => null );
+			return array( 'restored' => false, 'error' => null, 'stage' => null );
 		}
 		$restore = $rollback->restore_plugin( $plugin_slug, $backup_path );
 		if ( empty( $restore['success'] ) ) {
-			return array( 'restored' => false, 'error' => (string) ( $restore['error'] ?? 'restore failed' ) );
+			return array(
+				'restored' => false,
+				'error'    => (string) ( $restore['error'] ?? 'restore failed' ),
+				'stage'    => isset( $restore['stage'] ) ? (string) $restore['stage'] : null,
+			);
 		}
 		if ( $old_version !== $this->installed_version( $plugin_file ) ) {
 			return array(
 				'restored' => false,
 				'error'    => 'restore completed but the plugin header does not read ' . $old_version,
+				'stage'    => 'verify',
 			);
 		}
-		return array( 'restored' => true, 'error' => null );
+		return array( 'restored' => true, 'error' => null, 'stage' => null );
 	}
 
 	/**
@@ -945,8 +1008,25 @@ class Aura_Worker_Updater {
 		// The message must carry the recovery outcome too (Codex round-4 P2): a
 		// consumer showing only `error` was told about the upgrader failure and
 		// not that the plugin may now be missing.
+		//
+		// Except where that warning is not what happened (SA#104): a restore that
+		// could not REMOVE the installed directory refuses to extract over it, so
+		// the directory holds what the install left there — less whatever the
+		// failed removal got to — and not a half-extracted backup. When the file
+		// WordPress loads is still there and readable, say that, with the version
+		// it reads, instead of calling the plugin missing. No readable main file
+		// is the missing-plugin case, and keeps the warning.
 		if ( null !== $backup_path && ! $restored ) {
-			$error .= ' ' . __( 'The previous build could NOT be restored — the plugin may be missing or incomplete.', 'digitizer-site-worker' );
+			$on_disk = 'clear' === $rb['stage'] ? $this->installed_version( $plugin_file ) : null;
+			if ( null !== $on_disk && '' !== $on_disk ) {
+				$error .= ' ' . sprintf(
+					/* translators: %s: the version the plugin's main file reads now */
+					__( 'The previous build was not restored: the installed plugin directory could not be removed, so the backup was not extracted over it. The plugin\'s main file is still in place and reads version %s; other files in the directory may have been removed.', 'digitizer-site-worker' ),
+					$on_disk
+				);
+			} else {
+				$error .= ' ' . __( 'The previous build could NOT be restored — the plugin may be missing or incomplete.', 'digitizer-site-worker' );
+			}
 		}
 
 		$out = array(
@@ -961,6 +1041,126 @@ class Aura_Worker_Updater {
 			$out['detail'] = $detail;
 		}
 		return $out;
+	}
+
+	/**
+	 * The result for a verified package that carries the version already
+	 * running, refused before anything on the site was touched (SA#104).
+	 * Same keys a failed self-update answers — `success`/`error` first, so a
+	 * caller that shows only those reads it right — with `code` beside them
+	 * and every recovery field saying nothing happened.
+	 *
+	 * @param string $old_version     The running AURA_WORKER_VERSION.
+	 * @param array  $package_version verified_package_version()'s answer.
+	 * @return array
+	 */
+	private function self_update_same_version_refused( $old_version, $package_version ) {
+		$carried = (string) ( $package_version['header'] ?? '' );
+		if ( '' === $carried ) {
+			$carried = (string) $package_version['constant'];
+		} elseif ( null !== $package_version['constant'] && $package_version['constant'] !== $carried ) {
+			$carried = sprintf( '%1$s (AURA_WORKER_VERSION %2$s)', $carried, $package_version['constant'] );
+		}
+		return array(
+			'success'        => false,
+			'error'          => sprintf(
+				/* translators: 1: the version the package carries, 2: the version already running */
+				__( 'Self-update refused before changing anything: the package carries version %1$s and SiteAgent %2$s is already running. Nothing on the site was changed — no backup was taken and no plugin files were touched.', 'digitizer-site-worker' ),
+				$carried,
+				$old_version
+			),
+			'code'           => 'aura_self_update_same_version',
+			'old_version'    => $old_version,
+			'new_version'    => $carried,
+			'installed'      => false,
+			'backed_up'      => false,
+			'health_checked' => false,
+			'rolled_back'    => false,
+			'restore_error'  => null,
+		);
+	}
+
+	/**
+	 * Whether this process can look inside a zip. A seam: ext-zip is optional
+	 * in PHP, and a test cannot unload the class.
+	 *
+	 * @return bool
+	 */
+	protected function package_inspection_available() {
+		return class_exists( 'ZipArchive' );
+	}
+
+	/**
+	 * The version a downloaded, verified package would install — read from
+	 * INSIDE the archive, without extracting anything.
+	 *
+	 * Only the entry the upgrader will put where WordPress loads this plugin
+	 * counts: `SELF_PLUGIN_FILE` under the archive's `digitizer-site-worker/`
+	 * top-level directory. A header in any other file, or this file under
+	 * another directory, is not what the site will run and decides nothing.
+	 *
+	 * @param string $zip_path The verified local package.
+	 * @return array|null { header: string|null, constant: string|null }, or null
+	 *                    when the archive or its main file cannot be read, or
+	 *                    the file names no version at all — the caller then
+	 *                    proceeds as it did before this check existed.
+	 */
+	private function verified_package_version( $zip_path ) {
+		if ( ! $this->package_inspection_available() ) {
+			return null;
+		}
+		try {
+			$zip = new ZipArchive();
+			if ( true !== $zip->open( $zip_path ) ) {
+				return null;
+			}
+			$src = $zip->getFromName( self::SELF_PLUGIN_FILE );
+			$zip->close();
+		} catch ( Throwable $e ) {
+			return null;
+		}
+		if ( ! is_string( $src ) || '' === $src ) {
+			return null;
+		}
+		$header   = $this->header_version_from_source( $src );
+		$constant = $this->constant_version_from_source( $src );
+		if ( null === $header && null === $constant ) {
+			return null;
+		}
+		return array(
+			'header'   => $header,
+			'constant' => $constant,
+		);
+	}
+
+	/**
+	 * A plugin file's `Version:` header, read the way WordPress's
+	 * get_file_data() reads it: the first 8 KB, the same pattern, the same
+	 * comment cleanup.
+	 *
+	 * @param string $src File contents.
+	 * @return string|null
+	 */
+	private function header_version_from_source( $src ) {
+		$head = str_replace( "\r", "\n", substr( (string) $src, 0, 8192 ) );
+		if ( preg_match( '/^(?:[ \t]*<\?php)?[ \t\/*#@]*Version:(.*)$/mi', $head, $m ) && '' !== $m[1] ) {
+			$version = trim( (string) preg_replace( '/\s*(?:\*\/|\?>).*/', '', $m[1] ) );
+			return '' === $version ? null : $version;
+		}
+		return null;
+	}
+
+	/**
+	 * The AURA_WORKER_VERSION a plugin file's source defines.
+	 *
+	 * @param string $src File contents.
+	 * @return string|null Null when the define cannot be found.
+	 */
+	private function constant_version_from_source( $src ) {
+		if ( preg_match( "/define\\(\\s*'AURA_WORKER_VERSION'\\s*,\\s*'([^']*)'\\s*\\)/", (string) $src, $m ) ) {
+			return $m[1];
+		}
+		return null;
 	}
 
 	/**

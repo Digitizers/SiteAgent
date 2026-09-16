@@ -123,7 +123,7 @@ class Aura_Worker_Rollback {
 	 *
 	 * @param string $plugin_slug  The plugin folder name.
 	 * @param string $backup_path  Absolute path to the backup zip.
-	 * @return array { success: bool, error?: string }
+	 * @return array { success: bool, error?: string, stage?: 'clear'|'extract' }
 	 */
 	public function restore_plugin( $plugin_slug, $backup_path ) {
 		if ( ! class_exists( 'ZipArchive' ) ) {
@@ -149,11 +149,18 @@ class Aura_Worker_Rollback {
 		// while every file the broken release ADDED is still sitting there. That
 		// is a half-restored plugin reported as a clean rollback. Better to
 		// refuse and say so than to claim a recovery that did not happen.
+		//
+		// `stage` tells the two failures apart for a caller that has to say what
+		// is on disk (SA#104): `clear` means nothing was extracted — the
+		// directory holds what was there before, less whatever the removal got
+		// to before it failed — while `extract` means the directory was removed
+		// and the backup did not fully land.
 		if ( is_dir( $plugin_dir ) && ! $this->delete_directory( $plugin_dir ) ) {
 			$zip->close();
 			return array(
 				'success' => false,
 				'error'   => 'Could not remove the installed plugin directory before restoring',
+				'stage'   => 'clear',
 			);
 		}
 
@@ -169,6 +176,7 @@ class Aura_Worker_Rollback {
 			return array(
 				'success' => false,
 				'error'   => 'Failed to extract the backup archive — the plugin directory may be incomplete',
+				'stage'   => 'extract',
 			);
 		}
 
