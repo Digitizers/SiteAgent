@@ -1945,7 +1945,10 @@ final class SelfUpdateRecoveryTest extends TestCase {
 		$this->assertTrue( $backup['success'], $backup['error'] ?? '' );
 		file_put_contents( $dir . '/main.php', '<?php // CURRENT' );
 		$before  = $this->treeOf( $dir );
-		$updater = $this->onHost( 'blocked' );
+		// Round 2: the guarded rollback is refused by restore_plugin()'s own
+		// plugins-directory preflight, not by the upgrade-directory gate.
+		$updater  = $this->onHost( 'ok', 'blocked' );
+		$rollback = $updater->recoveryHelper();
 
 		try {
 			$res = $updater->restore_plugin_guarded( $rollback, $slug, $backup['backup_path'] );
@@ -1958,7 +1961,7 @@ final class SelfUpdateRecoveryTest extends TestCase {
 			$this->assertFileExists( $dir . '/assets/x.css' );
 			$this->assertNotContains( 'SA_Test_Filesystem::delete', $GLOBALS['_mutations'] );
 
-			// SiteAgent's own guarded restore: the same, and no claim.
+			// SiteAgent's own guarded restore: the same.
 			$self_backup = $rollback->backup_plugin( $this->slug );
 			$this->assertTrue( $self_backup['success'] );
 			file_put_contents( $this->dir . '/digitizer-site-worker.php', $this->build( 'NEW BUILD', '9.9.9' ) );
@@ -1966,7 +1969,9 @@ final class SelfUpdateRecoveryTest extends TestCase {
 			$this->assertSame( 'preflight', $self['stage'] ?? null );
 			$this->assertSame( 'aura_php_writes_blocked', $self['code'] ?? null );
 			$this->assertSame( 'NEW BUILD', $this->onDisk() );
-			$this->assertNull( sa_read_option_uncached( Aura_Worker_Updater::SELF_UPDATE_LOCK ) );
+			$this->assertNull( sa_read_option_uncached( Aura_Worker_Updater::SELF_UPDATE_LOCK ), 'the claim is released' );
+			$this->assertSame( 2, $rollback->restores, 'refused inside restore_plugin(), by its preflight' );
+			$this->assertSame( 0, $updater->probes, 'the upgrade-directory probe is not asked' );
 		} finally {
 			$this->rmdir( $dir );
 		}
@@ -2405,5 +2410,58 @@ final class SelfUpdateRecoveryTest extends TestCase {
 		$this->assertTrue( $res['success'] );
 		$this->assertTrue( $res['health_check_passed'] );
 		$this->assertNull( $res['error'] );
+	}
+
+	// -----------------------------------------------------------------
+	// SA#95 fix round 2 — the guarded rollback never uses wp-content/upgrade.
+	// -----------------------------------------------------------------
+
+	public function test_r2_an_unwritable_upgrade_directory_does_not_block_a_guarded_rollback(): void {
+		// The rollback extracts an existing backup into WP_PLUGIN_DIR; its own
+		// plugins-directory preflight passes here, so the recovery must run.
+		$slug = 'sa-host-fixture-r2';
+		$dir  = $this->otherPlugin( $slug );
+		$updater  = $this->onHost( 'unwritable', 'ok' );
+		$rollback = $updater->recoveryHelper();
+		$backup   = $rollback->backup_plugin( $slug );
+		$this->assertTrue( $backup['success'] );
+		file_put_contents( $dir . '/' . $slug . '.php', '<?php // CURRENT' );
+
+		try {
+			$res = $updater->restore_plugin_guarded( $rollback, $slug, $backup['backup_path'] );
+
+			$this->assertTrue( $res['success'], (string) ( $res['error'] ?? '' ) );
+			$this->assertSame( 0, $updater->probes, 'the upgrade-directory probe is not asked' );
+			$this->assertSame( 1, $rollback->restores );
+			$this->assertStringContainsString( 'Plugin Name: Other', file_get_contents( $dir . '/' . $slug . '.php' ), 'restored' );
+
+			// SiteAgent's own guarded rollback: the same, under the claim.
+			$self_backup = $rollback->backup_plugin( $this->slug );
+			file_put_contents( $this->dir . '/digitizer-site-worker.php', $this->build( 'NEW BUILD', '9.9.9' ) );
+			$self = $updater->restore_plugin_guarded( $rollback, $this->slug, $self_backup['backup_path'] );
+			$this->assertTrue( $self['success'], (string) ( $self['error'] ?? '' ) );
+			$this->assertSame( 0, $updater->probes );
+			$this->assertSame( 'OLD BUILD', $this->onDisk() );
+			$this->assertNull( sa_read_option_uncached( Aura_Worker_Updater::SELF_UPDATE_LOCK ), 'the claim is released' );
+		} finally {
+			$this->rmdir( $dir );
+		}
+	}
+
+	public function test_r2_the_guarded_rollback_still_refuses_on_multisite_and_while_busy(): void {
+		$updater  = $this->onHost( 'unwritable', 'ok' );
+		$rollback = $updater->recoveryHelper();
+		$backup   = $rollback->backup_plugin( $this->slug );
+
+		$holder = Aura_Worker_Magic_Link::take_claim( Aura_Worker_Updater::SELF_UPDATE_LOCK, 10 * MINUTE_IN_SECONDS );
+		$busy   = $updater->restore_plugin_guarded( $rollback, $this->slug, $backup['backup_path'] );
+		$this->assertTrue( $busy['in_progress'] );
+		Aura_Worker_Magic_Link::release_claim( Aura_Worker_Updater::SELF_UPDATE_LOCK, $holder );
+
+		$GLOBALS['_is_multisite'] = true;
+		$ms = $updater->restore_plugin_guarded( $rollback, $this->slug, $backup['backup_path'] );
+		$this->assertSame( 'aura_self_update_multisite_unsupported', $ms['code'] );
+		$this->assertSame( 0, $rollback->restores );
+		$this->assertSame( 0, $updater->probes );
 	}
 }

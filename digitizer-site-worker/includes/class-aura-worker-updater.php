@@ -1555,13 +1555,14 @@ class Aura_Worker_Updater {
 				return null;
 			}
 			return $rollback->restore_plugin( $plugin_slug, $backup_path );
-		}, $busy, $refused );
+			// No upgrade-directory probe here (SA#95 round 2): a rollback never
+			// writes to wp-content/upgrade — it extracts an existing backup into
+			// WP_PLUGIN_DIR, and restore_plugin() proves exactly that directory
+			// with its own plain-PHP preflight (`stage: preflight` + code). The
+			// gate's null verdict is "not probed": multisite and the claim still
+			// apply, the upgrade path does not.
+		}, $busy, $refused, null );
 		if ( null !== $refused ) {
-			// A host refusal (SA#95) is the restore's own preflight, answered
-			// before the claim: nothing was deleted, and the stage says so.
-			if ( isset( $refused['php_writes'] ) ) {
-				$refused['stage'] = 'preflight';
-			}
 			return $refused;
 		}
 		if ( $busy || $lost ) {
