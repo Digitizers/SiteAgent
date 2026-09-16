@@ -942,6 +942,50 @@ final class SelfUpdateRecoveryTest extends TestCase {
 		}
 	}
 
+	public function test_a_first_ever_self_update_refused_early_does_not_create_the_backup_directory(): void {
+		// Codex #105 round-3 P2: the rollback helper's constructor creates
+		// wp-content/aura-backups/ with an .htaccess and index.php. Built before
+		// the download, it made "Nothing on the site was changed" false on a
+		// site's first self-update.
+		$backups = WP_CONTENT_DIR . '/aura-backups';
+		$this->rmdir( $backups );
+		$this->assertDirectoryDoesNotExist( $backups );
+		$sha = $this->packageCarrying( AURA_WORKER_VERSION );
+
+		try {
+			$res = $this->verifiedSelfUpdate( $sha );
+
+			$this->assertSame( 'aura_self_update_same_version', $res['code'] ?? null );
+			$this->assertFileDoesNotExist( $backups . '/.htaccess' );
+			$this->assertFileDoesNotExist( $backups . '/index.php' );
+			$this->assertDirectoryDoesNotExist( $backups, 'a refusal that changed nothing must not create the backup directory' );
+		} finally {
+			$this->cleanupPackages();
+		}
+	}
+
+	public function test_a_refused_download_or_digest_does_not_create_the_backup_directory_either(): void {
+		$backups = WP_CONTENT_DIR . '/aura-backups';
+		$this->rmdir( $backups );
+
+		// A failed download.
+		$GLOBALS['_download_url_result'] = new WP_Error( 'http', 'download failed' );
+		$res                             = $this->verifiedSelfUpdate( str_repeat( 'a', 64 ) );
+		$this->assertFalse( $res['success'] );
+		$this->assertDirectoryDoesNotExist( $backups );
+
+		// A digest that does not match.
+		$this->packageCarrying( '9.9.9' );
+		try {
+			$res = $this->verifiedSelfUpdate( str_repeat( 'a', 64 ) );
+			$this->assertFalse( $res['success'] );
+			$this->assertStringContainsString( 'integrity', $res['error'] );
+			$this->assertDirectoryDoesNotExist( $backups );
+		} finally {
+			$this->cleanupPackages();
+		}
+	}
+
 	public function test_a_verified_package_whose_CONSTANT_names_the_running_version_is_refused_early_too(): void {
 		$sha    = $this->packageCarrying( '9.9.9', AURA_WORKER_VERSION );
 		$before = $this->snapshotDir();

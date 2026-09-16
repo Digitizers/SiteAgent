@@ -240,15 +240,6 @@ class Aura_Worker_Updater {
 		$plugin_file = self::SELF_PLUGIN_FILE;
 		$plugin_slug = 'digitizer-site-worker';
 
-		// Under the same contract as the backup itself: anything the recovery
-		// setup does that could end the request instead of reporting failure
-		// leaves a site unable to self-update at all (Codex round-13).
-		try {
-			$rollback = new Aura_Worker_Rollback();
-		} catch ( Throwable $e ) {
-			$rollback = null;
-		}
-
 		$skin     = new Automatic_Upgrader_Skin();
 		$upgrader = new Plugin_Upgrader( $skin );
 
@@ -308,6 +299,21 @@ class Aura_Worker_Updater {
 		// means another self-update took over: stop before touching the files.
 		if ( ! $this->keep_self_update_claim( $fence ) ) {
 			return $this->self_update_claim_lost();
+		}
+
+		// The recovery helper is BUILT only here, once nothing above can refuse
+		// (Codex #105 round-3 P2): its constructor creates wp-content/aura-backups/
+		// with an .htaccess and index.php, and a refusal that says nothing on the
+		// site was changed must not have done that. Its class was loaded at the
+		// top, from the old build; only the construction moved.
+		//
+		// Under the same contract as the backup itself: anything the recovery
+		// setup does that could end the request instead of reporting failure
+		// leaves a site unable to self-update at all (Codex round-13).
+		try {
+			$rollback = new Aura_Worker_Rollback();
+		} catch ( Throwable $e ) {
+			$rollback = null;
 		}
 
 		// Back up this plugin's own directory so a bad build can be undone.
