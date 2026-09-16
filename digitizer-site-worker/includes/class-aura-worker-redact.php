@@ -221,6 +221,56 @@ class Aura_Worker_Redact {
 	}
 
 	/**
+	 * Is this request's response one an AGENT reads (spec §1.2)?
+	 *
+	 * True when it is a served REST request, not cookie-authenticated, and
+	 * either the gateway's tool execution (whoever authenticated it — the Aura
+	 * gateway runs token-only) or a route outside SiteAgent's own namespaces
+	 * reached by a logged-in user (an Application Password on `mcp/v1`, any
+	 * agent on `wp/v2`). SiteAgent's system routes are called by the Aura
+	 * server only and are never redacted; neither is a person nor the public.
+	 *
+	 * Routes compare lowercased: WordPress matches them case-insensitively (R7).
+	 *
+	 * @param mixed $request WP_REST_Request, or anything else (false).
+	 * @return bool
+	 */
+	public static function is_audience( $request ) {
+		if ( ! is_object( $request ) || ! method_exists( $request, 'get_route' ) ) {
+			return false;
+		}
+		if ( ! Aura_Worker_Rules::serving_rest() || Aura_Worker_Rules::cookie_authenticated() ) {
+			return false;
+		}
+		$route = strtolower( (string) $request->get_route() );
+		if ( self::GATEWAY_EXECUTE_ROUTE === $route ) {
+			return true;
+		}
+		if ( self::is_own_route( $route ) ) {
+			return false;
+		}
+		return is_user_logged_in();
+	}
+
+	/**
+	 * Is the route in one of SiteAgent's own namespaces? At a segment
+	 * boundary — `aura/mcpx/...` is somebody else's (the same rule
+	 * Aura_Worker_Call_Context::is_own_transport() applies).
+	 *
+	 * @param string $route Lowercased route.
+	 * @return bool
+	 */
+	private static function is_own_route( $route ) {
+		$path = ltrim( $route, '/' );
+		foreach ( Aura_Worker_Call_Context::OWN_NAMESPACES as $ns ) {
+			if ( $path === $ns || 0 === strpos( $path, $ns . '/' ) ) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
 	 * @param mixed $node       Any value.
 	 * @param int   $depth      JSON decodes already made along this path.
 	 * @param bool  $in_payload Inside a snapshot payload (carrier 3).

@@ -2704,6 +2704,32 @@ class Aura_Worker_Rules {
 	}
 
 	/**
+	 * Is a REST request being served? `REST_REQUEST`, or the test seam.
+	 *
+	 * Public for Aura_Worker_Redact (2.18.0, #419), whose audience starts
+	 * with exactly this question — one definition, so the two seams can never
+	 * disagree about it.
+	 *
+	 * @return bool
+	 */
+	public static function serving_rest() {
+		return null !== self::$rest_request_override
+			? (bool) self::$rest_request_override
+			: ( defined( 'REST_REQUEST' ) && REST_REQUEST );
+	}
+
+	/**
+	 * is_cookie_authenticated(), for Aura_Worker_Redact (2.18.0, #419): a
+	 * person in wp-admin is never redacted, and "is this a person" is decided
+	 * here and nowhere else.
+	 *
+	 * @return bool
+	 */
+	public static function cookie_authenticated() {
+		return self::is_cookie_authenticated();
+	}
+
+	/**
 	 * Is this a REST request from an agent — not a human, not the public, not
 	 * SiteAgent itself?
 	 *
@@ -2743,10 +2769,7 @@ class Aura_Worker_Rules {
 	 * @return bool
 	 */
 	private static function is_agent_rest_request( $request = null, $require_identity = true ) {
-		$is_rest = null !== self::$rest_request_override
-			? (bool) self::$rest_request_override
-			: ( defined( 'REST_REQUEST' ) && REST_REQUEST );
-		if ( ! $is_rest ) {
+		if ( ! self::serving_rest() ) {
 			return false;
 		}
 		if ( $require_identity && ! is_user_logged_in() ) {
