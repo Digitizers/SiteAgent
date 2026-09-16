@@ -4,7 +4,7 @@ Tags: ai, automation, maintenance, updates, wordpress management
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.17.5
+Stable tag: 2.18.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -252,6 +252,12 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 7. Connections: provider connections (Cloudways, Cloudflare, Bunny, Hostinger, Vultr, xCloud) with resource counts, status, and credential-rotation reminders.
 
 == Changelog ==
+
+= 2.18.0 =
+* Security: webhook endpoints no longer leave the site in a REST response an AI agent reads — Aura's gateway tools, an MCP client using an Application Password, or any logged-in non-browser caller. Make, Zapier, Slack, Discord, IFTTT and Telegram hook URLs, and Elementor Pro form webhooks on any host, are replaced with `aura-redacted:v1:<kind>`, including inside Elementor page data and snapshot payloads. People in wp-admin, public visitors and Aura's own system calls see the real values.
+* An agent write that carries a redacted placeholder is refused (`aura_redacted_placeholder`): leave that field out and the stored value is kept.
+* Aura's own page snapshots stay complete: a signed header proves the read is Aura's (`aura_unredacted_grant_invalid` when it does not verify).
+* `audit_rules` reports `redacted_24h` and `placeholder_refused_24h`; `/status` reports `redaction`.
 
 = 2.17.5 =
 * Plugin updates: on a host where PHP may not write or delete `.php` files (WP Engine is the proven case), every Aura-driven plugin change — the self-update, a single or batch plugin update, `update_plugin_safely` — is refused before anything is touched, with `code: aura_php_writes_blocked` (or `aura_upgrade_dir_unwritable` when `wp-content/upgrade` cannot be written at all). Such a host failed every update at unpack, and the restore that followed deleted the plugin's non-PHP files: SiteAgent's own `readme.txt`, and a plugin's CSS, JS and images. The check creates and removes a temporary file, and runs only when WordPress writes files directly.

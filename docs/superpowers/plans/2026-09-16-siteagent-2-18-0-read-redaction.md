@@ -3194,3 +3194,18 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 - **Placeholder scan.** No TBD/TODO; every code step carries the code.
 - **Name consistency.** `redact`, `redact_text`, `is_audience`, `filter_echo`, `before_callbacks`, `grant_shape`, `holds_placeholder`, `status_fragment`, `record_redacted`, `record_placeholder_refused`, `reset_for_tests`; `Aura_Worker_Rules::serving_rest`, `cookie_authenticated`, `bump_counter`; constants `REDACTED_COUNTER`, `PLACEHOLDER_REFUSED_COUNTER`, `STATUS_VERSION` — used identically in every task.
 - **Dry run.** The assembled class, the Rules/API/tool/bootstrap edits and all six new test files were run while writing this plan against the SiteAgent test bootstrap (PHP 8.5, PHPUnit 10.5 classes, in-memory file patches — nothing written to the repo): all 159 new test cases passed; after the Codex round-1 fixes (IFTTT trigger URLs, URL tail boundary) only `RedactDetectorsTest` was re-run — 76/76 after round 1, 84/84 after round 2 (mangled property names, encoded HTML delimiters); after round 3 (URL keys) all six new files plus the changed `AuditRulesTest` were re-run — 222/222; after round 4 (receiver URL shapes) `RedactDetectorsTest` was re-run — 122/122, and the existing suite showed no new failure against an unpatched baseline under the same runner. `composer test` / `composer lint` on the real branch remain the gate, including PHP 7.4.
+
+## Execution notes (deviations from the plan text)
+
+Implementation (tasks 1–6) diverged from this plan's original code in the ways below — reviewed and ruled on during implementation (see `progress.md`), and verified against the shipped class before writing the Task 7 docs. One line each, with the commit that introduced it:
+
+- Receiver URLs are redacted with or without a scheme (bare and protocol-relative too), with a strict host boundary (`d051ab7`).
+- A trailing FQDN dot and a bare Telegram token URL (no trailing slash/method) are also covered (`d051ab7`).
+- `content` is treated as the MCP text carrier only when it is a list; an associative value under `content` (e.g. a snapshot answer) falls through to the ordinary walk instead of being skipped (`d051ab7`).
+- A snapshot answer nested under `_elementor_data` or `_elementor_page_settings` (rather than the ordinary `{ existed, value }` meta shape) is also checked (`d051ab7`).
+- `STRUCTURAL_KEYS` (`content`) is part of the opaque-object key check inside a snapshot payload, alongside `SECRET_KEYS` and `JSON_META_KEYS` (`d051ab7`).
+- The audience is decided with the gateway execute route matched the way core dispatches it (`is_gateway_execute_route()`: case-insensitive, `$` tolerating one trailing `\n`), and on that one route the cookie flag is not consulted at all; everywhere else the cookie check still applies (`068665a`).
+- The MCP grant row treats an `isset( $body[0] )` body as a batch (the adapter's own test) and trims the tool name (the adapter trims it too) (`63735c3`).
+- The MCP grant row resolves the call the way the adapter's `extract_params()` does — `params['params']` when present, else `params` — so the grant binds the arguments actually executed (`8648518`).
+- The write guard adds an extra view of the form body core parses lazily (non-POST, form-encoded or missing content type, no route `args`), since the handler's `get_param()` would still see it (`8648518`).
+- The payload byte scan un-escapes only one level of `\u00XX` before its second placeholder check; file params (`get_file_params()`) are out of scope for the guard (`8648518`).
