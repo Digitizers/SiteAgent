@@ -1639,6 +1639,7 @@ if ( ! function_exists( 'get_plugin_data' ) ) {
 
 if ( ! function_exists( 'download_url' ) ) {
 	function download_url( $url, $timeout = 300, $signature_verification = false ) {
+		$GLOBALS['_download_url_calls'][] = $url; // witnessed, so a refusal can prove it downloaded nothing (SA#95)
 		return isset( $GLOBALS['_download_url_result'] ) ? $GLOBALS['_download_url_result'] : '';
 	}
 }

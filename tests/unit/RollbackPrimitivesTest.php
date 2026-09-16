@@ -698,4 +698,73 @@ final class RollbackPrimitivesTest extends TestCase {
 		$this->assertCount( 2, $listed, 'list_backups must still recognise the suffixed names' );
 		$this->assertSame( $this->slug, $listed[0]['plugin_slug'] );
 	}
+
+	/** A recovery helper whose pre-delete host probe answers $verdict. */
+	private function rollbackOnHost( string $verdict ): Aura_Worker_Rollback {
+		return new class( $verdict ) extends Aura_Worker_Rollback {
+			public $probes = 0;
+			private $v;
+			public function __construct( $v ) {
+				$this->v = $v;
+				parent::__construct();
+			}
+			protected function host_php_writes_verdict() {
+				$this->probes++;
+				return $this->v;
+			}
+		};
+	}
+
+	/** @return array<string,array{0:string,1:string}> */
+	public static function refusing_hosts(): array {
+		return array(
+			'php writes blocked'   => array( 'blocked', 'aura_php_writes_blocked' ),
+			'upgrade dir unwritable' => array( 'unwritable', 'aura_upgrade_dir_unwritable' ),
+		);
+	}
+
+	/**
+	 * @dataProvider refusing_hosts
+	 */
+	public function test_a_restore_on_a_host_that_would_not_let_it_finish_never_starts_the_delete( string $verdict, string $code ): void {
+		// SA#95: on WP Engine the recursive delete removed every non-PHP file,
+		// then failed on the first .php one — `stage: clear`, and the plugin's
+		// readme, CSS, JS and images gone for nothing.
+		mkdir( $this->dir . '/assets', 0777, true );
+		file_put_contents( $this->dir . '/readme.txt', 'readme' );
+		file_put_contents( $this->dir . '/assets/x.css', 'body{}' );
+		$rollback = $this->rollbackOnHost( $verdict );
+		$backup   = $rollback->backup_plugin( $this->slug );
+		$this->assertTrue( $backup['success'] );
+		file_put_contents( $this->dir . '/main.php', 'REPLACED' );
+		$GLOBALS['_mutations'] = array();
+
+		try {
+			$restore = $rollback->restore_plugin( $this->slug, $backup['backup_path'] );
+
+			$this->assertFalse( $restore['success'] );
+			$this->assertSame( 'preflight', $restore['stage'] ?? null );
+			$this->assertSame( $code, $restore['code'] ?? null );
+			$this->assertStringContainsString( 'not touched', $restore['error'] );
+			$this->assertSame( 1, $rollback->probes );
+			$this->assertSame( 'REPLACED', file_get_contents( $this->dir . '/main.php' ), 'nothing extracted' );
+			$this->assertFileExists( $this->dir . '/readme.txt' );
+			$this->assertFileExists( $this->dir . '/assets/x.css' );
+			$this->assertNotContains( 'SA_Test_Filesystem::delete', $GLOBALS['_mutations'] );
+		} finally {
+			$this->removeTree( $this->dir . '/assets' );
+		}
+	}
+
+	public function test_a_restore_on_a_host_whose_probe_answers_ok_proceeds(): void {
+		$rollback = $this->rollbackOnHost( 'ok' );
+		$backup   = $rollback->backup_plugin( $this->slug );
+		file_put_contents( $this->dir . '/main.php', 'REPLACED' );
+
+		$restore = $rollback->restore_plugin( $this->slug, $backup['backup_path'] );
+
+		$this->assertTrue( $restore['success'] );
+		$this->assertSame( 1, $rollback->probes );
+		$this->assertSame( 'ORIGINAL', file_get_contents( $this->dir . '/main.php' ) );
+	}
 }

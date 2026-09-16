@@ -9,6 +9,8 @@
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
+require_once __DIR__ . '/class-aura-worker-host-probe.php';
+
 class Aura_Worker_Rollback {
 
 	/**
@@ -123,7 +125,7 @@ class Aura_Worker_Rollback {
 	 *
 	 * @param string $plugin_slug  The plugin folder name.
 	 * @param string $backup_path  Absolute path to the backup zip.
-	 * @return array { success: bool, error?: string, stage?: 'clear'|'extract' }
+	 * @return array { success: bool, error?: string, stage?: 'preflight'|'clear'|'extract', code?: string }
 	 */
 	public function restore_plugin( $plugin_slug, $backup_path ) {
 		if ( ! class_exists( 'ZipArchive' ) ) {
@@ -139,6 +141,24 @@ class Aura_Worker_Rollback {
 			return array( 'success' => false, 'error' => 'Failed to open backup archive' );
 		}
 
+		// Never start a delete this host will not let finish (SA#95). On a host
+		// that refuses .php writes, the recursive delete below removed every
+		// other file — readme, CSS, JS, images — and then stopped at the first
+		// .php one. So the host is asked first, and anything but a proven `ok`
+		// refuses with nothing deleted: `stage: preflight`.
+		$refusal = Aura_Worker_Host_Probe::refusal( $this->host_php_writes_verdict() );
+		if ( null !== $refusal ) {
+			$zip->close();
+			return array(
+				'success' => false,
+				'stage'   => 'preflight',
+				'code'    => $refusal['code'],
+				'error'   => 'aura_php_writes_blocked' === $refusal['code']
+					? 'Restore refused before deleting anything: this host does not let PHP write or delete .php files, so the backup could not be put back. The plugin directory was not touched.'
+					: 'Restore refused before deleting anything: the upgrade directory (wp-content/upgrade) is not writable. The plugin directory was not touched.',
+			);
+		}
+
 		// Open the archive BEFORE deleting anything. The old order deleted the
 		// directory first and then discovered it could not read the backup —
 		// turning a recoverable state into an empty one.
@@ -150,8 +170,9 @@ class Aura_Worker_Rollback {
 		// is a half-restored plugin reported as a clean rollback. Better to
 		// refuse and say so than to claim a recovery that did not happen.
 		//
-		// `stage` tells the two failures apart for a caller that has to say what
-		// is on disk (SA#104): `clear` means nothing was extracted — the
+		// `stage` tells the failures apart for a caller that has to say what
+		// is on disk (SA#104): `preflight` (above, SA#95) means nothing at all
+		// was deleted, `clear` means nothing was extracted — the
 		// directory holds what was there before, less whatever the removal got
 		// to before it failed — while `extract` means the directory was removed
 		// and the backup did not fully land.
@@ -190,6 +211,16 @@ class Aura_Worker_Rollback {
 		$this->invalidate_opcache( $plugin_dir );
 
 		return array( 'success' => true );
+	}
+
+	/**
+	 * The host probe verdict restore_plugin() consults before deleting. A
+	 * seam: the unit suite cannot fake a real filesystem permission.
+	 *
+	 * @return string 'ok', 'blocked' or 'unwritable'.
+	 */
+	protected function host_php_writes_verdict() {
+		return ( new Aura_Worker_Host_Probe() )->run();
 	}
 
 	/**

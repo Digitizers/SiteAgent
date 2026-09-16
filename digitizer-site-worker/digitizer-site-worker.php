@@ -67,6 +67,7 @@ require_once AURA_WORKER_DIR . 'includes/boot-beacon.php';
 require_once AURA_WORKER_DIR . 'includes/credential-rules.php';
 require_once AURA_WORKER_DIR . 'includes/class-aura-worker.php';
 require_once AURA_WORKER_DIR . 'includes/class-aura-worker-api.php';
+require_once AURA_WORKER_DIR . 'includes/class-aura-worker-host-probe.php';
 require_once AURA_WORKER_DIR . 'includes/class-aura-worker-updater.php';
 require_once AURA_WORKER_DIR . 'includes/class-aura-worker-security.php';
 require_once AURA_WORKER_DIR . 'includes/class-aura-worker-health.php';

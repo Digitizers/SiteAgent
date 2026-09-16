@@ -12,6 +12,8 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
+require_once __DIR__ . '/class-aura-worker-host-probe.php';
+
 class Aura_Worker_Updater {
 
 	/**
@@ -32,6 +34,64 @@ class Aura_Worker_Updater {
 	 * `static::` so a test can zero it.
 	 */
 	const LEASE_HEARTBEAT_SECONDS = 60;
+
+	/**
+	 * Most entries plugin_manifest() walks before giving up (SA#95). A plugin
+	 * bigger than this gets no manifest, and its failed install is restored
+	 * exactly as before.
+	 */
+	const MANIFEST_MAX_ENTRIES = 20000;
+
+	/**
+	 * Most file bytes plugin_manifest() hashes before giving up (SA#95), with
+	 * the same fallback as MANIFEST_MAX_ENTRIES.
+	 */
+	const MANIFEST_MAX_BYTES = 67108864;
+
+	/**
+	 * Can PHP write and delete a `.php` file on this host (SA#95)? Runs the
+	 * probe (Aura_Worker_Host_Probe::run()), records the verdict in
+	 * `aura_worker_host_probe`, and answers it.
+	 *
+	 * @return string 'ok', 'blocked' or 'unwritable'.
+	 */
+	public static function host_php_writes() {
+		return ( new Aura_Worker_Host_Probe() )->run();
+	}
+
+	/**
+	 * The probe verdict every plugin-file mutation consults. A seam: the unit
+	 * suite cannot fake a real filesystem permission.
+	 *
+	 * @return string
+	 */
+	protected function host_php_writes_verdict() {
+		return self::host_php_writes();
+	}
+
+	/**
+	 * The recovery helper a self-update uses. A seam, so a test can watch
+	 * which restores ran.
+	 *
+	 * @return Aura_Worker_Rollback
+	 */
+	protected function new_rollback() {
+		return new Aura_Worker_Rollback();
+	}
+
+	/**
+	 * The host refusal for a verdict, or null when the host lets PHP write
+	 * `.php` files. Probes when no verdict is given.
+	 *
+	 * @param string|null $verdict A verdict already taken, or null to probe now.
+	 * @return array|null
+	 */
+	private function host_refusal( $verdict = null ) {
+		if ( null === $verdict ) {
+			$verdict = $this->host_php_writes_verdict();
+		}
+		return Aura_Worker_Host_Probe::refusal( $verdict );
+	}
 
 	/**
 	 * Load required WordPress upgrade files.
@@ -188,6 +248,25 @@ class Aura_Worker_Updater {
 			return $refused; // SA#79 — before any claim, download or write
 		}
 
+		// SA#95: a host that will not let PHP write or delete .php files fails
+		// every install partway, and the restore after it deleted the plugin's
+		// other files. Asked after the multisite refusal and before any claim,
+		// download, backup or write — the probe's own two files aside.
+		$host = $this->host_refusal();
+		if ( null !== $host ) {
+			return array_merge(
+				$host,
+				array(
+					'old_version'    => AURA_WORKER_VERSION,
+					'installed'      => false,
+					'backed_up'      => false,
+					'health_checked' => false,
+					'rolled_back'    => false,
+					'restore_error'  => null,
+				)
+			);
+		}
+
 		// ONE self-update at a time per site (Codex round-20 P1). The verdict
 		// rests on a single nonce option: a second request overlapping the first
 		// overwrote it before the first loopback wrote its beacon, so the first
@@ -311,7 +390,7 @@ class Aura_Worker_Updater {
 		// setup does that could end the request instead of reporting failure
 		// leaves a site unable to self-update at all (Codex round-13).
 		try {
-			$rollback = new Aura_Worker_Rollback();
+			$rollback = $this->new_rollback();
 		} catch ( Throwable $e ) {
 			$rollback = null;
 		}
@@ -335,6 +414,11 @@ class Aura_Worker_Updater {
 		if ( ! $this->keep_self_update_claim( $fence ) ) {
 			return $this->self_update_claim_lost();
 		}
+
+		// What the directory looks like right before install() (SA#95): a
+		// failed install that changed nothing needs no restore, and on a host
+		// that refuses .php deletes a restore would only destroy the rest.
+		$manifest = $this->plugin_manifest( WP_PLUGIN_DIR . '/' . $plugin_slug );
 
 		// Install from the verified local file (or the URL when no digest given).
 		// Heartbeaten from inside (SA#80): the install is the longest phase, and
@@ -372,6 +456,7 @@ class Aura_Worker_Updater {
 				$plugin_file,
 				$backup_path,
 				$old_version,
+				$manifest,
 				$result->get_error_message()
 			);
 		}
@@ -385,6 +470,7 @@ class Aura_Worker_Updater {
 				$plugin_file,
 				$backup_path,
 				$old_version,
+				$manifest,
 				__( 'Self-update failed — filesystem error.', 'digitizer-site-worker' ),
 				$last_msg
 			);
@@ -419,6 +505,7 @@ class Aura_Worker_Updater {
 				$plugin_file,
 				$backup_path,
 				$old_version,
+				$manifest,
 				__( 'Self-update installed an archive without a readable main plugin file.', 'digitizer-site-worker' )
 			);
 		}
@@ -439,6 +526,7 @@ class Aura_Worker_Updater {
 				$plugin_file,
 				$backup_path,
 				$old_version,
+				$manifest,
 				sprintf(
 					/* translators: 1: header version, 2: constant version or "(missing)" */
 					__( 'Self-update installed a build whose header (%1$s) and AURA_WORKER_VERSION constant (%2$s) disagree.', 'digitizer-site-worker' ),
@@ -480,7 +568,7 @@ class Aura_Worker_Updater {
 					$new_version,
 					WP_PLUGIN_DIR . '/' . $plugin_slug
 				);
-			$out         = $this->self_update_install_failed( $rollback, $plugin_slug, $plugin_file, $backup_path, $old_version, $message );
+			$out         = $this->self_update_install_failed( $rollback, $plugin_slug, $plugin_file, $backup_path, $old_version, $manifest, $message );
 			$out['code'] = $not_replaced ? 'aura_self_update_not_replaced' : 'aura_self_update_version_unchanged';
 			return $out;
 		}
@@ -996,11 +1084,36 @@ class Aura_Worker_Updater {
 	 * @param Aura_Worker_Rollback $rollback    Loaded before the install.
 	 * @param string               $plugin_slug This plugin's directory name.
 	 * @param string|null          $backup_path Backup zip, or null if none was made.
+	 * @param array|null           $manifest    plugin_manifest() taken right before
+	 *                                          install(), or null if it could not be.
 	 * @param string               $error       Message describing the failure.
 	 * @param string               $detail      Optional upgrader detail.
 	 * @return array
 	 */
-	private function self_update_install_failed( $rollback, $plugin_slug, $plugin_file, $backup_path, $old_version, $error, $detail = '' ) {
+	private function self_update_install_failed( $rollback, $plugin_slug, $plugin_file, $backup_path, $old_version, $manifest, $error, $detail = '' ) {
+		// SA#95: an install that failed before it touched the directory left
+		// the previous build exactly where it was. Restoring it anyway starts
+		// with a recursive delete — on a host that refuses .php deletes, that
+		// removed every other file and then stopped. Only a manifest that was
+		// taken, and still matches, skips the restore; anything else restores
+		// as before.
+		if ( null !== $backup_path && null !== $rollback && null !== $manifest
+			&& $manifest === $this->plugin_manifest( WP_PLUGIN_DIR . '/' . $plugin_slug ) ) {
+			$out = array(
+				'success'         => false,
+				'error'           => $error . ' ' . __( 'The install failed before it changed any file in the plugin directory, so nothing was restored: the previous build is intact.', 'digitizer-site-worker' ),
+				'backed_up'       => true,
+				'health_checked'  => false,
+				'rolled_back'     => false,
+				'restore_skipped' => 'unchanged',
+				'restore_error'   => null,
+			);
+			if ( '' !== $detail ) {
+				$out['detail'] = $detail;
+			}
+			return $out;
+		}
+
 		$rb            = $this->attempt_rollback( $rollback, $plugin_slug, $plugin_file, $backup_path, $old_version );
 		$restored      = $rb['restored'];
 		$restore_error = $rb['error'];
@@ -1016,9 +1129,23 @@ class Aura_Worker_Updater {
 		// WordPress loads is still there and readable, say that, with the version
 		// it reads, instead of calling the plugin missing. No readable main file
 		// is the missing-plugin case, and keeps the warning.
+		//
+		// And a restore refused by its own preflight (SA#95, `stage: preflight`)
+		// deleted nothing at all: the directory is exactly what the failed
+		// install left there.
 		if ( null !== $backup_path && ! $restored ) {
-			$on_disk = 'clear' === $rb['stage'] ? $this->installed_version( $plugin_file ) : null;
-			if ( null !== $on_disk && '' !== $on_disk ) {
+			$preflight = 'preflight' === $rb['stage'];
+			$on_disk   = ( 'clear' === $rb['stage'] || $preflight ) ? $this->installed_version( $plugin_file ) : null;
+			if ( $preflight ) {
+				$error .= ' ' . __( 'The previous build was not restored: the restore refused before deleting anything, because this host does not let it write and delete the plugin\'s files. The plugin directory holds what the failed install left there.', 'digitizer-site-worker' );
+				$error .= ' ' . ( ( null !== $on_disk && '' !== $on_disk )
+					? sprintf(
+						/* translators: %s: the version the plugin's main file reads now */
+						__( 'The plugin\'s main file is in place and reads version %s.', 'digitizer-site-worker' ),
+						$on_disk
+					)
+					: __( 'The plugin\'s main file could not be read — the plugin may be missing or incomplete.', 'digitizer-site-worker' ) );
+			} elseif ( null !== $on_disk && '' !== $on_disk ) {
 				$error .= ' ' . sprintf(
 					/* translators: %s: the version the plugin's main file reads now */
 					__( 'The previous build was not restored: the installed plugin directory could not be removed, so the backup was not extracted over it. The plugin\'s main file is still in place and reads version %s; other files in the directory may have been removed.', 'digitizer-site-worker' ),
@@ -1040,6 +1167,75 @@ class Aura_Worker_Updater {
 		if ( '' !== $detail ) {
 			$out['detail'] = $detail;
 		}
+		return $out;
+	}
+
+	/**
+	 * A bounded description of a plugin directory (SA#95): for every entry,
+	 * its type, size, mtime, mode and — for a file — a hash of its bytes; a
+	 * link by its target, never followed. Equal manifests before and after a
+	 * failed install mean the install changed nothing there.
+	 *
+	 * The hash and mode go beyond "size and mtime" on purpose: mtime is whole
+	 * seconds, and a same-size rewrite inside the second the manifest was
+	 * taken would otherwise read as unchanged and skip a restore that was
+	 * owed. A mismatch only ever costs a restore that would have run anyway.
+	 * The bound (entries and bytes) keeps it cheap: SiteAgent itself — the
+	 * one plugin this runs for — is well under a megabyte.
+	 *
+	 * @param string $dir Absolute plugin directory.
+	 * @return array|null Null when the walk could not finish, or exceeded
+	 *                    MANIFEST_MAX_ENTRIES — the caller then restores as
+	 *                    it always did.
+	 */
+	private function plugin_manifest( $dir ) {
+		clearstatcache();
+		try {
+			if ( is_link( $dir ) ) {
+				return array( '' => 'l:' . (string) readlink( $dir ) );
+			}
+			if ( ! is_dir( $dir ) ) {
+				return array( '' => 'absent' );
+			}
+			$bytes    = 0;
+			$max      = static::MANIFEST_MAX_BYTES;
+			$describe = static function ( $path, $is_link, $is_dir ) use ( &$bytes, $max ) {
+				if ( $is_link ) {
+					return 'l:' . (string) readlink( $path );
+				}
+				$st = stat( $path );
+				if ( false === $st ) {
+					throw new RuntimeException( 'stat failed' );
+				}
+				if ( $is_dir ) {
+					return 'd:' . $st['mode'];
+				}
+				$bytes += (int) $st['size'];
+				if ( $bytes > $max ) {
+					throw new RuntimeException( 'too large' );
+				}
+				$hash = is_readable( $path ) ? @hash_file( 'md5', $path ) : false; // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+				if ( false === $hash ) {
+					throw new RuntimeException( 'unreadable' );
+				}
+				return 'f:' . $st['size'] . ':' . $st['mtime'] . ':' . $st['mode'] . ':' . $hash;
+			};
+			$out      = array( '' => $describe( $dir, false, true ) );
+			$iterator = new RecursiveIteratorIterator(
+				new RecursiveDirectoryIterator( $dir, RecursiveDirectoryIterator::SKIP_DOTS ),
+				RecursiveIteratorIterator::SELF_FIRST
+			);
+			foreach ( $iterator as $entry ) {
+				if ( count( $out ) > static::MANIFEST_MAX_ENTRIES ) {
+					return null;
+				}
+				$path = $entry->getPathname();
+				$out[ substr( $path, strlen( $dir ) ) ] = $describe( $path, $entry->isLink(), $entry->isDir() );
+			}
+		} catch ( Throwable $e ) {
+			return null;
+		}
+		ksort( $out );
 		return $out;
 	}
 
@@ -1298,6 +1494,11 @@ class Aura_Worker_Updater {
 			return $rollback->restore_plugin( $plugin_slug, $backup_path );
 		}, $busy, $refused );
 		if ( null !== $refused ) {
+			// A host refusal (SA#95) is the restore's own preflight, answered
+			// before the claim: nothing was deleted, and the stage says so.
+			if ( isset( $refused['php_writes'] ) ) {
+				$refused['stage'] = 'preflight';
+			}
 			return $refused;
 		}
 		if ( $busy || $lost ) {
@@ -1325,14 +1526,25 @@ class Aura_Worker_Updater {
 	 *                              claim was taken) so it can renew the lease
 	 *                              between long phases (SA#80).
 	 * @param bool     $busy        Out: true when refused for a held claim.
-	 * @param array|null $refused   Out: the SA#79 multisite refusal, or null.
+	 * @param array|null $refused   Out: the SA#79 multisite refusal, the SA#95
+	 *                              host refusal, or null.
+	 * @param string|null $verdict  A host probe verdict the caller already
+	 *                              took (the batch probes once), or null to
+	 *                              probe here.
 	 * @return mixed $work's return, or null when busy or refused.
 	 */
-	private function guarding_self( $plugin_file, $work, &$busy, &$refused = null ) {
+	private function guarding_self( $plugin_file, $work, &$busy, &$refused = null, $verdict = null ) {
 		$busy    = false;
 		$refused = $this->self_mutation_refusal( $plugin_file );
 		if ( null !== $refused ) {
 			return null; // SA#79: nothing runs, no claim is taken
+		}
+		// SA#95: every plugin, not only this one — the host refuses .php
+		// writes for all of them. After the multisite refusal, before the
+		// claim and the work.
+		$refused = $this->host_refusal( $verdict );
+		if ( null !== $refused ) {
+			return null;
 		}
 		if ( self::SELF_PLUGIN_FILE !== $plugin_file ) {
 			return $work( '' ); // no claim: another plugin's files are not ours to serialise
@@ -1618,8 +1830,14 @@ class Aura_Worker_Updater {
 		require_once plugin_dir_path( __FILE__ ) . 'class-aura-worker-health.php';
 		require_once plugin_dir_path( __FILE__ ) . 'class-aura-worker-rollback.php';
 
+		// SA#95: one probe for the whole batch, taken before the recovery
+		// helper is built — its constructor may create the backup directory,
+		// and a host that refuses .php writes refuses every entry anyway.
+		$verdict  = $this->host_php_writes_verdict();
+		$refusing = null !== Aura_Worker_Host_Probe::refusal( $verdict );
+
 		$results  = array();
-		$rollback = new Aura_Worker_Rollback();
+		$rollback = $refusing ? null : new Aura_Worker_Rollback();
 		$health   = new Aura_Worker_Health();
 		$chunks   = array_chunk( $plugins, max( 1, (int) $chunk_size ) );
 
@@ -1630,12 +1848,13 @@ class Aura_Worker_Updater {
 				// and says why, and the rest of the batch is unaffected.
 				$entry = $this->guarding_self( $plugin_file, function ( $fence ) use ( $plugin_file, $rollback, $health, $create_backup ) {
 					return $this->batch_update_one( $plugin_file, $rollback, $health, $create_backup, $fence );
-				}, $busy, $refused );
+				}, $busy, $refused, $verdict );
 				if ( null !== $refused ) {
 					$entry = array(
 						'plugin' => $plugin_file,
 						'status' => 'failed',
 						'detail' => $refused['error'],
+						'code'   => $refused['code'],
 					);
 				} elseif ( $busy ) {
 					$entry = array(
@@ -1655,7 +1874,9 @@ class Aura_Worker_Updater {
 		}
 
 		// Cleanup old backups after all chunks.
-		$rollback->cleanup_old_backups();
+		if ( $rollback ) {
+			$rollback->cleanup_old_backups();
+		}
 
 		// Build summary.
 		$summary = array(
