@@ -4320,6 +4320,7 @@ require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-api.php';
 require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-magic-link.php';
 require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-call-context.php';
 require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-rules.php';
+require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-redact.php';
 require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-abilities.php';
 require_once SA_PLUGIN_DIR . '/includes/credential-rules.php';
 require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-unbind.php';
