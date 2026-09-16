@@ -46,7 +46,7 @@
 - **R13 — counters go through `Aura_Worker_Rules::bump_counter()`**, a public wrapper over the private `bump()` that accepts only the four known prefixes; the raw-SQL writer count `UninstallCoverageTest` acknowledges for `class-aura-worker-rules.php` (5) is unchanged, and both new prefixes sit under `aura_worker_`, which `uninstall.php` already sweeps.
 - **R14 — objects in response data.** `stdClass` and other plain objects are walked by public properties and replaced with a `stdClass` only when something changed (the JSON output is the same); `JsonSerializable` is walked through `jsonSerialize()`.
 - **R15 — `arguments` must be a JSON object.** Absent or `null` → `{}`; a non-empty list or a scalar → the shape is not recognised (header ignored, response redacted).
-- **R16 — the URL patterns are a superset of the spec's.** They also accept optional `userinfo@` and `:port`, any number of backslashes before a slash, and are case-insensitive. IFTTT also matches `/trigger/<event>/[json/]with/key/<key>` (Codex r1 P1 on SiteAgent#109). The URL tail stops before `)`, `]`, `}`, and a match's trailing `.,;:!?` are handed back to the text (Codex r1 P2); the tail also stops before an HTML-encoded quote or angle bracket (`&quot;`, `&#39;`, `&gt;`, `&#x3c;`, …), while a bare `&` stays in the URL (Codex r2 P2). A pathological input (e.g. a million `a&`) can exhaust PCRE's backtrack limit; R9 then fails the whole string closed. A private/protected property's mangled name counts as the key name in the opaque-object check (Codex r2 P1). `https://hooks.zapier.com@evil.tld/` does not match (the host is `evil.tld`).
+- **R16 — the URL patterns are a superset of the spec's.** They also accept optional `userinfo@` and `:port`, any number of backslashes before a slash, and are case-insensitive. IFTTT also matches `/trigger/<event>/[json/]with/key/<key>` (Codex r1 P1 on SiteAgent#109). The URL tail stops before `)`, `]`, `}`, and a match's trailing `.,;:!?` are handed back to the text (Codex r1 P2); the tail also stops before an HTML-encoded quote or angle bracket (`&quot;`, `&#39;`, `&gt;`, `&#x3c;`, …), while a bare `&` stays in the URL (Codex r2 P2). A pathological input (e.g. a million `a&`) can exhaust PCRE's backtrack limit; R9 then fails the whole string closed. A private/protected property's mangled name counts as the key name in the opaque-object check (Codex r2 P1). String keys and property names get the URL detector too, with `#2`, `#3`, … on a collision so no value is lost, and a placeholder used as a key refuses a write (Codex r3 P1). `https://hooks.zapier.com@evil.tld/` does not match (the host is `evil.tld`).
 
 ---
 
@@ -412,6 +412,61 @@ final class RedactDetectorsTest extends TestCase {
 	public function test_a_carrier_with_no_match_is_returned_byte_for_byte(): void {
 		$post = array( 'meta' => array( '_elementor_data' => '[ {"id": "a", "settings": {"title": "שלום"}} ]' ) );
 		$this->assertSame( $post, Aura_Worker_Redact::redact( $post, $n ), 'no re-encode: spacing and escapes intact' );
+		$this->assertSame( 0, $n );
+	}
+
+	public function test_a_url_used_as_a_key_is_redacted(): void {
+		$data = array( 'first' => 1, 'https://hooks.zapier.com/hooks/catch/1/' => array( 'active' => true ), 'last' => 2 );
+		$out  = Aura_Worker_Redact::redact( $data, $n );
+		$this->assertSame( 1, $n );
+		$this->assertSame( array( 'first' => 1, 'aura-redacted:v1:zapier' => array( 'active' => true ), 'last' => 2 ), $out, 'order kept' );
+	}
+
+	public function test_colliding_url_keys_keep_every_value(): void {
+		$data = array(
+			'https://hooks.zapier.com/hooks/catch/1/' => 'a',
+			'aura-redacted:v1:zapier#2'               => 'stays',
+			'https://hooks.zapier.com/hooks/catch/2/' => 'b',
+			'https://hooks.zapier.com/hooks/catch/3/' => 'c',
+		);
+		$out = Aura_Worker_Redact::redact( $data, $n );
+		$this->assertSame( 3, $n );
+		$this->assertSame(
+			array(
+				'aura-redacted:v1:zapier'   => 'a',
+				'aura-redacted:v1:zapier#2' => 'stays',
+				'aura-redacted:v1:zapier#3' => 'b',
+				'aura-redacted:v1:zapier#4' => 'c',
+			),
+			$out
+		);
+	}
+
+	public function test_two_url_keys_become_the_placeholder_and_its_second(): void {
+		$out = Aura_Worker_Redact::redact( array( 'https://hooks.zapier.com/hooks/catch/1/' => 1, 'https://hooks.zapier.com/hooks/catch/2/' => 2 ), $n );
+		$this->assertSame( 2, $n );
+		$this->assertSame( array( 'aura-redacted:v1:zapier' => 1, 'aura-redacted:v1:zapier#2' => 2 ), $out );
+	}
+
+	public function test_a_url_property_name_on_an_object_is_redacted(): void {
+		$obj = new stdClass();
+		$obj->{'https://hook.eu1.make.com/abc123'} = 'on';
+		$obj->name = 'x';
+		$out = Aura_Worker_Redact::redact( array( 'hooks' => $obj ), $n );
+		$this->assertSame( 1, $n );
+		$this->assertSame( '{"hooks":{"aura-redacted:v1:make":"on","name":"x"}}', wp_json_encode( $out ) );
+	}
+
+	public function test_url_keys_inside_a_carrier_are_redacted(): void {
+		$post = array( '_elementor_data' => '{"https:\\/\\/hooks.slack.com\\/services\\/T\\/B\\/X":1}' );
+		$out  = Aura_Worker_Redact::redact( $post, $n );
+		$this->assertSame( 1, $n );
+		$this->assertSame( array( 'aura-redacted:v1:slack' => 1 ), json_decode( $out['_elementor_data'], true ) );
+	}
+
+	public function test_a_key_named_webhooks_is_not_renamed_and_list_keys_are_untouched(): void {
+		$list = array( 'x', 'y', array( 'webhooks' => '' ) );
+		$this->assertSame( $list, Aura_Worker_Redact::redact( $list, $n ) );
 		$this->assertSame( 0, $n );
 	}
 
@@ -847,7 +902,60 @@ class Aura_Worker_Redact {
 				$node[ $key ] = $new;
 			}
 		}
-		return $node;
+		return self::redact_keys( $node, $count );
+	}
+
+	/**
+	 * The URL detector over an array's string KEYS (Codex r3 P1 on
+	 * SiteAgent#109): a response keyed by endpoint would otherwise carry the
+	 * URL in the key, and wp_json_encode() emits keys. Object property names
+	 * go through here too — walk() walks an object as its property array.
+	 *
+	 * Order is kept. A renamed key that collides with a key that stays, or
+	 * with one renamed earlier, gets `#2`, `#3`, … in first-come order, so no
+	 * value is lost. Each renamed key counts as a replacement. SECRET_KEYS is
+	 * about values: a key NAMED `webhooks` is not a URL and is not renamed.
+	 *
+	 * @param array $node  Array whose values are already walked.
+	 * @param int   $count In/out.
+	 * @return array The same array when no key held a receiver URL.
+	 */
+	private static function redact_keys( array $node, &$count ) {
+		$renamed = array();
+		foreach ( $node as $key => $value ) {
+			if ( ! is_string( $key ) ) {
+				continue; // list indices
+			}
+			$hits = 0;
+			$name = self::redact_text( $key, $hits );
+			if ( $hits > 0 ) {
+				$renamed[ $key ] = $name;
+				$count          += $hits;
+			}
+		}
+		if ( array() === $renamed ) {
+			return $node;
+		}
+		$taken = array();
+		foreach ( $node as $key => $value ) {
+			if ( ! isset( $renamed[ (string) $key ] ) || ! is_string( $key ) ) {
+				$taken[ (string) $key ] = true; // keys that stay are never displaced
+			}
+		}
+		$out = array();
+		foreach ( $node as $key => $value ) {
+			if ( is_string( $key ) && isset( $renamed[ $key ] ) ) {
+				$name = $renamed[ $key ];
+				for ( $n = 2; isset( $taken[ $name ] ); $n++ ) {
+					$name = $renamed[ $key ] . '#' . $n;
+				}
+				$taken[ $name ] = true;
+				$out[ $name ]   = $value;
+			} else {
+				$out[ $key ] = $value;
+			}
+		}
+		return $out;
 	}
 
 	/**
@@ -886,7 +994,7 @@ class Aura_Worker_Redact {
 					$value[ $i ] = $new;
 				}
 			}
-			return $value;
+			return self::redact_keys( $value, $count );
 		}
 		return self::walk( $value, $depth, $in_payload, $count );
 	}
@@ -917,6 +1025,7 @@ class Aura_Worker_Redact {
 				$fields[ $key ] = $new;
 			}
 		}
+		$fields = self::redact_keys( $fields, $count );
 		if ( $count === $before ) {
 			return $container;
 		}
@@ -2506,6 +2615,13 @@ final class RedactWriteGuardTest extends TestCase {
 		$this->assertSame( true, Aura_Worker_Grant::verify( $grant, $tool, $args ), 'the nonce is still unspent' );
 	}
 
+	public function test_a_placeholder_used_as_a_key_is_refused(): void {
+		$req = $this->json_request( 'POST', '/wp/v2/pages/7', (string) wp_json_encode( array( 'meta' => array( 'hooks' => array( 'aura-redacted:v1:zapier' => true ) ) ) ) );
+		$this->assertRefused( $this->before( $req ) );
+		$this->assertTrue( Aura_Worker_Redact::holds_placeholder( (object) array( 'aura-redacted:v1:make#2' => 1 ) ) );
+		$this->assertFalse( Aura_Worker_Redact::holds_placeholder( array( 'webhooks' => 1, 0 => 'x' ) ) );
+	}
+
 	public function test_holds_placeholder_is_a_pure_walk(): void {
 		$this->assertFalse( Aura_Worker_Redact::holds_placeholder( array( 'a' => array( 1, true, null, 2.5 ) ) ) );
 		$this->assertTrue( Aura_Worker_Redact::holds_placeholder( array( 'a' => array( 'b' => (object) array( 'c' => 'AURA-REDACTED:v1:zapier' ) ) ) ) );
@@ -2617,6 +2733,9 @@ Then add after `before_callbacks()`:
 	 * @return bool
 	 */
 	private static function entry_holds_placeholder( $key, $item, $depth ) {
+		if ( is_string( $key ) && false !== stripos( $key, self::PLACEHOLDER_MARK ) ) {
+			return true; // a placeholder used as a key is written back too (Codex r3 P1)
+		}
 		if ( is_string( $key ) && in_array( $key, self::JSON_META_KEYS, true ) ) {
 			return self::container_holds_placeholder( $item, 'value', $depth );
 		}
@@ -3054,4 +3173,4 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 - **Spec coverage.** §1.1 seam → Task 3 (+ Task 1 Step 1 verification of core's order and the adapter). §1.2 audience → Task 2, seam tests in Task 3. §1.3 grant, both rows, exemption per request, 403, no-key ignore → Task 4. §2.1 → Task 1. §2.2 → Task 1. §2.2a carriers 1–3, bound, byte-for-byte, fail-closed payload, object payload → Task 1 (with R1–R3). §2.3 placeholder → Task 1. §2.4 same value → Tasks 1 and 3. §3 → Task 5 (per source, decoded, escape, cookie allowed, GET skipped, update-widget omission). §4 site half → Tasks 3 and 6. §5 limits → documented in CLAUDE.md (Task 7) and the Rulings. §6 SiteAgent tests → Tasks 1–6; staging → "After the tasks". §7.1 → Task 7.
 - **Placeholder scan.** No TBD/TODO; every code step carries the code.
 - **Name consistency.** `redact`, `redact_text`, `is_audience`, `filter_echo`, `before_callbacks`, `grant_shape`, `holds_placeholder`, `status_fragment`, `record_redacted`, `record_placeholder_refused`, `reset_for_tests`; `Aura_Worker_Rules::serving_rest`, `cookie_authenticated`, `bump_counter`; constants `REDACTED_COUNTER`, `PLACEHOLDER_REFUSED_COUNTER`, `STATUS_VERSION` — used identically in every task.
-- **Dry run.** The assembled class, the Rules/API/tool/bootstrap edits and all six new test files were run while writing this plan against the SiteAgent test bootstrap (PHP 8.5, PHPUnit 10.5 classes, in-memory file patches — nothing written to the repo): all 159 new test cases passed; after the Codex round-1 fixes (IFTTT trigger URLs, URL tail boundary) only `RedactDetectorsTest` was re-run — 76/76 after round 1, 84/84 after round 2 (mangled property names, encoded HTML delimiters), and the existing suite showed no new failure against an unpatched baseline under the same runner. `composer test` / `composer lint` on the real branch remain the gate, including PHP 7.4.
+- **Dry run.** The assembled class, the Rules/API/tool/bootstrap edits and all six new test files were run while writing this plan against the SiteAgent test bootstrap (PHP 8.5, PHPUnit 10.5 classes, in-memory file patches — nothing written to the repo): all 159 new test cases passed; after the Codex round-1 fixes (IFTTT trigger URLs, URL tail boundary) only `RedactDetectorsTest` was re-run — 76/76 after round 1, 84/84 after round 2 (mangled property names, encoded HTML delimiters); after round 3 (URL keys) all six new files plus the changed `AuditRulesTest` were re-run — 222/222, and the existing suite showed no new failure against an unpatched baseline under the same runner. `composer test` / `composer lint` on the real branch remain the gate, including PHP 7.4.
