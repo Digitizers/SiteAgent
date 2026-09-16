@@ -225,7 +225,7 @@ class Aura_Worker_Redact {
 
 	/**
 	 * `rest_request_before_callbacks` — before the permission check and the
-	 * handler. Task 5 puts the placeholder guard in front of the grant.
+	 * handler. The placeholder guard runs first, then the grant.
 	 *
 	 * @param mixed                $response Earlier short-circuit, or core's parameter error.
 	 * @param array|null           $handler  Route handler.
@@ -236,8 +236,189 @@ class Aura_Worker_Redact {
 		if ( null !== $response || ! self::is_audience( $request ) ) {
 			return $response;
 		}
+		$refused = self::refuse_placeholder_write( $request );
+		if ( null !== $refused ) {
+			return $refused; // before the grant: a refused write spends no nonce (R5)
+		}
 		$grant = self::verify_unredacted_grant( $request );
 		return null === $grant ? $response : $grant;
+	}
+
+	/**
+	 * The write guard (spec §3): an agent write carrying the placeholder is
+	 * refused — the site never swaps it back, so it could only overwrite a
+	 * real value with a dead string. Each parameter source on its own:
+	 * get_params()' precedence can hide one source's value behind a
+	 * same-named key in another.
+	 *
+	 * @param WP_REST_Request $request Request.
+	 * @return WP_Error|null
+	 */
+	private static function refuse_placeholder_write( $request ) {
+		$method = strtoupper( (string) $request->get_method() );
+		if ( in_array( $method, Aura_Worker_Rules::SAFE_METHODS, true ) ) {
+			return null;
+		}
+		foreach ( array( 'get_query_params', 'get_body_params', 'get_json_params', 'get_url_params' ) as $source ) {
+			if ( ! method_exists( $request, $source ) || ! self::holds_placeholder( $request->$source() ) ) {
+				continue;
+			}
+			/**
+			 * An agent write was refused for carrying a redaction placeholder.
+			 *
+			 * @since 2.18.0
+			 *
+			 * @param string $route The route refused.
+			 */
+			do_action( 'aura_worker_placeholder_refused', (string) $request->get_route() );
+			return new WP_Error(
+				'aura_redacted_placeholder',
+				__( 'This request contains a redacted value placeholder (aura-redacted:…). The site never restores it. Omit that field so the stored value is kept, and re-read the page if you need its structure.', 'digitizer-site-worker' ),
+				array( 'status' => 409 )
+			);
+		}
+		return null;
+	}
+
+	/**
+	 * Does this (already decoded) value hold the placeholder anywhere? Walks
+	 * arrays and objects, and decodes the same string carriers as the read
+	 * side with the same depth bound — so a JSON escape inside a carrier is
+	 * caught. A carrier-3 payload is scanned as bytes, never unserialized (R4).
+	 *
+	 * @param mixed $value Parameter value.
+	 * @param int   $depth JSON decodes made so far.
+	 * @return bool
+	 */
+	public static function holds_placeholder( $value, $depth = 0 ) {
+		if ( is_string( $value ) ) {
+			return false !== stripos( $value, self::PLACEHOLDER_MARK );
+		}
+		if ( $value instanceof stdClass ) {
+			$value = get_object_vars( $value );
+		}
+		if ( ! is_array( $value ) ) {
+			return false;
+		}
+		if ( self::is_snapshot_answer( $value ) && self::payload_holds_placeholder( $value['payload'] ) ) {
+			return true;
+		}
+		foreach ( $value as $key => $item ) {
+			if ( self::entry_holds_placeholder( $key, $item, $depth ) ) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * A carrier-3 payload, as bytes (R4: agent bytes are never unserialized).
+	 * A serialized string keeps a JSON carrier's escapes verbatim, so the
+	 * `\uXXXX` escapes are undone on the bytes before the scan.
+	 *
+	 * @param string $payload Base64 payload.
+	 * @return bool
+	 */
+	private static function payload_holds_placeholder( $payload ) {
+		$bytes = base64_decode( $payload, true ); // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_decode -- the snapshot payload's own encoding
+		if ( ! is_string( $bytes ) ) {
+			return false;
+		}
+		if ( false !== stripos( $bytes, self::PLACEHOLDER_MARK ) ) {
+			return true;
+		}
+		if ( false === strpos( $bytes, '\\u' ) ) {
+			return false;
+		}
+		$unescaped = preg_replace_callback(
+			'/\\\\u00([0-7][0-9a-fA-F])/',
+			static function ( $m ) {
+				return chr( hexdec( $m[1] ) );
+			},
+			$bytes
+		);
+		return is_string( $unescaped ) && false !== stripos( $unescaped, self::PLACEHOLDER_MARK );
+	}
+
+	/**
+	 * One key/value pair, routed the way walk_entry() routes it on the read side.
+	 *
+	 * @param int|string $key   Key.
+	 * @param mixed      $item  Value.
+	 * @param int        $depth JSON decodes so far.
+	 * @return bool
+	 */
+	private static function entry_holds_placeholder( $key, $item, $depth ) {
+		if ( is_string( $key ) && false !== stripos( $key, self::PLACEHOLDER_MARK ) ) {
+			return true; // a placeholder used as a key is written back too (Codex r3 P1)
+		}
+		if ( is_string( $key ) && in_array( $key, self::JSON_META_KEYS, true ) ) {
+			return self::container_holds_placeholder( $item, 'value', $depth );
+		}
+		// Only a LIST under `content` is MCP's text-block carrier, as on the
+		// read side (Task 1 fix round 1): anything else is walked plainly, so
+		// a snapshot answer there is still seen.
+		if ( 'content' === $key && is_array( $item ) && self::is_list( $item ) ) {
+			foreach ( $item as $i => $block ) {
+				$found = self::is_text_block( $block )
+					? self::container_holds_placeholder( $block, 'text', $depth )
+					: self::entry_holds_placeholder( $i, $block, $depth );
+				if ( $found ) {
+					return true;
+				}
+			}
+			return false;
+		}
+		return self::holds_placeholder( $item, $depth );
+	}
+
+	/**
+	 * A carrier string itself, or an array/stdClass whose `$carrier` field is one.
+	 *
+	 * @param mixed  $container Value under a carrier key.
+	 * @param string $carrier   The carrier field's name.
+	 * @param int    $depth     JSON decodes so far.
+	 * @return bool
+	 */
+	private static function container_holds_placeholder( $container, $carrier, $depth ) {
+		if ( is_string( $container ) ) {
+			return self::carrier_holds_placeholder( $container, $depth );
+		}
+		$fields = $container instanceof stdClass ? get_object_vars( $container ) : $container;
+		if ( ! is_array( $fields ) ) {
+			return false;
+		}
+		if ( self::is_snapshot_answer( $fields ) ) {
+			return self::holds_placeholder( $fields, $depth ); // as walk_with_carrier() does
+		}
+		foreach ( $fields as $key => $value ) {
+			$found = ( $carrier === $key && is_string( $value ) )
+				? self::carrier_holds_placeholder( $value, $depth )
+				: self::entry_holds_placeholder( $key, $value, $depth );
+			if ( $found ) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * A JSON-carrying string: its raw text, then (within the decode bound)
+	 * its decoded tree.
+	 *
+	 * @param string $text  A JSON-carrying string.
+	 * @param int    $depth JSON decodes so far.
+	 * @return bool
+	 */
+	private static function carrier_holds_placeholder( $text, $depth ) {
+		if ( false !== stripos( $text, self::PLACEHOLDER_MARK ) ) {
+			return true;
+		}
+		if ( $depth >= self::MAX_JSON_DECODES ) {
+			return false;
+		}
+		$decoded = json_decode( $text );
+		return ( is_array( $decoded ) || is_object( $decoded ) ) && self::holds_placeholder( $decoded, $depth + 1 );
 	}
 
 	/**
@@ -312,14 +493,21 @@ class Aura_Worker_Redact {
 		}
 		// The MCP adapter reads its message from the JSON body.
 		$body = method_exists( $request, 'get_json_params' ) ? $request->get_json_params() : null;
-		if ( ! is_array( $body ) || array() === $body || self::is_list( $body ) ) {
+		// The adapter's own batch test (JsonRpcResponseBuilder::is_batch_request())
+		// is isset( $body[0] ): an object that also carries a "0" key is a
+		// batch there, so it is one here too — never a single tools/call.
+		if ( ! is_array( $body ) || array() === $body || isset( $body[0] ) ) {
 			return null; // one JSON object only — a batch is not honoured
 		}
 		if ( ! isset( $body['method'], $body['params'] ) || 'tools/call' !== $body['method'] || ! is_array( $body['params'] ) ) {
 			return null;
 		}
 		$call = $body['params'];
-		if ( ! isset( $call['name'] ) || ! is_string( $call['name'] ) || '' === $call['name'] ) {
+		if ( ! isset( $call['name'] ) || ! is_string( $call['name'] ) ) {
+			return null;
+		}
+		$name = trim( $call['name'] ); // the adapter's ToolsHandler runs this name
+		if ( '' === $name ) {
 			return null;
 		}
 		$args = array_key_exists( 'arguments', $call ) && null !== $call['arguments'] ? $call['arguments'] : array();
@@ -331,7 +519,7 @@ class Aura_Worker_Redact {
 		return array(
 			// The route matched case-insensitively; the server binds in the
 			// lower case its route is registered in (`[a-z0-9-]+`).
-			'tool'   => self::GRANT_TOOL_PREFIX . 'mcp/' . strtolower( $m[1] ) . '#' . $call['name'],
+			'tool'   => self::GRANT_TOOL_PREFIX . 'mcp/' . strtolower( $m[1] ) . '#' . $name,
 			'params' => $args,
 		);
 	}

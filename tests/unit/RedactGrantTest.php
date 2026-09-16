@@ -187,6 +187,10 @@ final class RedactGrantTest extends TestCase {
 			'not POST'              => array( '/mcp/elementor-mcp-server', $call, 'DELETE' ),
 			'arguments not object'  => array( '/mcp/elementor-mcp-server', array_merge( $call, array( 'params' => array( 'name' => 'export-page', 'arguments' => array( 7 ) ) ) ), 'POST' ),
 			'no tool name'          => array( '/mcp/elementor-mcp-server', array_merge( $call, array( 'params' => array( 'arguments' => array( 'post_id' => 7 ) ) ) ), 'POST' ),
+			// The adapter's own batch test is isset( $body[0] ): an object that
+			// also carries a "0" key is a batch there, whatever else it holds.
+			'an object with a 0 key' => array( '/mcp/elementor-mcp-server', array_merge( array( 0 => $call ), $call ), 'POST' ),
+			'a name of only spaces' => array( '/mcp/elementor-mcp-server', array_merge( $call, array( 'params' => array( 'name' => "  \n", 'arguments' => array( 'post_id' => 7 ) ) ) ), 'POST' ),
 		);
 	}
 
@@ -225,11 +229,46 @@ final class RedactGrantTest extends TestCase {
 	}
 
 	public function test_a_cookie_session_never_spends_a_grant(): void {
+		$grant = $this->grant( self::EXPORT, array( 'post_id' => 7 ) );
+
 		Aura_Worker_Rules::$cookie_auth_override = true;
 		$GLOBALS['_rest_app_password']           = null;
-		$req = $this->export_call();
-		$req->set_header( 'X-Aura-Unredacted-Grant', 'not-even-a-grant' );
-		$this->assertNull( $this->before( $req ), 'not the audience: nothing to exempt, nothing refused' );
+		$cookie = $this->export_call();
+		$cookie->set_header( 'X-Aura-Unredacted-Grant', $grant );
+		$this->assertNull( $this->before( $cookie ), 'not the audience: nothing to exempt, nothing refused' );
+
+		// The cookie request did not spend the nonce: the same grant still
+		// verifies on an audience request.
+		Aura_Worker_Rules::$cookie_auth_override = false;
+		$GLOBALS['_rest_app_password']           = 'uuid-aura';
+		$real = $this->export_call();
+		$real->set_header( 'X-Aura-Unredacted-Grant', $grant );
+		$this->assertNull( $this->before( $real ) );
+		$this->assertSame( $this->export_body(), $this->echoed( $real, $this->export_body() ), 'exempted: the grant verified' );
+	}
+
+	public function test_the_mcp_row_binds_the_trimmed_tool_name(): void {
+		// The adapter's ToolsHandler runs trim( name ), so the grant binds that.
+		$req = $this->rpc( '/mcp/' . self::SERVER, array( 'jsonrpc' => '2.0', 'id' => 1, 'method' => 'tools/call', 'params' => array( 'name' => " export-page\n", 'arguments' => array( 'post_id' => 7 ) ) ) );
+		$this->assertSame( array( 'tool' => self::EXPORT, 'params' => array( 'post_id' => 7 ) ), Aura_Worker_Redact::grant_shape( $req ) );
+		$req->set_header( 'X-Aura-Unredacted-Grant', $this->grant( self::EXPORT, array( 'post_id' => 7 ) ) );
+		$this->assertNull( $this->before( $req ) );
+		$this->assertSame( $this->export_body(), $this->echoed( $req, $this->export_body() ) );
+	}
+
+	public function test_a_name_empty_after_trimming_is_not_the_mcp_row(): void {
+		$req = $this->rpc( '/mcp/' . self::SERVER, array( 'jsonrpc' => '2.0', 'id' => 1, 'method' => 'tools/call', 'params' => array( 'name' => " \t ", 'arguments' => array() ) ) );
+		$this->assertNull( Aura_Worker_Redact::grant_shape( $req ) );
+	}
+
+	public function test_an_object_carrying_a_0_key_is_a_batch_and_not_the_mcp_row(): void {
+		$raw = '{"0":{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"export-page","arguments":{"post_id":7}}},"jsonrpc":"2.0","method":"tools/call","params":{"name":"export-page","arguments":{"post_id":7}}}';
+		$req = new WP_REST_Request( 'POST', '/mcp/' . self::SERVER );
+		$req->set_header( 'Content-Type', 'application/json' );
+		$req->set_body( $raw );
+		$this->assertNull( Aura_Worker_Redact::grant_shape( $req ) );
+		$req->set_header( 'X-Aura-Unredacted-Grant', 'garbage' );
+		$this->assertNull( $this->before( $req ), 'ignored, not refused' );
 	}
 
 	public function test_an_earlier_refusal_passes_through_untouched(): void {
