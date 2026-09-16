@@ -1797,6 +1797,10 @@ if ( ! class_exists( 'WP_REST_Request' ) ) {
 		private array $params  = array();
 		private string $route  = '/aura/v1/status';
 		private string $method = 'GET';
+		private array $query_params = array();
+		private array $body_params  = array();
+		private array $url_params   = array();
+		private string $body        = '';
 
 		/**
 		 * Core's own signature is __construct( $method = '', $route = '', … ),
@@ -1849,6 +1853,62 @@ if ( ! class_exists( 'WP_REST_Request' ) ) {
 
 		public function get_route(): string {
 			return $this->route;
+		}
+
+		/*
+		 * Core keeps each parameter source apart ($_GET, the form body, the
+		 * JSON body, the route's own matches) and get_params() merges them by
+		 * precedence. The write guard (#419) walks each source separately, so
+		 * the stub keeps them apart too. get_param() above is unchanged — the
+		 * existing suite sets parameters through set_param().
+		 */
+		public function set_query_params( array $params ): void {
+			$this->query_params = $params;
+		}
+
+		public function get_query_params(): array {
+			return $this->query_params;
+		}
+
+		public function set_body_params( array $params ): void {
+			$this->body_params = $params;
+		}
+
+		public function get_body_params(): array {
+			return $this->body_params;
+		}
+
+		public function set_url_params( array $params ): void {
+			$this->url_params = $params;
+		}
+
+		public function get_url_params(): array {
+			return $this->url_params;
+		}
+
+		public function set_body( string $body ): void {
+			$this->body = $body;
+		}
+
+		public function get_body(): string {
+			return $this->body;
+		}
+
+		/**
+		 * Core's get_json_params(): the raw body decoded (associative) when the
+		 * request's Content-Type is JSON; null otherwise, and null for a body
+		 * that does not decode — core records a parse error and leaves the JSON
+		 * source empty.
+		 *
+		 * @return mixed
+		 */
+		public function get_json_params() {
+			$type = (string) $this->get_header( 'content-type' );
+			if ( '' === $this->body || false === stripos( $type, 'json' ) ) {
+				return null;
+			}
+			$params = json_decode( $this->body, true );
+			return ( null === $params && JSON_ERROR_NONE !== json_last_error() ) ? null : $params;
 		}
 	}
 }
@@ -5142,6 +5202,9 @@ function sa_reset_state(): void {
 	}
 	if ( class_exists( 'Aura_Worker_Call_Context' ) ) {
 		Aura_Worker_Call_Context::reset(); // the dispatching route is a static too
+	}
+	if ( class_exists( 'Aura_Worker_Redact' ) ) {
+		Aura_Worker_Redact::reset_for_tests(); // the unredacted-grant exemption memo is a static (#419)
 	}
 	if ( class_exists( 'Aura_Worker_Elementor_Door' ) ) {
 		// The door's presence/seam memo is a static too (Ruling P6 memoises a

@@ -157,17 +157,34 @@ class Aura_Worker_Redact {
 	/** The gateway's tool execution — in the audience whoever calls it. */
 	const GATEWAY_EXECUTE_ROUTE = '/aura/mcp/tools/execute';
 
-	/** An MCP adapter server route: exactly one segment under `mcp`. */
-	const MCP_ROUTE = '#^/mcp/([a-z0-9-]+)$#';
+	/**
+	 * An MCP adapter server route: exactly one segment under `mcp`. Matched
+	 * the way core's WP_REST_Server::match_request_to_handler() dispatches —
+	 * `@^…$@i`, anchored, case-insensitive, and (no `D` modifier) tolerating
+	 * one trailing newline — never by string equality (Task 2 ruling, #419).
+	 */
+	const MCP_ROUTE = '@^/mcp/([a-z0-9-]+)$@i';
 
 	/** `/status` → `redaction: { v }`. A site without the key predates the feature. */
 	const STATUS_VERSION = 1;
+
+	/**
+	 * Requests whose unredacted grant verified, by spl_object_id. The object
+	 * itself is held, so its id cannot be reused by another object while the
+	 * entry stands; filter_echo() drops it with its response.
+	 *
+	 * @var array<int,object>
+	 */
+	private static $exempt = array();
 
 	/**
 	 * Hook the read seam and the counters. Called from Aura_Worker::init(),
 	 * right after Aura_Worker_Rules::init().
 	 */
 	public static function init() {
+		// After Aura_Worker_Rules::guard_core_any() (5): a rule block or an
+		// unbind refusal wins, and no grant nonce is spent on it (R5).
+		add_filter( 'rest_request_before_callbacks', array( __CLASS__, 'before_callbacks' ), 6, 3 );
 		// LAST, so whatever any other plugin adds to the body is covered too.
 		add_filter( 'rest_pre_echo_response', array( __CLASS__, 'filter_echo' ), PHP_INT_MAX, 3 );
 		add_action( 'aura_worker_redacted', array( __CLASS__, 'record_redacted' ), 10, 2 );
@@ -183,6 +200,9 @@ class Aura_Worker_Redact {
 	 * @return mixed
 	 */
 	public static function filter_echo( $result, $server = null, $request = null ) {
+		if ( is_object( $request ) && self::take_exemption( $request ) ) {
+			return $result; // Aura's own snapshot capture (spec §1.3) — this response only
+		}
 		if ( null === $result || ! self::is_audience( $request ) ) {
 			return $result;
 		}
@@ -201,6 +221,139 @@ class Aura_Worker_Redact {
 		 */
 		do_action( 'aura_worker_redacted', $count, (string) $request->get_route() );
 		return $redacted;
+	}
+
+	/**
+	 * `rest_request_before_callbacks` — before the permission check and the
+	 * handler. Task 5 puts the placeholder guard in front of the grant.
+	 *
+	 * @param mixed                $response Earlier short-circuit, or core's parameter error.
+	 * @param array|null           $handler  Route handler.
+	 * @param WP_REST_Request|null $request  Request.
+	 * @return mixed
+	 */
+	public static function before_callbacks( $response, $handler = null, $request = null ) {
+		if ( null !== $response || ! self::is_audience( $request ) ) {
+			return $response;
+		}
+		$grant = self::verify_unredacted_grant( $request );
+		return null === $grant ? $response : $grant;
+	}
+
+	/**
+	 * Verify `X-Aura-Unredacted-Grant` on a recognised shape and, when it
+	 * holds, exempt THIS request's response (spec §1.3).
+	 *
+	 * @param WP_REST_Request $request Request.
+	 * @return WP_Error|null A refusal, or null (verified, absent or ignored).
+	 */
+	private static function verify_unredacted_grant( $request ) {
+		if ( ! method_exists( $request, 'get_header' ) ) {
+			return null;
+		}
+		$header = trim( (string) $request->get_header( self::GRANT_HEADER ) );
+		if ( '' === $header ) {
+			return null;
+		}
+		$shape = self::grant_shape( $request );
+		if ( null === $shape || ! Aura_Worker_Grant::has_usable_key() ) {
+			// Not a shape the site honours, or nothing to verify with: the
+			// header means nothing here and the response is redacted as usual.
+			return null;
+		}
+		$verdict = Aura_Worker_Grant::verify( $header, $shape['tool'], $shape['params'] );
+		if ( is_wp_error( $verdict ) ) {
+			return $verdict; // an unbound site's own refusal, 403 aura_site_unbound (R6)
+		}
+		if ( true !== $verdict ) {
+			// Loud, never a silent redaction: Aura must learn that its key or
+			// its binding is wrong on this site (spec §1.3).
+			return new WP_Error(
+				'aura_unredacted_grant_invalid',
+				/* translators: %s: why the grant did not verify. */
+				sprintf( __( 'The X-Aura-Unredacted-Grant header did not verify for this request: %s.', 'digitizer-site-worker' ), (string) $verdict ),
+				array( 'status' => 403 )
+			);
+		}
+		self::$exempt[ spl_object_id( $request ) ] = $request;
+		return null;
+	}
+
+	/**
+	 * The two request shapes a grant is honoured on, with the tool and
+	 * params it must bind — derived from the request itself (spec §1.3).
+	 * Both routes are matched the way core dispatches them (see
+	 * is_gateway_execute_route() and MCP_ROUTE).
+	 *
+	 * @param WP_REST_Request $request Request.
+	 * @return array{tool:string,params:array}|null
+	 */
+	public static function grant_shape( $request ) {
+		if ( ! is_object( $request ) || ! method_exists( $request, 'get_route' ) ) {
+			return null;
+		}
+		$route = (string) $request->get_route();
+		if ( self::is_gateway_execute_route( $route ) ) {
+			// Exactly what Aura_Worker_MCP::execute_tool() runs: `tool`, and
+			// `params` with a non-array read as none. A `tool` that is not a
+			// string names no tool: the header is ignored, not stringified.
+			$tool = $request->get_param( 'tool' );
+			if ( ! is_string( $tool ) ) {
+				return null;
+			}
+			$params = $request->get_param( 'params' );
+			return array(
+				'tool'   => self::GRANT_TOOL_PREFIX . 'aura/mcp#' . $tool,
+				'params' => is_array( $params ) ? $params : array(),
+			);
+		}
+		if ( 'POST' !== strtoupper( (string) $request->get_method() ) || 1 !== preg_match( self::MCP_ROUTE, $route, $m ) ) {
+			return null;
+		}
+		// The MCP adapter reads its message from the JSON body.
+		$body = method_exists( $request, 'get_json_params' ) ? $request->get_json_params() : null;
+		if ( ! is_array( $body ) || array() === $body || self::is_list( $body ) ) {
+			return null; // one JSON object only — a batch is not honoured
+		}
+		if ( ! isset( $body['method'], $body['params'] ) || 'tools/call' !== $body['method'] || ! is_array( $body['params'] ) ) {
+			return null;
+		}
+		$call = $body['params'];
+		if ( ! isset( $call['name'] ) || ! is_string( $call['name'] ) || '' === $call['name'] ) {
+			return null;
+		}
+		$args = array_key_exists( 'arguments', $call ) && null !== $call['arguments'] ? $call['arguments'] : array();
+		// `arguments` is an object (R15). An empty one decodes to array() —
+		// which is_list() calls a list — so only a non-empty list is refused.
+		if ( ! is_array( $args ) || ( array() !== $args && self::is_list( $args ) ) ) {
+			return null;
+		}
+		return array(
+			// The route matched case-insensitively; the server binds in the
+			// lower case its route is registered in (`[a-z0-9-]+`).
+			'tool'   => self::GRANT_TOOL_PREFIX . 'mcp/' . strtolower( $m[1] ) . '#' . $call['name'],
+			'params' => $args,
+		);
+	}
+
+	/**
+	 * Was this very request exempted? Answers once: the entry goes with it.
+	 *
+	 * @param object $request Request.
+	 * @return bool
+	 */
+	private static function take_exemption( $request ) {
+		$id = spl_object_id( $request );
+		if ( isset( self::$exempt[ $id ] ) && self::$exempt[ $id ] === $request ) {
+			unset( self::$exempt[ $id ] );
+			return true;
+		}
+		return false;
+	}
+
+	/** Test seam: forget every exemption. */
+	public static function reset_for_tests() {
+		self::$exempt = array();
 	}
 
 	/**

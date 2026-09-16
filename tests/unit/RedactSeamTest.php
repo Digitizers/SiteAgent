@@ -66,12 +66,19 @@ final class RedactSeamTest extends TestCase {
 		// and rest_request_after_callbacks runs for every internal
 		// rest_do_request(): a redactor on either would leak embedded
 		// resources or redact internal reads (spec §1.1).
+		$hooked = array();
 		foreach ( array( 'rest_post_dispatch', 'rest_request_after_callbacks', 'rest_pre_serve_request' ) as $tag ) {
 			foreach ( $GLOBALS['_filters'][ $tag ] ?? array() as $entry ) {
 				$cb = is_array( $entry ) && array_key_exists( 'callback', $entry ) ? $entry['callback'] : $entry;
-				$this->assertFalse( is_array( $cb ) && 'Aura_Worker_Redact' === $cb[0], "Aura_Worker_Redact must not hook {$tag}" );
+				if ( is_array( $cb ) && 'Aura_Worker_Redact' === $cb[0] ) {
+					$hooked[] = $tag . ' → ' . $cb[1];
+				}
 			}
 		}
+		// An empty list is the assertion (the loop above may see no hooks at
+		// all); the positive control proves the scan reads where init() writes.
+		$this->assertSame( array(), $hooked, 'Aura_Worker_Redact must not hook these seams' );
+		$this->assertNotFalse( has_filter( 'rest_pre_echo_response', array( 'Aura_Worker_Redact', 'filter_echo' ) ) );
 	}
 
 	public function test_the_plugin_wires_the_redactor_in(): void {
@@ -199,6 +206,20 @@ final class RedactSeamTest extends TestCase {
 
 		$this->echoed( $body, 'GET', '/wp/v2/pages/7' );
 		$this->assertSame( 2, $this->redacted_count() );
+	}
+
+	public function test_a_refused_placeholder_write_is_counted_through_its_action(): void {
+		$this->assertSame( 10, has_filter( 'aura_worker_placeholder_refused', array( 'Aura_Worker_Redact', 'record_placeholder_refused' ) ) );
+		$entries = array_values( array_filter( $GLOBALS['_filters']['aura_worker_placeholder_refused'] ?? array(), static function ( $e ) {
+			return is_array( $e ) && array( 'Aura_Worker_Redact', 'record_placeholder_refused' ) === ( $e['callback'] ?? null );
+		} ) );
+		$this->assertCount( 1, $entries );
+		$this->assertSame( 1, $entries[0]['accepted_args'], 'the route only — the second parameter is the test clock' );
+
+		$this->assertSame( 0, Aura_Worker_Rules::count_24h( Aura_Worker_Redact::PLACEHOLDER_REFUSED_COUNTER ) );
+		do_action( 'aura_worker_placeholder_refused', '/wp/v2/pages/7' );
+		$this->assertSame( 1, Aura_Worker_Rules::count_24h( Aura_Worker_Redact::PLACEHOLDER_REFUSED_COUNTER ) );
+		$this->assertSame( 0, $this->redacted_count(), 'a refusal is not a redaction' );
 	}
 
 	public function test_bump_counter_refuses_an_unknown_prefix(): void {
