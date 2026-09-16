@@ -1144,6 +1144,84 @@ final class SelfUpdateRecoveryTest extends TestCase {
 		}
 	}
 
+	/**
+	 * A warning-to-exception handler of the kind some hosts install. It throws
+	 * on E_WARNING whatever the error_reporting mask says: PHPUnit runs the
+	 * test body with a narrowed mask, so a handler that honoured it would
+	 * never see the warning this guards against.
+	 */
+	public function warningsThrow( int $errno, string $errstr, string $errfile = '', int $errline = 0 ): bool {
+		if ( E_WARNING !== $errno ) {
+			return false;
+		}
+		throw new ErrorException( $errstr, 0, $errno, $errfile, $errline );
+	}
+
+	public function test_a_restore_that_could_not_clear_the_directory_and_left_an_UNREADABLE_main_file_still_warns_without_throwing(): void {
+		// Codex #105 round-1 P1: the post-failure version read reached
+		// get_plugin_data() behind only file_exists(). An unreadable main file
+		// raises a warning there, and under a warning-to-exception handler that
+		// escaped and killed the request during recovery.
+		$main   = $this->dir . '/digitizer-site-worker.php';
+		$locked = false;
+		$GLOBALS['_install_result'] = false;
+		$GLOBALS['_install_effect'] = function () use ( &$locked, &$handler, $main ) {
+			chmod( $main, 0000 );
+			$locked = $this->lockPluginDir() && ! is_readable( $main );
+			// From here on — the recovery — a warning is an exception.
+			set_error_handler( array( $this, 'warningsThrow' ) );
+			$handler = true;
+		};
+		$handler = false;
+
+		try {
+			$res = $this->selfUpdate();
+		} finally {
+			if ( $handler ) {
+				restore_error_handler();
+			}
+			chmod( $this->dir, 0777 );
+			chmod( $main, 0644 );
+		}
+		if ( ! $locked ) {
+			$this->markTestSkipped( 'filesystem does not enforce the mode (running as root?)' );
+		}
+
+		$this->assertFalse( $res['success'] );
+		$this->assertFalse( $res['rolled_back'] );
+		$this->assertStringContainsString( 'Could not remove', (string) $res['restore_error'] );
+		$this->assertStringContainsString( 'could NOT be restored', $res['error'] );
+		$this->assertStringContainsString( 'may be missing or incomplete', $res['error'] );
+	}
+
+	public function test_an_unreadable_installed_main_file_reads_as_no_version_rather_than_throwing(): void {
+		// The same guard, on the two helpers every caller shares.
+		$main = $this->dir . '/digitizer-site-worker.php';
+		chmod( $main, 0000 );
+		if ( is_readable( $main ) ) {
+			chmod( $main, 0644 );
+			$this->markTestSkipped( 'filesystem does not enforce the mode (running as root?)' );
+		}
+		$updater = new Aura_Worker_Updater();
+		$out     = array();
+		set_error_handler(
+			array( $this, 'warningsThrow' )
+		);
+		try {
+			foreach ( array( 'installed_version', 'installed_constant_version' ) as $name ) {
+				$m = new ReflectionMethod( Aura_Worker_Updater::class, $name );
+				$m->setAccessible( true );
+				$out[ $name ] = $m->invoke( $updater, Aura_Worker_Updater::SELF_PLUGIN_FILE );
+			}
+		} finally {
+			restore_error_handler();
+			chmod( $main, 0644 );
+		}
+
+		$this->assertNull( $out['installed_version'] );
+		$this->assertNull( $out['installed_constant_version'] );
+	}
+
 	public function test_the_generic_single_update_of_siteagent_waits_on_the_same_claim(): void {
 		// `/aura/v1/update/plugin` accepts SiteAgent's own file and replaced it
 		// with no claim taken, so it could land between a self-update's backup,

@@ -602,16 +602,24 @@ class Aura_Worker_Updater {
 	 * is the identifier the new build's beacon writers will use; the header is
 	 * what the verdict looks records up by; the two must be the same string.
 	 *
+	 * Unreadable counts as absent (Codex #105 round-1 P1): the only caller
+	 * treats null as a failed install, and a read that warns must not escape
+	 * a host's warning-to-exception handler mid-update.
+	 *
 	 * @param string $plugin_file Plugin file relative to WP_PLUGIN_DIR.
-	 * @return string|null Null when the define cannot be found.
+	 * @return string|null Null when the file cannot be read or the define cannot be found.
 	 */
 	private function installed_constant_version( $plugin_file ) {
 		$path = WP_PLUGIN_DIR . '/' . $plugin_file;
-		if ( ! file_exists( $path ) ) {
+		if ( ! is_file( $path ) || ! is_readable( $path ) ) {
 			return null;
 		}
-		$src = (string) file_get_contents( $path ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
-		return $this->constant_version_from_source( $src );
+		try {
+			$src = file_get_contents( $path ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+		} catch ( Throwable $e ) {
+			return null;
+		}
+		return is_string( $src ) ? $this->constant_version_from_source( $src ) : null;
 	}
 
 	/**
@@ -619,18 +627,30 @@ class Aura_Worker_Updater {
 	 * The one post-condition a rollback can be held to: the old build is back
 	 * only if the file on disk says so.
 	 *
+	 * Unreadable counts as absent (Codex #105 round-1 P1). It is read during
+	 * recovery, where a warning turned into an exception by the host would end
+	 * the request instead of reporting the failed restore — so the read is
+	 * checked first and cannot throw. Every caller already takes null as "not
+	 * the version expected": the post-install check fails the install, the
+	 * rollback verify reports not restored, and the failed-restore message
+	 * keeps its missing-or-incomplete warning.
+	 *
 	 * @param string $plugin_file Plugin file relative to WP_PLUGIN_DIR.
-	 * @return string|null
+	 * @return string|null Null when the file is missing or unreadable.
 	 */
 	private function installed_version( $plugin_file ) {
 		$path = WP_PLUGIN_DIR . '/' . $plugin_file;
-		if ( ! file_exists( $path ) ) {
+		if ( ! is_file( $path ) || ! is_readable( $path ) ) {
 			return null;
 		}
-		if ( function_exists( 'wp_clean_plugins_cache' ) ) {
-			wp_clean_plugins_cache( false );
+		try {
+			if ( function_exists( 'wp_clean_plugins_cache' ) ) {
+				wp_clean_plugins_cache( false );
+			}
+			$data = get_plugin_data( $path, false, false );
+		} catch ( Throwable $e ) {
+			return null;
 		}
-		$data = get_plugin_data( $path, false, false );
 		return isset( $data['Version'] ) ? (string) $data['Version'] : null;
 	}
 
