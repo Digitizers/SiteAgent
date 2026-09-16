@@ -1482,6 +1482,13 @@ if ( ! function_exists( 'wp_mkdir_p' ) ) {
 	}
 }
 
+if ( ! function_exists( 'wp_is_writable' ) ) {
+	// Core's own answer off Windows: the plain PHP check.
+	function wp_is_writable( string $path ): bool {
+		return is_writable( $path );
+	}
+}
+
 if ( ! function_exists( 'wp_delete_file' ) ) {
 	function wp_delete_file( string $file ): bool {
 		// `_wp_delete_file_fail` names ONE path whose delete refuses without

@@ -250,13 +250,13 @@ class Aura_Worker_Rollback {
 			return null; // nothing to delete
 		}
 		clearstatcache();
-		if ( ! is_writable( WP_PLUGIN_DIR ) ) {
+		if ( ! wp_is_writable( WP_PLUGIN_DIR ) ) {
 			return 'the plugins directory is not writable, so the plugin directory could not be removed.';
 		}
 		if ( is_link( $plugin_dir ) ) {
 			return null; // removed as a link, from the writable plugins directory
 		}
-		if ( ! is_writable( $plugin_dir ) ) {
+		if ( ! wp_is_writable( $plugin_dir ) ) {
 			return 'the plugin directory itself is not writable, so its files could not be removed.';
 		}
 		try {
@@ -269,7 +269,7 @@ class Aura_Worker_Rollback {
 					continue;
 				}
 				$path = $entry->getPathname();
-				if ( ! is_writable( $path ) || ! is_readable( $path ) ) {
+				if ( ! wp_is_writable( $path ) || ! is_readable( $path ) ) {
 					return sprintf(
 						'the directory %s inside the plugin is not writable, so its contents could not be removed.',
 						ltrim( substr( $path, strlen( $plugin_dir ) ), '/\\' )
