@@ -223,14 +223,19 @@ class Aura_Worker_Redact {
 	/**
 	 * Is this request's response one an AGENT reads (spec §1.2)?
 	 *
-	 * True when it is a served REST request, not cookie-authenticated, and
-	 * either the gateway's tool execution (whoever authenticated it — the Aura
-	 * gateway runs token-only) or a route outside SiteAgent's own namespaces
-	 * reached by a logged-in user (an Application Password on `mcp/v1`, any
-	 * agent on `wp/v2`). SiteAgent's system routes are called by the Aura
-	 * server only and are never redacted; neither is a person nor the public.
+	 * True when it is a served REST request and either the gateway's tool
+	 * execution route (core-matched — see is_gateway_execute_route(); that
+	 * route is SiteAgent-token-authenticated and never a wp-admin surface,
+	 * so the cookie flag is not even consulted for it, fix round 1 #419) or,
+	 * when not cookie-authenticated, a route outside SiteAgent's own
+	 * namespaces reached by a logged-in user (an Application Password on
+	 * `mcp/v1`, any agent on `wp/v2`). SiteAgent's system routes are called
+	 * by the Aura server only and are never redacted; neither is a person
+	 * nor the public.
 	 *
-	 * Routes compare lowercased: WordPress matches them case-insensitively (R7).
+	 * The namespace check compares lowercased: WordPress matches routes
+	 * case-insensitively (R7). The gateway-route check is itself
+	 * case-insensitive; see is_gateway_execute_route().
 	 *
 	 * @param mixed $request WP_REST_Request, or anything else (false).
 	 * @return bool
@@ -239,17 +244,38 @@ class Aura_Worker_Redact {
 		if ( ! is_object( $request ) || ! method_exists( $request, 'get_route' ) ) {
 			return false;
 		}
-		if ( ! Aura_Worker_Rules::serving_rest() || Aura_Worker_Rules::cookie_authenticated() ) {
+		if ( ! Aura_Worker_Rules::serving_rest() ) {
 			return false;
 		}
-		$route = strtolower( (string) $request->get_route() );
-		if ( self::GATEWAY_EXECUTE_ROUTE === $route ) {
+		$route = (string) $request->get_route();
+		if ( self::is_gateway_execute_route( $route ) ) {
 			return true;
 		}
-		if ( self::is_own_route( $route ) ) {
+		if ( Aura_Worker_Rules::cookie_authenticated() ) {
+			return false;
+		}
+		if ( self::is_own_route( strtolower( $route ) ) ) {
 			return false;
 		}
 		return is_user_logged_in();
+	}
+
+	/**
+	 * Is $route the gateway's tool-execution route, matched exactly the way
+	 * core's WP_REST_Server::match_request_to_handler() matches it:
+	 * `preg_match( '@^' . $route . '$@i', $path )` — anchored, case-insensitive,
+	 * and (no `D` modifier) `$` matches before a trailing newline. So a route
+	 * with a trailing `\n` (e.g. `?rest_route=/aura/mcp/tools/execute%0A`)
+	 * still dispatches to tools/execute in core, and this must say so too
+	 * (fix round 1, IMPORTANT #1, #419) — a second trailing newline, or any
+	 * character after the first one, is NOT what core would dispatch here.
+	 * Public so Task 4's REST seam can reuse the same matching.
+	 *
+	 * @param string $route Unmodified route straight from the request.
+	 * @return bool
+	 */
+	public static function is_gateway_execute_route( $route ) {
+		return 1 === preg_match( '@^' . preg_quote( self::GATEWAY_EXECUTE_ROUTE, '@' ) . '$@i', (string) $route );
 	}
 
 	/**
