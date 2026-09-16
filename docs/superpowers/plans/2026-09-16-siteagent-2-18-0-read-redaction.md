@@ -46,7 +46,7 @@
 - **R13 — counters go through `Aura_Worker_Rules::bump_counter()`**, a public wrapper over the private `bump()` that accepts only the four known prefixes; the raw-SQL writer count `UninstallCoverageTest` acknowledges for `class-aura-worker-rules.php` (5) is unchanged, and both new prefixes sit under `aura_worker_`, which `uninstall.php` already sweeps.
 - **R14 — objects in response data.** `stdClass` and other plain objects are walked by public properties and replaced with a `stdClass` only when something changed (the JSON output is the same); `JsonSerializable` is walked through `jsonSerialize()`.
 - **R15 — `arguments` must be a JSON object.** Absent or `null` → `{}`; a non-empty list or a scalar → the shape is not recognised (header ignored, response redacted).
-- **R16 — the URL patterns are a superset of the spec's.** They also accept optional `userinfo@` and `:port`, any number of backslashes before a slash, and are case-insensitive. IFTTT also matches `/trigger/<event>/[json/]with/key/<key>` (Codex r1 P1 on SiteAgent#109). The URL tail stops before `)`, `]`, `}`, and a match's trailing `.,;:!?` are handed back to the text (Codex r1 P2). `https://hooks.zapier.com@evil.tld/` does not match (the host is `evil.tld`).
+- **R16 — the URL patterns are a superset of the spec's.** They also accept optional `userinfo@` and `:port`, any number of backslashes before a slash, and are case-insensitive. IFTTT also matches `/trigger/<event>/[json/]with/key/<key>` (Codex r1 P1 on SiteAgent#109). The URL tail stops before `)`, `]`, `}`, and a match's trailing `.,;:!?` are handed back to the text (Codex r1 P2); the tail also stops before an HTML-encoded quote or angle bracket (`&quot;`, `&#39;`, `&gt;`, `&#x3c;`, …), while a bare `&` stays in the URL (Codex r2 P2). A pathological input (e.g. a million `a&`) can exhaust PCRE's backtrack limit; R9 then fails the whole string closed. A private/protected property's mangled name counts as the key name in the opaque-object check (Codex r2 P1). `https://hooks.zapier.com@evil.tld/` does not match (the host is `evil.tld`).
 
 ---
 
@@ -151,6 +151,24 @@ final class SA_Redact_Unserialize_Probe {
 
 	public function __unserialize( array $data ): void {
 		$GLOBALS['_sa_redact_probe_woke'] = true;
+	}
+}
+
+/** Serializes `webhooks` as a PRIVATE property: `s:…:"\0SA_Redact_Private_Probe\0webhooks"`. */
+final class SA_Redact_Private_Probe {
+	private $webhooks;
+
+	public function __construct( string $webhooks ) {
+		$this->webhooks = $webhooks;
+	}
+}
+
+/** Serializes `webhooks` as a PROTECTED property: `s:…:"\0*\0webhooks"`. */
+class SA_Redact_Protected_Probe {
+	protected $webhooks;
+
+	public function __construct( string $webhooks ) {
+		$this->webhooks = $webhooks;
 	}
 }
 
@@ -312,12 +330,23 @@ final class RedactDetectorsTest extends TestCase {
 			'comma list'       => array( 'https://hook.eu1.make.com/a1, https://maker.ifttt.com/use/k2; done', 'aura-redacted:v1:make, aura-redacted:v1:ifttt; done' ),
 			'question'         => array( 'is it https://hooks.zapier.com/hooks/catch/1/abc?', 'is it aura-redacted:v1:zapier?' ),
 			'inner punctuation' => array( 'x https://api.telegram.org/bot1:AA-b/sendMessage?chat_id=1.5! y', 'x aura-redacted:v1:telegram! y' ),
+			'encoded attribute' => array( '&lt;a href=&quot;https://hooks.zapier.com/hooks/catch/1/&quot;&gt;send&lt;/a&gt;', '&lt;a href=&quot;aura-redacted:v1:zapier&quot;&gt;send&lt;/a&gt;' ),
+			'encoded close'     => array( 'go https://hook.eu1.make.com/abc&#62;x&#X3C;/a&#x3e;', 'go aura-redacted:v1:make&#62;x&#X3C;/a&#x3e;' ),
+			'encoded apostrophe' => array( "href=&#39;https://maker.ifttt.com/use/k1.&#x27;", "href=&#39;aura-redacted:v1:ifttt.&#x27;" ),
+			'query string'      => array( 'https://hooks.zapier.com/hooks/catch/1/?a=1&b=2 done', 'aura-redacted:v1:zapier done' ),
+			'encoded query amp' => array( 'https://maker.ifttt.com/trigger/e/with/key/K?v=1&amp;x=2&quot;', 'aura-redacted:v1:ifttt&quot;' ),
 		);
 	}
 
 	/** @dataProvider surroundings */
 	public function test_only_the_url_is_replaced_and_the_surrounding_text_survives( string $in, string $expected ): void {
 		$this->assertSame( $expected, $this->text( $in ) );
+	}
+
+	public function test_a_url_swallowed_behind_an_encoded_delimiter_is_redacted_too(): void {
+		$out = $this->text( 'https://hooks.zapier.com/hooks/catch/1/&quot;&gt;https://hook.eu1.make.com/b2&lt;', $n );
+		$this->assertSame( 'aura-redacted:v1:zapier&quot;&gt;aura-redacted:v1:make&lt;', $out );
+		$this->assertSame( 2, $n );
 	}
 
 	public function test_a_secret_is_redacted_whole_before_trailing_punctuation(): void {
@@ -517,6 +546,28 @@ final class RedactDetectorsTest extends TestCase {
 		$this->assertSame( array( 'id' => 'snap_y' ), $out['record'] );
 	}
 
+	/** @return array<string,array{0:object,1:string}> */
+	public static function mangled_secret_objects(): array {
+		return array(
+			'private property'   => array( new SA_Redact_Private_Probe( self::N8N ), "\0SA_Redact_Private_Probe\0webhooks" ),
+			'protected property' => array( new SA_Redact_Protected_Probe( self::N8N ), "\0*\0webhooks" ),
+		);
+	}
+
+	/** @dataProvider mangled_secret_objects */
+	public function test_a_mangled_secret_property_fails_the_payload_closed( object $probe, string $mangled ): void {
+		$bytes = serialize( array( 'extra' => $probe ) );
+		$this->assertStringContainsString( $mangled . '";', $bytes, 'fixture: the property name is mangled' );
+		$this->assertStringNotContainsString( 's:8:"webhooks";', $bytes, 'fixture: the plain key never appears' );
+		$answer = array( 'found' => true, 'record' => array( 'id' => 'snap_m' ), 'payload' => base64_encode( $bytes ) );
+
+		$out = Aura_Worker_Redact::redact( $answer, $n );
+
+		$this->assertSame( 1, $n );
+		$this->assertNull( $out['payload'], 'an unlisted host behind a mangled key is still withheld' );
+		$this->assertTrue( $out['payload_redacted'] );
+	}
+
 	/** @return array<string,array{0:string}> */
 	public static function unreadable_payloads(): array {
 		return array(
@@ -607,13 +658,23 @@ class Aura_Worker_Redact {
 	const RE_HOST_END = '(?::[0-9]+)?(?:\\\\)*/';
 
 	/**
+	 * Regex (after `&`): the name of an HTML-encoded quote or angle bracket —
+	 * `quot`, `#34`, `#x22`, `apos`, `#39`, `#x27`, `gt`, `#62`, `#x3e`,
+	 * `lt`, `#60`, `#x3c` (the pattern is case-insensitive).
+	 */
+	const RE_ENTITY = '(?:quot|apos|gt|lt|#0*(?:34|39|60|62)|#x0*(?:22|27|3c|3e));';
+
+	/**
 	 * Regex: the rest of the URL. It stops at whitespace, a quote, `<`, `>`,
 	 * a closing `)` `]` `}` or a bare backslash, so a Markdown link or a
-	 * parenthesis keeps its delimiter. Trailing sentence punctuation is
-	 * handed back by redact_text() (TRAILING_PUNCTUATION). Possessive and
-	 * linear: no backtracking, whatever the string's length.
+	 * parenthesis keeps its delimiter. It also stops before an HTML-encoded
+	 * quote or angle bracket (RE_ENTITY) — a URL inside encoded markup ends
+	 * there — while a bare `&` (a query-string separator, or `&amp;`) stays
+	 * in the URL (Codex r2 P2 on SiteAgent#109). Trailing sentence
+	 * punctuation is handed back by redact_text() (TRAILING_PUNCTUATION).
+	 * Possessive: no backtracking.
 	 */
-	const RE_TAIL = '(?:[^\s"\'<>\\\\)\]}]++|(?:\\\\)++/)*+~i';
+	const RE_TAIL = '(?:[^\s"\'<>\\\\)\]}&]++|(?:\\\\)++/|&(?!' . self::RE_ENTITY . '))*+~i';
 
 	/**
 	 * Punctuation that ends a sentence rather than a URL: stripped from the
@@ -972,6 +1033,11 @@ class Aura_Worker_Redact {
 	 * Could this opaque object hold a secret? Its serialized form is checked
 	 * for a receiver URL and for any key name the detectors act on (R3).
 	 *
+	 * A key name is found as a whole serialized string (`s:8:"webhooks";`)
+	 * or as the tail of a private/protected property's mangled name
+	 * (`s:11:"\0X\0webhooks";`, `s:11:"\0*\0webhooks";`) — i.e. preceded by
+	 * `s:<len>:"` or by a NUL byte (Codex r2 P1 on SiteAgent#109).
+	 *
 	 * @param object $object An __PHP_Incomplete_Class.
 	 * @return bool
 	 */
@@ -982,7 +1048,8 @@ class Aura_Worker_Redact {
 			return true;
 		}
 		foreach ( array_merge( self::SECRET_KEYS, self::JSON_META_KEYS ) as $key ) {
-			if ( false !== strpos( $bytes, 's:' . strlen( $key ) . ':"' . $key . '";' ) ) {
+			$name = '(?:s:' . strlen( $key ) . ':"|\x00)' . preg_quote( $key, '/' ) . '";';
+			if ( 1 === preg_match( '/' . $name . '/', $bytes ) ) {
 				return true;
 			}
 		}
@@ -2987,4 +3054,4 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 - **Spec coverage.** §1.1 seam → Task 3 (+ Task 1 Step 1 verification of core's order and the adapter). §1.2 audience → Task 2, seam tests in Task 3. §1.3 grant, both rows, exemption per request, 403, no-key ignore → Task 4. §2.1 → Task 1. §2.2 → Task 1. §2.2a carriers 1–3, bound, byte-for-byte, fail-closed payload, object payload → Task 1 (with R1–R3). §2.3 placeholder → Task 1. §2.4 same value → Tasks 1 and 3. §3 → Task 5 (per source, decoded, escape, cookie allowed, GET skipped, update-widget omission). §4 site half → Tasks 3 and 6. §5 limits → documented in CLAUDE.md (Task 7) and the Rulings. §6 SiteAgent tests → Tasks 1–6; staging → "After the tasks". §7.1 → Task 7.
 - **Placeholder scan.** No TBD/TODO; every code step carries the code.
 - **Name consistency.** `redact`, `redact_text`, `is_audience`, `filter_echo`, `before_callbacks`, `grant_shape`, `holds_placeholder`, `status_fragment`, `record_redacted`, `record_placeholder_refused`, `reset_for_tests`; `Aura_Worker_Rules::serving_rest`, `cookie_authenticated`, `bump_counter`; constants `REDACTED_COUNTER`, `PLACEHOLDER_REFUSED_COUNTER`, `STATUS_VERSION` — used identically in every task.
-- **Dry run.** The assembled class, the Rules/API/tool/bootstrap edits and all six new test files were run while writing this plan against the SiteAgent test bootstrap (PHP 8.5, PHPUnit 10.5 classes, in-memory file patches — nothing written to the repo): all 159 new test cases passed; after the Codex round-1 fixes (IFTTT trigger URLs, URL tail boundary) only `RedactDetectorsTest` was re-run — 76/76, 16 cases more than before, and the existing suite showed no new failure against an unpatched baseline under the same runner. `composer test` / `composer lint` on the real branch remain the gate, including PHP 7.4.
+- **Dry run.** The assembled class, the Rules/API/tool/bootstrap edits and all six new test files were run while writing this plan against the SiteAgent test bootstrap (PHP 8.5, PHPUnit 10.5 classes, in-memory file patches — nothing written to the repo): all 159 new test cases passed; after the Codex round-1 fixes (IFTTT trigger URLs, URL tail boundary) only `RedactDetectorsTest` was re-run — 76/76 after round 1, 84/84 after round 2 (mangled property names, encoded HTML delimiters), and the existing suite showed no new failure against an unpatched baseline under the same runner. `composer test` / `composer lint` on the real branch remain the gate, including PHP 7.4.
