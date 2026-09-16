@@ -346,7 +346,44 @@ class Aura_Worker_Security {
 	 * @return bool
 	 */
 	private function is_hashed( $value ) {
+		return self::is_hashed_token( $value );
+	}
+
+	/**
+	 * is_hashed(), callable without an instance.
+	 *
+	 * @param string $value Stored token value.
+	 * @return bool
+	 */
+	private static function is_hashed_token( $value ) {
 		return (bool) preg_match( '/^[0-9a-f]{64}$/', (string) $value );
+	}
+
+	/**
+	 * Does this raw token match the stored site token? The comparison alone:
+	 * no throttle, no failure record, no legacy-token migration, no captured
+	 * auth, no current user — check_aura_token() adds all of those around it.
+	 * Also what a filter that runs BEFORE the permission callback asks
+	 * (Aura_Worker_Redact on the gateway route, 2.18.0) without touching any
+	 * of that state.
+	 *
+	 * @since 2.18.0
+	 *
+	 * @param string $provided_token Raw token, as sent in X-Aura-Token.
+	 * @return bool
+	 */
+	public static function token_matches( $provided_token ) {
+		$provided_token = (string) $provided_token;
+		$stored_token   = get_option( 'aura_worker_site_token', '' );
+		if ( '' === $provided_token || empty( $stored_token ) ) {
+			return false;
+		}
+		if ( self::is_hashed_token( $stored_token ) ) {
+			// Modern path: stored value is a SHA-256 hash of the token.
+			return hash_equals( $stored_token, self::hash_token( $provided_token ) );
+		}
+		// Legacy path: stored value is a raw token from an older version.
+		return hash_equals( $stored_token, $provided_token );
 	}
 
 	/**
@@ -514,19 +551,11 @@ class Aura_Worker_Security {
 			return $throttle;
 		}
 
-		$valid = false;
-		if ( '' !== $provided_token ) {
-			if ( $this->is_hashed( $stored_token ) ) {
-				// Modern path: stored value is a SHA-256 hash of the token.
-				$valid = hash_equals( $stored_token, self::hash_token( $provided_token ) );
-			} else {
-				// Legacy path: stored value is a raw token from an older version.
-				// Compare raw, then opportunistically migrate to a stored hash.
-				$valid = hash_equals( $stored_token, $provided_token );
-				if ( $valid ) {
-					update_option( 'aura_worker_site_token', self::hash_token( $provided_token ) );
-				}
-			}
+		$valid = self::token_matches( $provided_token );
+		if ( $valid && ! $this->is_hashed( $stored_token ) ) {
+			// Legacy path: the stored value was a raw token from an older
+			// version. It matched, so opportunistically migrate to a stored hash.
+			update_option( 'aura_worker_site_token', self::hash_token( $provided_token ) );
 		}
 
 		if ( ! $valid ) {

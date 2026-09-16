@@ -231,4 +231,22 @@ final class SecurityTest extends TestCase {
 		// run-as must NOT fire when a user is already logged in.
 		$this->assertSame( 0, $GLOBALS['_current_user'] );
 	}
+
+	public function test_token_matches_is_the_same_comparison_without_side_effects(): void {
+		$this->assertFalse( Aura_Worker_Security::token_matches( 'anything' ), 'an unconfigured site matches nothing' );
+
+		update_option( 'aura_worker_site_token', Aura_Worker_Security::hash_token( 'the-token' ) );
+		$this->assertTrue( Aura_Worker_Security::token_matches( 'the-token' ) );
+		$this->assertFalse( Aura_Worker_Security::token_matches( 'other' ) );
+		$this->assertFalse( Aura_Worker_Security::token_matches( '' ) );
+
+		update_option( 'aura_worker_site_token', 'legacy-plaintext-token' );
+		$this->assertTrue( Aura_Worker_Security::token_matches( 'legacy-plaintext-token' ) );
+		$this->assertSame( 'legacy-plaintext-token', get_option( 'aura_worker_site_token' ), 'no migration' );
+		$this->assertFalse( Aura_Worker_Security::token_matches( 'wrong' ) );
+
+		$this->assertSame( array(), $GLOBALS['_transients'], 'no failure recorded' );
+		$this->assertNull( Aura_Worker_Security::authenticated_token_hash(), 'no auth captured' );
+		$this->assertSame( 0, (int) ( $GLOBALS['_current_user'] ?? 0 ), 'no run-as' );
+	}
 }

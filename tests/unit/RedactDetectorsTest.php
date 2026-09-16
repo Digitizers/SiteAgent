@@ -48,6 +48,20 @@ class SA_Redact_Protected_Probe {
 	}
 }
 
+/** An ArrayObject subclass with a public property of its own. */
+final class SA_Redact_Array_Object_Probe extends ArrayObject {
+	/** @var string Emitted by json_encode only under STD_PROP_LIST. */
+	public $pub = 'plain';
+}
+
+/** A JsonSerializable whose serialization is itself — json_encode would recurse without end. */
+final class SA_Redact_Self_Serializing_Probe implements JsonSerializable {
+	#[\ReturnTypeWillChange]
+	public function jsonSerialize() {
+		return $this;
+	}
+}
+
 final class RedactDetectorsTest extends TestCase {
 
 	private const N8N = 'https://n8n.example.com/webhook/abc';
@@ -663,5 +677,99 @@ final class RedactDetectorsTest extends TestCase {
 		$this->assertNull( $out['payload'] );
 		$this->assertTrue( $out['payload_redacted'] );
 		$this->assertArrayNotHasKey( '_sa_redact_probe_woke', $GLOBALS, 'no class was instantiated' );
+	}
+
+	// --- ArrayObject / ArrayIterator (final review minor 5) -------------------
+
+	public function test_an_array_object_is_walked_as_json_encode_emits_its_storage(): void {
+		$node = array( 'settings' => new ArrayObject( array( 'webhooks' => self::N8N, 'form_name' => 'Contact' ) ) );
+		$this->assertStringContainsString( 'n8n.example.com', (string) wp_json_encode( $node ), 'fixture: json_encode emits the storage' );
+
+		$out = Aura_Worker_Redact::redact( $node, $n );
+
+		$this->assertSame( 1, $n );
+		$this->assertSame( '{"settings":{"webhooks":"aura-redacted:v1:field","form_name":"Contact"}}', wp_json_encode( $out ), 'the same JSON shape, the value replaced' );
+	}
+
+	public function test_an_array_iterator_holding_a_list_keeps_its_object_shape(): void {
+		$node = new ArrayIterator( array( 'see https://hooks.zapier.com/hooks/catch/1/abc', 'plain' ) );
+		$this->assertSame( '{"0":"see https:\\/\\/hooks.zapier.com\\/hooks\\/catch\\/1\\/abc","1":"plain"}', wp_json_encode( $node ), 'fixture' );
+
+		$out = Aura_Worker_Redact::redact( $node, $n );
+
+		$this->assertSame( 1, $n );
+		$this->assertSame( '{"0":"see aura-redacted:v1:zapier","1":"plain"}', wp_json_encode( $out ) );
+	}
+
+	public function test_an_array_object_under_std_prop_list_is_walked_through_its_properties(): void {
+		$node      = new SA_Redact_Array_Object_Probe( array( 'a' => 1 ), ArrayObject::STD_PROP_LIST );
+		$node->pub = self::N8N . ' https://hooks.zapier.com/hooks/catch/1/abc';
+		$this->assertStringContainsString( 'hooks.zapier.com', (string) wp_json_encode( $node ), 'fixture: json_encode emits the properties' );
+
+		$out = Aura_Worker_Redact::redact( $node, $n );
+
+		$this->assertSame( 1, $n );
+		$this->assertStringNotContainsString( 'hooks.zapier.com', (string) wp_json_encode( $out ) );
+	}
+
+	public function test_a_clean_array_object_is_returned_as_is(): void {
+		$node = new ArrayObject( array( 'webhooks' => '', 'n' => array( 1, 2 ) ) );
+		$this->assertSame( $node, Aura_Worker_Redact::redact( $node, $n ) );
+		$this->assertSame( 0, $n );
+	}
+
+	// --- nesting bound (final review minor 9) ---------------------------------
+
+	public function test_a_self_referencing_object_fails_closed_instead_of_recursing_forever(): void {
+		$node       = new stdClass();
+		$node->name = 'loop';
+		$node->self = $node;
+
+		$out = Aura_Worker_Redact::redact( $node, $n );
+
+		$this->assertGreaterThan( 0, $n );
+		$leaf = $out;
+		for ( $i = 0; $i < Aura_Worker_Redact::MAX_WALK_DEPTH && $leaf instanceof stdClass; $i++ ) {
+			$leaf = $leaf->self;
+		}
+		$this->assertSame( 'aura-redacted:v1:field', $leaf, 'the subtree past the bound is the field placeholder' );
+	}
+
+	public function test_a_self_referencing_carrier_container_fails_closed(): void {
+		$node                  = new stdClass();
+		$node->_elementor_data = $node; // walk_with_carrier() recursing into itself
+
+		Aura_Worker_Redact::redact( array( 'meta' => $node ), $n );
+
+		$this->assertGreaterThan( 0, $n );
+	}
+
+	public function test_a_json_serializable_that_serializes_to_itself_fails_closed(): void {
+		$out = Aura_Worker_Redact::redact( array( 'x' => new SA_Redact_Self_Serializing_Probe() ), $n );
+		$this->assertGreaterThan( 0, $n );
+		$this->assertSame( 'aura-redacted:v1:field', $out['x'] );
+	}
+
+	private function nest( int $levels, $leaf ) {
+		$node = $leaf;
+		for ( $i = 0; $i < $levels; $i++ ) {
+			$node = array( 'k' => $node );
+		}
+		return $node;
+	}
+
+	public function test_nesting_past_the_bound_fails_closed_and_within_it_is_untouched(): void {
+		$within = $this->nest( Aura_Worker_Redact::MAX_WALK_DEPTH, 'plain' );
+		$this->assertSame( $within, Aura_Worker_Redact::redact( $within, $n ) );
+		$this->assertSame( 0, $n, 'a clean tree at the bound is left alone' );
+
+		$past = $this->nest( Aura_Worker_Redact::MAX_WALK_DEPTH + 1, 'plain' );
+		$out  = Aura_Worker_Redact::redact( $past, $n );
+		$this->assertSame( 1, $n );
+		$this->assertSame( $this->nest( Aura_Worker_Redact::MAX_WALK_DEPTH, 'aura-redacted:v1:field' ), $out );
+
+		// The bound is per path, not per call: a second walk starts from zero.
+		$this->assertSame( $within, Aura_Worker_Redact::redact( $within, $n ) );
+		$this->assertSame( 0, $n );
 	}
 }

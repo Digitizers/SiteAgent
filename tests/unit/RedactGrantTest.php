@@ -67,8 +67,10 @@ final class RedactGrantTest extends TestCase {
 		);
 	}
 
+	/** A gateway call, carrying the site token as Aura's always does. */
 	private function execute_call( string $tool, array $params ): WP_REST_Request {
 		$req = new WP_REST_Request( 'POST', '/aura/mcp/tools/execute' );
+		$req->set_header( 'X-Aura-Token', SA_RAW_SITE_TOKEN );
 		$req->set_param( 'tool', $tool );
 		$req->set_param( 'params', $params );
 		return $req;
@@ -337,6 +339,43 @@ final class RedactGrantTest extends TestCase {
 		$req = $this->execute_call( 'snapshot_get', array( 'id' => 'snap_1' ) );
 		$req->set_header( 'X-Aura-Unredacted-Grant', $this->grant( 'unredacted-read:mcp/elementor-mcp-server#snapshot_get', array( 'id' => 'snap_1' ) ) );
 		$this->assertRefused( $this->before( $req ) );
+	}
+
+	/** @return array<string,array{0:?string}> */
+	public static function unauthenticated_tokens(): array {
+		return array(
+			'no token'    => array( null ),
+			'wrong token' => array( 'not-the-site-token' ),
+		);
+	}
+
+	/**
+	 * The grant is checked before the route's permission callback: on the
+	 * gateway row that is only done for a caller holding the site token, so
+	 * an anonymous caller cannot burn a captured grant's nonce (final review,
+	 * Important — closes the accepted Task 4 ruling).
+	 *
+	 * @dataProvider unauthenticated_tokens
+	 */
+	public function test_an_unauthenticated_gateway_call_spends_no_grant_nonce( ?string $token ): void {
+		$GLOBALS['_logged_in']         = false;
+		$GLOBALS['_rest_app_password'] = null;
+		$grant = $this->grant( 'unredacted-read:aura/mcp#snapshot_get', array( 'id' => 'snap_1' ) );
+		$req   = new WP_REST_Request( 'POST', '/aura/mcp/tools/execute' );
+		$req->set_param( 'tool', 'snapshot_get' );
+		$req->set_param( 'params', array( 'id' => 'snap_1' ) );
+		if ( null !== $token ) {
+			$req->set_header( 'X-Aura-Token', $token );
+		}
+		$req->set_header( 'X-Aura-Unredacted-Grant', $grant );
+
+		$this->assertNull( $this->before( $req ), 'left to the permission callback' );
+		$this->assertNotSame( $this->export_body(), $this->echoed( $req, $this->export_body() ), 'nothing was exempted' );
+		$this->assertSame( true, Aura_Worker_Grant::verify( $grant, 'unredacted-read:aura/mcp#snapshot_get', array( 'id' => 'snap_1' ) ), 'the nonce is still unspent' );
+
+		// A garbage grant from the same caller is not refused either.
+		$req->set_header( 'X-Aura-Unredacted-Grant', 'garbage' );
+		$this->assertNull( $this->before( $req ) );
 	}
 
 	// --- core-style route matching (Task 2 ruling) ---------------------------

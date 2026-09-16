@@ -288,8 +288,14 @@ out of every REST response an **agent** reads.
   ifttt|telegram|field`) — one-way, no hash.
 - **Write guard** (`rest_request_before_callbacks`, priority 6, after the rules guard):
   an audience request with a method other than GET/HEAD/OPTIONS whose query, body,
-  JSON or URL params (each walked separately, carriers decoded) contain
-  `aura-redacted:` → `409 aura_redacted_placeholder`. Not a security boundary.
+  JSON or URL params (each walked separately, carriers decoded) — or, for a non-POST
+  form body core has not parsed yet (`lazy_form_body()`: form-encoded or no content
+  type, no route `args`), that raw body parsed the way core would — contain
+  `aura-redacted:` → `409 aura_redacted_placeholder`. Not a security boundary. On the
+  gateway route the guard and the grant check act only for a request carrying the
+  valid site token (`Aura_Worker_Security::token_matches()`, a side-effect-free
+  comparison): the filter runs before the route's permission callback, so an
+  anonymous caller gets that callback's answer — no 409, no counter, no nonce spent.
 - **Unredacted grant.** `X-Aura-Unredacted-Grant`, verified by
   `Aura_Worker_Grant::verify()` on two shapes only: a single-object JSON-RPC
   `tools/call` POST to `/mcp/<server>` (tool `unredacted-read:mcp/<server>#<name>`,
@@ -302,7 +308,22 @@ out of every REST response an **agent** reads.
   `do_action( 'aura_worker_placeholder_refused', $route )`; hourly counters through
   `Aura_Worker_Rules::bump_counter()`; `audit_rules.enforcement` carries `redacted_24h`,
   `placeholder_refused_24h` and the points `read_redaction`, `placeholder_guard`;
-  `/status` carries `redaction: { v: 1 }` (an object; absent = pre-2.18.0).
+  `/status` carries `redaction: { v: 1 }` (an object; absent = pre-2.18.0). The counter
+  sweep runs once an hour (on the bump that creates the hour's row), not on every bump.
+- **Walk bounds.** `ArrayObject`/`ArrayIterator` are walked through the view
+  `json_encode()` emits (their storage, or their properties under `STD_PROP_LIST`);
+  no other `Traversable` is iterated. Nesting past `MAX_WALK_DEPTH` (512) — a
+  self-referencing object included — becomes the field placeholder (fail closed).
+- **Limits** (known, accepted):
+  - raw-read tools (`db_query`, `execute_php`, `run_wp_cli`, `read_file`, and
+    `meta_key`/`meta_value` rows) get only the URL detector — the key names are not
+    there, so a `webhooks` value on an unlisted host is not caught;
+  - the guard also refuses legitimate power-tool input that mentions
+    `aura-redacted:` (case-insensitive);
+  - `/aura/mcp/tools/preview` returns unredacted data (it is not in the audience) and
+    must never be forwarded to an agent;
+  - redaction takes about 8× the carrier's size in memory at peak, and fails closed
+    (placeholder or `payload_redacted`) when a step cannot complete.
 
 ---
 

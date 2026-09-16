@@ -254,7 +254,7 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 == Changelog ==
 
 = 2.18.0 =
-* Security: webhook endpoints no longer leave the site in a REST response an AI agent reads — Aura's gateway tools, an MCP client using an Application Password, or any logged-in non-browser caller. Make, Zapier, Slack, Discord, IFTTT and Telegram hook URLs, and Elementor Pro form webhooks on any host, are replaced with `aura-redacted:v1:<kind>`, including inside Elementor page data and snapshot payloads. People in wp-admin, public visitors and Aura's own system calls see the real values.
+* Security: known webhook endpoints no longer leave the site in a REST response an AI agent reads — Aura's gateway tools, an MCP client using an Application Password, or any logged-in non-browser caller. Make, Zapier, Slack, Discord, IFTTT and Telegram hook URLs, and Elementor Pro form webhooks on any host, are replaced with `aura-redacted:v1:<kind>`, including inside Elementor page data and snapshot payloads. People in wp-admin, public visitors and Aura's own system calls see the real values.
 * An agent write that carries a redacted placeholder is refused (`aura_redacted_placeholder`): leave that field out and the stored value is kept.
 * Aura's own page snapshots stay complete: a signed header proves the read is Aura's (`aura_unredacted_grant_invalid` when it does not verify).
 * `audit_rules` reports `redacted_24h` and `placeholder_refused_24h`; `/status` reports `redaction`.

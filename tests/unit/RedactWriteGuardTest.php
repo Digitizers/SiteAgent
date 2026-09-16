@@ -147,12 +147,71 @@ final class RedactWriteGuardTest extends TestCase {
 		$this->assertRefused( $this->before( $req ) );
 	}
 
-	public function test_the_gateway_is_guarded_too(): void {
-		$GLOBALS['_logged_in']         = false; // token-only
+	private function gateway_write( ?string $token ): WP_REST_Request {
+		$GLOBALS['_logged_in']         = false; // token-only, as the gateway runs
 		$GLOBALS['_rest_app_password'] = null;
+		sa_token_hash(); // the site has a token
+		Aura_Worker_Security::capture_token_auth( '' ); // …which this request has not proven yet
 		$req = new WP_REST_Request( 'POST', '/aura/mcp/tools/execute' );
 		$req->set_body_params( array( 'tool' => 'set_seo_meta', 'params' => array( 'title' => self::MARK ) ) );
-		$this->assertRefused( $this->before( $req ) );
+		if ( null !== $token ) {
+			$req->set_header( 'X-Aura-Token', $token );
+		}
+		return $req;
+	}
+
+	public function test_the_gateway_is_guarded_too(): void {
+		// With the site token — the only caller the gateway ever serves.
+		$this->assertRefused( $this->before( $this->gateway_write( SA_RAW_SITE_TOKEN ) ) );
+		$this->assertSame( 1, $this->refused_count() );
+	}
+
+	/** @return array<string,array{0:?string}> */
+	public static function unauthenticated_tokens(): array {
+		return array(
+			'no token'    => array( null ),
+			'empty token' => array( '' ),
+			'wrong token' => array( 'not-the-site-token' ),
+		);
+	}
+
+	/**
+	 * The gateway row is in the audience whoever calls it, but the guard runs
+	 * before the route's permission callback checks X-Aura-Token (final
+	 * review, Important): an anonymous caller must reach that check, not a
+	 * 409 that bumps a counter and writes to the database.
+	 *
+	 * @dataProvider unauthenticated_tokens
+	 */
+	public function test_an_unauthenticated_gateway_write_is_left_to_the_permission_callback( ?string $token ): void {
+		$req = $this->gateway_write( $token );
+
+		$this->assertNull( $this->before( $req ), 'not refused by the guard' );
+		$this->assertSame( 0, $this->refused_count(), 'and not counted' );
+
+		$answer = ( new Aura_Worker_Security() )->check_update_plugins_permission( $req );
+		$this->assertInstanceOf( WP_Error::class, $answer );
+		$this->assertSame( 'aura_invalid_token', $answer->get_error_code(), 'the route answers for itself' );
+		$this->assertSame( 401, $answer->get_error_data()['status'] );
+	}
+
+	public function test_the_token_check_before_the_guard_has_no_side_effects(): void {
+		$req = $this->gateway_write( 'not-the-site-token' );
+		$this->before( $req );
+		$this->assertFalse( is_user_logged_in(), 'no current user was set' );
+		$this->assertNull( Aura_Worker_Security::authenticated_token_hash(), 'no token auth was captured' );
+		$this->assertSame(
+			array(),
+			array_values( array_filter( array_keys( $GLOBALS['_transients'] ?? array() ), static function ( $k ) {
+				return 0 === strpos( (string) $k, 'aura_worker_tokfail_' );
+			} ) ),
+			'no failed attempt was recorded'
+		);
+
+		$good = $this->gateway_write( SA_RAW_SITE_TOKEN );
+		$this->before( $good );
+		$this->assertFalse( is_user_logged_in() );
+		$this->assertNull( Aura_Worker_Security::authenticated_token_hash() );
 	}
 
 	public function test_a_person_may_write_the_literal_string(): void {

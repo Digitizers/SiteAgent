@@ -3763,10 +3763,13 @@ if ( ! class_exists( 'SA_Test_Wpdb' ) ) {
 			// touched $_options would leave the "database" holding a stale
 			// count the moment anything reads it back through $_rows.
 			if ( preg_match( "/^INSERT INTO \S+ \(option_name, option_value, autoload\) VALUES \('([^']+)', '1', 'no'\) ON DUPLICATE KEY UPDATE option_value = option_value \+ 1$/", $query, $m ) ) {
-				$name = stripslashes( $m[1] );
-				$GLOBALS['_rows'][ $name ]    = isset( $GLOBALS['_rows'][ $name ] ) ? (string) ( (int) $GLOBALS['_rows'][ $name ] + 1 ) : '1';
+				$name    = stripslashes( $m[1] );
+				$existed = isset( $GLOBALS['_rows'][ $name ] );
+				$GLOBALS['_rows'][ $name ]    = $existed ? (string) ( (int) $GLOBALS['_rows'][ $name ] + 1 ) : '1';
 				$GLOBALS['_options'][ $name ] = $GLOBALS['_rows'][ $name ];
-				return 1;
+				// MySQL's affected rows for INSERT … ON DUPLICATE KEY UPDATE:
+				// 1 when the row was inserted, 2 when it was updated.
+				return $existed ? 2 : 1;
 			}
 			// Aura_Worker_Door_Log::versioned()'s DURABLE commit witness
 			// (Ruling S32, 2.16.2 — supersedes S30's shared-row upsert): a

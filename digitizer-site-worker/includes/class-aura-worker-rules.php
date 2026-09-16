@@ -177,7 +177,7 @@ class Aura_Worker_Rules {
 		// So the seed and the increment are ONE statement instead: the first
 		// bump of the hour inserts '1', every later bump in the same hour
 		// adds one to whatever is there. Nothing ever reads the row first.
-		$wpdb->query(
+		$affected = $wpdb->query(
 			$wpdb->prepare(
 				"INSERT INTO {$wpdb->options} (option_name, option_value, autoload) VALUES (%s, '1', 'no') ON DUPLICATE KEY UPDATE option_value = option_value + 1",
 				$name
@@ -191,6 +191,16 @@ class Aura_Worker_Rules {
 		// "absent" — for the rest of the request, and on a persistent object
 		// cache for every request after — and the count stays at zero.
 		wp_cache_delete( 'notoptions', 'options' );
+
+		// Once an hour, not once a bump (2.18.0: every redacted response
+		// bumps, #419): the boundary depends only on the hour, so the sweep
+		// the hour's first bump ran is the sweep every later one would run.
+		// MySQL answers 2 for a row ON DUPLICATE KEY UPDATE updated and 1 for
+		// one it inserted; anything but a known update (an error, or a driver
+		// that counts differently) still sweeps, as before.
+		if ( 2 === $affected ) {
+			return;
+		}
 
 		// Sweep hour-options older than the boundary hour. Same-length names
 		// (see bucket_name) make the string comparison a numeric one.

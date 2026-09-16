@@ -142,6 +142,14 @@ class Aura_Worker_Redact {
 	/** JSON decodes allowed along one path (spec §2.2a). A payload decode is not counted (Ruling R2). */
 	const MAX_JSON_DECODES = 2;
 
+	/**
+	 * Containers walk() and walk_with_carrier() may be nested in along one
+	 * path — json_encode()'s own default depth. Past it (a self-referencing
+	 * object, or a tree no JSON response could carry) the subtree is the
+	 * field placeholder: fail closed, never a fatal recursion (final review).
+	 */
+	const MAX_WALK_DEPTH = 512;
+
 	/** Hourly counter: responses with at least one replacement (spec §4). */
 	const REDACTED_COUNTER = 'aura_worker_redacted_h';
 
@@ -176,6 +184,14 @@ class Aura_Worker_Redact {
 	 * @var array<int,object>
 	 */
 	private static $exempt = array();
+
+	/**
+	 * How many walk()/walk_with_carrier() containers the current path is in.
+	 * Every recursion of the walk passes one of the two.
+	 *
+	 * @var int
+	 */
+	private static $walk_level = 0;
 
 	/**
 	 * Hook the read seam and the counters. Called from Aura_Worker::init(),
@@ -236,12 +252,35 @@ class Aura_Worker_Redact {
 		if ( null !== $response || ! self::is_audience( $request ) ) {
 			return $response;
 		}
+		// The gateway row is in the audience whoever calls it, and this filter
+		// runs before its permission callback checks X-Aura-Token. So nothing
+		// here — no 409, no counter, no nonce — acts for a caller that does not
+		// hold the site token: the permission callback answers it (final
+		// review, #419). A pure comparison: no throttle, no captured auth, no
+		// current user.
+		if ( self::is_gateway_execute_route( (string) $request->get_route() ) && ! self::carries_site_token( $request ) ) {
+			return $response;
+		}
 		$refused = self::refuse_placeholder_write( $request );
 		if ( null !== $refused ) {
 			return $refused; // before the grant: a refused write spends no nonce (R5)
 		}
 		$grant = self::verify_unredacted_grant( $request );
 		return null === $grant ? $response : $grant;
+	}
+
+	/**
+	 * Does the request carry the site token? Aura_Worker_Security's own
+	 * comparison, without any of check_aura_token()'s side effects.
+	 *
+	 * @param WP_REST_Request $request Request.
+	 * @return bool
+	 */
+	private static function carries_site_token( $request ) {
+		if ( ! method_exists( $request, 'get_header' ) || ! class_exists( 'Aura_Worker_Security' ) ) {
+			return false;
+		}
+		return Aura_Worker_Security::token_matches( (string) $request->get_header( 'X-Aura-Token' ) );
 	}
 
 	/**
@@ -596,7 +635,8 @@ class Aura_Worker_Redact {
 
 	/** Test seam: forget every exemption. */
 	public static function reset_for_tests() {
-		self::$exempt = array();
+		self::$exempt     = array();
+		self::$walk_level = 0;
 	}
 
 	/**
@@ -776,11 +816,34 @@ class Aura_Worker_Redact {
 		if ( is_string( $node ) ) {
 			return self::redact_text( $node, $count );
 		}
+		if ( ! is_array( $node ) && ! is_object( $node ) ) {
+			return $node; // int, float, bool, null
+		}
+		if ( self::$walk_level >= self::MAX_WALK_DEPTH ) {
+			++$count;
+			return self::PLACEHOLDER . 'field';
+		}
+		++self::$walk_level;
+		try {
+			return self::walk_container( $node, $depth, $in_payload, $count );
+		} finally {
+			--self::$walk_level;
+		}
+	}
+
+	/**
+	 * walk() for an array or an object, inside the nesting bound.
+	 *
+	 * @param array|object $node       Container.
+	 * @param int          $depth      JSON decodes already made along this path.
+	 * @param bool         $in_payload Inside a snapshot payload (carrier 3).
+	 * @param int          $count      In/out.
+	 * @return mixed
+	 * @throws UnexpectedValueException Inside a payload only (see walk()).
+	 */
+	private static function walk_container( $node, $depth, $in_payload, &$count ) {
 		if ( is_array( $node ) ) {
 			return self::walk_array( $node, $depth, $in_payload, $count );
-		}
-		if ( ! is_object( $node ) ) {
-			return $node; // int, float, bool, null
 		}
 		if ( $in_payload && $node instanceof __PHP_Incomplete_Class ) {
 			// unserialize() with allowed_classes=false made this; its
@@ -796,8 +859,17 @@ class Aura_Worker_Redact {
 			$walked = self::walk( $node->jsonSerialize(), $depth, $in_payload, $count );
 			return $count === $before ? $node : $walked;
 		}
-		// Public properties are exactly what the JSON response carries (R14).
-		$walked = self::walk_array( get_object_vars( $node ), $depth, $in_payload, $count );
+		// Public properties are exactly what the JSON response carries (R14) —
+		// except for ArrayObject and ArrayIterator, whose storage json_encode()
+		// emits instead (unless STD_PROP_LIST is set), always as a JSON object.
+		// Only those two: json_encode() never iterates any other Traversable,
+		// and iterating one (a generator) here would consume it.
+		$fields = get_object_vars( $node );
+		if ( ( $node instanceof ArrayObject || $node instanceof ArrayIterator )
+			&& 0 === ( $node->getFlags() & ArrayObject::STD_PROP_LIST ) ) {
+			$fields = $node->getArrayCopy();
+		}
+		$walked = self::walk_array( $fields, $depth, $in_payload, $count );
 		return $count === $before ? $node : (object) $walked;
 	}
 
@@ -960,6 +1032,30 @@ class Aura_Worker_Redact {
 		if ( ! $is_object && ! is_array( $container ) ) {
 			return self::walk( $container, $depth, $in_payload, $count );
 		}
+		if ( self::$walk_level >= self::MAX_WALK_DEPTH ) {
+			++$count;
+			return self::PLACEHOLDER . 'field'; // as walk(): a carrier container can nest in itself too
+		}
+		++self::$walk_level;
+		try {
+			return self::walk_carrier_fields( $container, $is_object, $carrier, $depth, $in_payload, $count );
+		} finally {
+			--self::$walk_level;
+		}
+	}
+
+	/**
+	 * walk_with_carrier() for an array or stdClass, inside the nesting bound.
+	 *
+	 * @param array|stdClass $container  Container.
+	 * @param bool           $is_object  Whether it is a stdClass.
+	 * @param string         $carrier    The carrier field's name.
+	 * @param int            $depth      JSON decodes so far.
+	 * @param bool           $in_payload Inside a payload.
+	 * @param int            $count      In/out.
+	 * @return mixed
+	 */
+	private static function walk_carrier_fields( $container, $is_object, $carrier, $depth, $in_payload, &$count ) {
 		if ( ! $is_object && self::is_snapshot_answer( $container ) ) {
 			// The carrier field's own container is itself a snapshot answer
 			// (fix round 1, Codex r1 P1) — e.g. `_elementor_data` decoded

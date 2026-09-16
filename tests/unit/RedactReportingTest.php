@@ -65,6 +65,34 @@ final class RedactReportingTest extends TestCase {
 		$this->assertSame( 1, Aura_Worker_Rules::count_24h( Aura_Worker_Redact::REDACTED_COUNTER, $now ) );
 	}
 
+	public function test_the_counter_sweep_runs_once_an_hour_not_once_a_bump(): void {
+		// Every redacted response bumps the counter (final review, minor 1):
+		// the LIKE sweep rides only on the bump that created the hour's row.
+		$now    = 1_800_000_000;
+		$prefix = Aura_Worker_Redact::REDACTED_COUNTER;
+		$stale  = Aura_Worker_Rules::bucket_name( $prefix, (int) floor( $now / HOUR_IN_SECONDS ) - 30 );
+		$GLOBALS['_rows'][ $stale ]    = '4';
+		$GLOBALS['_options'][ $stale ] = '4';
+		$sweeps = static function () use ( $prefix ) {
+			return count( array_filter( $GLOBALS['_db_queries'], static function ( $q ) use ( $prefix ) {
+				return 0 === strpos( (string) $q, 'SELECT' ) && false !== strpos( (string) $q, $prefix );
+			} ) );
+		};
+
+		Aura_Worker_Redact::record_redacted( 1, '/wp/v2/pages/7', $now );
+		$this->assertSame( 1, $sweeps(), 'the first bump of the hour sweeps' );
+		$this->assertArrayNotHasKey( $stale, $GLOBALS['_rows'], 'and removes the stale hour' );
+
+		Aura_Worker_Redact::record_redacted( 1, '/wp/v2/pages/7', $now + 60 );
+		Aura_Worker_Redact::record_redacted( 1, '/wp/v2/pages/7', $now + 120 );
+		$this->assertSame( 1, $sweeps(), 'later bumps in the same hour do not' );
+		$this->assertSame( 3, Aura_Worker_Rules::count_24h( $prefix, $now + 120 ), 'every bump still counts' );
+
+		Aura_Worker_Redact::record_redacted( 1, '/wp/v2/pages/7', $now + HOUR_IN_SECONDS );
+		$this->assertSame( 2, $sweeps(), 'the next hour sweeps once more' );
+		$this->assertSame( 4, Aura_Worker_Rules::count_24h( $prefix, $now + HOUR_IN_SECONDS ) );
+	}
+
 	public function test_status_reports_the_redaction_fragment_as_an_object(): void {
 		$api  = new Aura_Worker_API( new Aura_Worker_Security() );
 		$body = $api->get_status( new WP_REST_Request( 'GET', '/aura/v1/status' ) )->get_data();
