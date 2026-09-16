@@ -264,13 +264,19 @@ out of every REST response an **agent** reads.
   `rest_post_dispatch` (runs before `_embed`) or `rest_request_after_callbacks` (runs
   for internal dispatches). Every HTTP method is redacted. A route that serves its own
   body via `rest_pre_serve_request` bypasses it (none known on the agent path).
-- **Audience** (`is_audience()`): a served REST request, not cookie-authenticated
-  (`Aura_Worker_Rules::cookie_authenticated()`), and either exactly
-  `/aura/mcp/tools/execute` or a route outside `aura/v1|v2|mcp` with a logged-in user.
-  System routes, wp-admin and anonymous callers are never redacted. Routes compare
-  lowercased.
+- **Audience** (`is_audience()`): a served REST request, and either the gateway's
+  `/aura/mcp/tools/execute` — matched the way core dispatches it
+  (`is_gateway_execute_route()`: case-insensitive, tolerating one trailing newline) —
+  whatever the caller's cookie state, or, when not cookie-authenticated
+  (`Aura_Worker_Rules::cookie_authenticated()`), a route outside `aura/v1|v2|mcp` with
+  a logged-in user. The cookie flag is consulted only on that second branch — a
+  cookie session hitting the gateway route is redacted too, since that route is
+  SiteAgent-token-authenticated and never a wp-admin surface. System routes, wp-admin
+  and anonymous callers are never redacted. Routes compare lowercased.
 - **Detectors.** `URL_PATTERNS` (Make, Integromat, Zapier, Slack, Discord, IFTTT,
-  Telegram — full URLs anchored on the host, `\/` accepted); `SECRET_KEYS` — exact key
+  Telegram — full URLs matched with or without a scheme, including protocol-relative
+  and bare hosts, anchored on the host with a strict boundary so a lookalike host
+  (`myhooks.zapier.com`) never matches, `\/` accepted); `SECRET_KEYS` — exact key
   names only (`webhooks`), each with its plugin/setting in a comment, never a
   substring match. Carriers decoded: `_elementor_data`/`_elementor_page_settings`
   strings (and a snapshot capture's `{ existed, value }` entry under those keys), the
