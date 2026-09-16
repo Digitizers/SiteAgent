@@ -273,9 +273,9 @@ out of every REST response an **agent** reads.
   cookie session hitting the gateway route is redacted too, since that route is
   SiteAgent-token-authenticated and never a wp-admin surface. System routes, wp-admin
   and anonymous callers are never redacted. Routes compare lowercased.
-- **Detectors.** `URL_PATTERNS` (Make, Integromat, Zapier, Slack, Discord, IFTTT,
-  Telegram — full URLs matched with or without a scheme, including protocol-relative
-  and bare hosts, anchored on the host with a strict boundary so a lookalike host
+- **Detectors.** `URL_PATTERNS` (Make, Integromat, Zapier, Slack — `hooks.slack.com` and
+  GovSlack's `hooks.slack-gov.com` — Discord, IFTTT, Telegram — full URLs matched with
+  or without a scheme, including protocol-relative and bare hosts, anchored on the host with a strict boundary so a lookalike host
   (`myhooks.zapier.com`) never matches, `\/` accepted); `SECRET_KEYS` — exact key
   names only (`webhooks`), each with its plugin/setting in a comment, never a
   substring match. Carriers decoded: `_elementor_data`/`_elementor_page_settings`

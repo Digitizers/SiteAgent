@@ -103,8 +103,9 @@ class Aura_Worker_Redact {
 		array( 'integromat', self::RE_HEAD . 'hook\.(?:[a-z0-9-]+\.)?integromat\.com' . self::RE_HOST_END . self::RE_TAIL ),
 		// Zapier: every path on hooks.zapier.com (`/hooks/catch/…`, `/hooks/standard/…`).
 		array( 'zapier', self::RE_HEAD . 'hooks\.zapier\.com' . self::RE_HOST_END . self::RE_TAIL ),
-		// Slack: incoming webhooks `/services/…`, Workflow Builder triggers `/triggers/…`, legacy workflow webhooks `/workflows/…` (Codex r4 P1).
-		array( 'slack', self::RE_HEAD . 'hooks\.slack\.com' . self::RE_HOST_END . '(?:services|triggers|workflows)' . self::RE_SLASH . self::RE_TAIL ),
+		// Slack: incoming webhooks `/services/…`, Workflow Builder triggers `/triggers/…`, legacy workflow webhooks `/workflows/…` (Codex r4 P1),
+		// on hooks.slack.com and GovSlack's hooks.slack-gov.com (PR #111 Codex r2 P2).
+		array( 'slack', self::RE_HEAD . 'hooks\.slack(?:-gov)?\.com' . self::RE_HOST_END . '(?:services|triggers|workflows)' . self::RE_SLASH . self::RE_TAIL ),
 		// Discord: `/api/webhooks/…` and the versioned `/api/v<n>/webhooks/…`, on discord.com (also ptb./canary.) and discordapp.com.
 		array( 'discord', self::RE_HEAD . '(?:(?:ptb|canary)\.)?discord\.com' . self::RE_HOST_END . 'api' . self::RE_SLASH . '(?:v[0-9]+' . self::RE_SLASH . ')?webhooks' . self::RE_SLASH . self::RE_TAIL ),
 		array( 'discord', self::RE_HEAD . '(?:(?:ptb|canary)\.)?discordapp\.com' . self::RE_HOST_END . 'api' . self::RE_SLASH . '(?:v[0-9]+' . self::RE_SLASH . ')?webhooks' . self::RE_SLASH . self::RE_TAIL ),

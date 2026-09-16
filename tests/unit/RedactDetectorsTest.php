@@ -182,6 +182,13 @@ final class RedactDetectorsTest extends TestCase {
 			// lookalikes['no scheme'] case into a positive one.
 			'zapier bare'              => array( 'hooks.zapier.com/hooks/catch/1/', 'zapier' ),
 			'zapier protocol-relative' => array( '//hooks.zapier.com/hooks/catch/1/', 'zapier' ),
+			// PR #111 Codex r2 P2: GovSlack's hook host, same paths and rules.
+			'govslack services'          => array( 'https://hooks.slack-gov.com/services/T000/B000/XXXX', 'slack' ),
+			'govslack triggers'          => array( 'https://hooks.slack-gov.com/triggers/T000/1234/abcdef', 'slack' ),
+			'govslack workflows'         => array( 'https://hooks.slack-gov.com/workflows/T000/A000/1234/abcdef', 'slack' ),
+			'govslack bare'              => array( 'hooks.slack-gov.com/services/T000/B000/XXXX', 'slack' ),
+			'govslack protocol-relative' => array( '//hooks.slack-gov.com/triggers/T000/1234/abcdef', 'slack' ),
+			'govslack trailing dot'      => array( 'https://hooks.slack-gov.com./workflows/T000/A000/1/x', 'slack' ),
 		);
 	}
 
@@ -231,6 +238,12 @@ final class RedactDetectorsTest extends TestCase {
 			'bare suffixed host'      => array( 'hooks.zapier.com.evil.tld/hooks/catch/1/' ),
 			'protocol-relative prefixed host' => array( '//myhooks.zapier.com/hooks/catch/1/' ),
 			'protocol-relative suffixed host' => array( '//hooks.zapier.com.evil.tld/hooks/catch/1/' ),
+			'govslack suffixed host'          => array( 'https://hooks.slack-gov.com.evil.tld/services/T/B/X' ),
+			'govslack prefixed host'          => array( 'https://xhooks.slack-gov.com/services/T/B/X' ),
+			'govslack bare prefixed host'     => array( 'xhooks.slack-gov.com/services/T/B/X' ),
+			'govslack bare suffixed host'     => array( 'hooks.slack-gov.com.evil.tld/services/T/B/X' ),
+			'govslack lookalike label'        => array( 'https://hooks.slack-govx.com/services/T/B/X' ),
+			'govslack non-hook path'          => array( 'https://hooks.slack-gov.com/help/articles/1' ),
 		);
 	}
 
