@@ -46,7 +46,7 @@
 - **R13 — counters go through `Aura_Worker_Rules::bump_counter()`**, a public wrapper over the private `bump()` that accepts only the four known prefixes; the raw-SQL writer count `UninstallCoverageTest` acknowledges for `class-aura-worker-rules.php` (5) is unchanged, and both new prefixes sit under `aura_worker_`, which `uninstall.php` already sweeps.
 - **R14 — objects in response data.** `stdClass` and other plain objects are walked by public properties and replaced with a `stdClass` only when something changed (the JSON output is the same); `JsonSerializable` is walked through `jsonSerialize()`.
 - **R15 — `arguments` must be a JSON object.** Absent or `null` → `{}`; a non-empty list or a scalar → the shape is not recognised (header ignored, response redacted).
-- **R16 — the URL patterns are a superset of the spec's.** They also accept optional `userinfo@` and `:port`, any number of backslashes before a slash, and are case-insensitive. IFTTT also matches `/trigger/<event>/[json/]with/key/<key>` (Codex r1 P1 on SiteAgent#109). The URL tail stops before `)`, `]`, `}`, and a match's trailing `.,;:!?` are handed back to the text (Codex r1 P2); the tail also stops before an HTML-encoded quote or angle bracket (`&quot;`, `&#39;`, `&gt;`, `&#x3c;`, …), while a bare `&` stays in the URL (Codex r2 P2). A pathological input (e.g. a million `a&`) can exhaust PCRE's backtrack limit; R9 then fails the whole string closed. A private/protected property's mangled name counts as the key name in the opaque-object check (Codex r2 P1). String keys and property names get the URL detector too, with `#2`, `#3`, … on a collision so no value is lost, and a placeholder used as a key refuses a write (Codex r3 P1). `https://hooks.zapier.com@evil.tld/` does not match (the host is `evil.tld`).
+- **R16 — the URL patterns are a superset of the spec's.** They also accept optional `userinfo@` and `:port`, any number of backslashes before a slash, and are case-insensitive. IFTTT also matches `/trigger/<event>/[json/]with/key/<key>` (Codex r1 P1 on SiteAgent#109). The URL tail stops before `)`, `]`, `}`, and a match's trailing `.,;:!?` are handed back to the text (Codex r1 P2); the tail also stops before an HTML-encoded quote or angle bracket (`&quot;`, `&#39;`, `&gt;`, `&#x3c;`, …), while a bare `&` stays in the URL (Codex r2 P2). A pathological input (e.g. a million `a&`) can exhaust PCRE's backtrack limit; R9 then fails the whole string closed. A private/protected property's mangled name counts as the key name in the opaque-object check (Codex r2 P1). String keys and property names get the URL detector too, with `#2`, `#3`, … on a collision so no value is lost, and a placeholder used as a key refuses a write (Codex r3 P1). Receiver shapes after the Codex r4 sweep (from knowledge, not re-checked against the services' docs): Slack `/services/`, `/triggers/`, `/workflows/`; Discord `/api/[v<n>/]webhooks/` on `discord.com`/`discordapp.com` and their `ptb.`/`canary.` hosts; Make `hook.<region>.make.com` and `hook.<region>.make.celonis.com`; Integromat `hook.[<region>.]integromat.com`; Zapier any path on `hooks.zapier.com`; Telegram `/bot<token>/` and `/file/bot<token>/`; IFTTT as above. `https://hooks.zapier.com@evil.tld/` does not match (the host is `evil.tld`).
 
 ---
 
@@ -272,6 +272,15 @@ final class RedactDetectorsTest extends TestCase {
 			'ifttt trig' => array( 'https://maker.ifttt.com/trigger/form_sent/with/key/abcDEF-123_x', 'ifttt' ),
 			'ifttt json' => array( 'https://maker.ifttt.com/trigger/form_sent/json/with/key/abcDEF-123_x', 'ifttt' ),
 			'telegram'   => array( 'https://api.telegram.org/bot123456:AA-bb_cc/sendMessage?chat_id=1', 'telegram' ),
+			'telegram file'       => array( 'https://api.telegram.org/file/bot123456:AA-bb_cc/photos/file_1.jpg', 'telegram' ),
+			'slack triggers'      => array( 'https://hooks.slack.com/triggers/T000/1234/abcdef', 'slack' ),
+			'slack workflows'     => array( 'https://hooks.slack.com/workflows/T000/A000/1234/abcdef', 'slack' ),
+			'make celonis'        => array( 'https://hook.eu1.make.celonis.com/abc123def456', 'make' ),
+			'integromat regional' => array( 'https://hook.eu1.integromat.com/abc123', 'integromat' ),
+			'zapier standard'     => array( 'https://hooks.zapier.com/hooks/standard/123/abc/', 'zapier' ),
+			'discord versioned'   => array( 'https://discord.com/api/v10/webhooks/123/tok-en', 'discord' ),
+			'discord ptb'         => array( 'https://ptb.discord.com/api/webhooks/123/tok-en', 'discord' ),
+			'discordapp canary'   => array( 'https://canary.discordapp.com/api/v9/webhooks/123/tok-en', 'discord' ),
 		);
 	}
 
@@ -303,6 +312,11 @@ final class RedactDetectorsTest extends TestCase {
 			'prefixed host'     => array( 'https://myhooks.zapier.com/hooks/catch/1/' ),
 			'userinfo decoy'    => array( 'https://hooks.zapier.com@evil.tld/hooks/catch/1/' ),
 			'slack non-hook'    => array( 'https://hooks.slack.com/other/T000' ),
+			'slack help'        => array( 'https://hooks.slack.com/help/articles/1' ),
+			'slack triggersx'   => array( 'https://hooks.slack.com/triggersx/T000/1' ),
+			'discord api other' => array( 'https://discord.com/api/v10/channels/1/messages' ),
+			'discord evil sub'  => array( 'https://evil.discord.com/api/webhooks/1/x' ),
+			'celonis non-make'  => array( 'https://hook.eu1.celonis.com/abc' ),
 			'discord non-hook'  => array( 'https://discord.com/channels/1/2' ),
 			'make marketing'    => array( 'https://www.make.com/en/pricing' ),
 			'ifttt non-hook'    => array( 'https://maker.ifttt.com/trigger/form_sent/without/key/abc' ),
@@ -744,15 +758,21 @@ class Aura_Worker_Redact {
 	 * `array( kind, regex )`, because two hosts share the `discord` kind.
 	 */
 	const URL_PATTERNS = array(
-		array( 'make', self::RE_HEAD . 'hook\.[a-z0-9-]+\.make\.com' . self::RE_HOST_END . self::RE_TAIL ),
-		array( 'integromat', self::RE_HEAD . 'hook\.integromat\.com' . self::RE_HOST_END . self::RE_TAIL ),
+		// Make: `hook.<region>.make.com/<id>`, and Make on Celonis `hook.<region>.make.celonis.com/<id>`.
+		array( 'make', self::RE_HEAD . 'hook\.[a-z0-9-]+\.make\.(?:celonis\.)?com' . self::RE_HOST_END . self::RE_TAIL ),
+		// Integromat (Make's former name): `hook.integromat.com/<id>` and `hook.<region>.integromat.com/<id>`.
+		array( 'integromat', self::RE_HEAD . 'hook\.(?:[a-z0-9-]+\.)?integromat\.com' . self::RE_HOST_END . self::RE_TAIL ),
+		// Zapier: every path on hooks.zapier.com (`/hooks/catch/…`, `/hooks/standard/…`).
 		array( 'zapier', self::RE_HEAD . 'hooks\.zapier\.com' . self::RE_HOST_END . self::RE_TAIL ),
-		array( 'slack', self::RE_HEAD . 'hooks\.slack\.com' . self::RE_HOST_END . 'services' . self::RE_SLASH . self::RE_TAIL ),
-		array( 'discord', self::RE_HEAD . 'discord\.com' . self::RE_HOST_END . 'api' . self::RE_SLASH . 'webhooks' . self::RE_SLASH . self::RE_TAIL ),
-		array( 'discord', self::RE_HEAD . 'discordapp\.com' . self::RE_HOST_END . 'api' . self::RE_SLASH . 'webhooks' . self::RE_SLASH . self::RE_TAIL ),
+		// Slack: incoming webhooks `/services/…`, Workflow Builder triggers `/triggers/…`, legacy workflow webhooks `/workflows/…` (Codex r4 P1).
+		array( 'slack', self::RE_HEAD . 'hooks\.slack\.com' . self::RE_HOST_END . '(?:services|triggers|workflows)' . self::RE_SLASH . self::RE_TAIL ),
+		// Discord: `/api/webhooks/…` and the versioned `/api/v<n>/webhooks/…`, on discord.com (also ptb./canary.) and discordapp.com.
+		array( 'discord', self::RE_HEAD . '(?:(?:ptb|canary)\.)?discord\.com' . self::RE_HOST_END . 'api' . self::RE_SLASH . '(?:v[0-9]+' . self::RE_SLASH . ')?webhooks' . self::RE_SLASH . self::RE_TAIL ),
+		array( 'discord', self::RE_HEAD . '(?:(?:ptb|canary)\.)?discordapp\.com' . self::RE_HOST_END . 'api' . self::RE_SLASH . '(?:v[0-9]+' . self::RE_SLASH . ')?webhooks' . self::RE_SLASH . self::RE_TAIL ),
 		// IFTTT Webhooks: `/use/<key>`, `/trigger/<event>/with/key/<key>` and `/trigger/<event>/json/with/key/<key>`.
 		array( 'ifttt', self::RE_HEAD . 'maker\.ifttt\.com' . self::RE_HOST_END . '(?:use' . self::RE_SLASH . '|trigger' . self::RE_SLASH . '[^\s/\\\\"\'<>]+' . self::RE_SLASH . '(?:json' . self::RE_SLASH . ')?with' . self::RE_SLASH . 'key' . self::RE_SLASH . ')' . self::RE_TAIL ),
-		array( 'telegram', self::RE_HEAD . 'api\.telegram\.org' . self::RE_HOST_END . 'bot[0-9]+:[a-z0-9_-]+' . self::RE_SLASH . self::RE_TAIL ),
+		// Telegram: Bot API `/bot<token>/<method>` and file downloads `/file/bot<token>/<path>`.
+		array( 'telegram', self::RE_HEAD . 'api\.telegram\.org' . self::RE_HOST_END . '(?:file' . self::RE_SLASH . ')?bot[0-9]+:[a-z0-9_-]+' . self::RE_SLASH . self::RE_TAIL ),
 	);
 
 	/**
@@ -3173,4 +3193,4 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 - **Spec coverage.** §1.1 seam → Task 3 (+ Task 1 Step 1 verification of core's order and the adapter). §1.2 audience → Task 2, seam tests in Task 3. §1.3 grant, both rows, exemption per request, 403, no-key ignore → Task 4. §2.1 → Task 1. §2.2 → Task 1. §2.2a carriers 1–3, bound, byte-for-byte, fail-closed payload, object payload → Task 1 (with R1–R3). §2.3 placeholder → Task 1. §2.4 same value → Tasks 1 and 3. §3 → Task 5 (per source, decoded, escape, cookie allowed, GET skipped, update-widget omission). §4 site half → Tasks 3 and 6. §5 limits → documented in CLAUDE.md (Task 7) and the Rulings. §6 SiteAgent tests → Tasks 1–6; staging → "After the tasks". §7.1 → Task 7.
 - **Placeholder scan.** No TBD/TODO; every code step carries the code.
 - **Name consistency.** `redact`, `redact_text`, `is_audience`, `filter_echo`, `before_callbacks`, `grant_shape`, `holds_placeholder`, `status_fragment`, `record_redacted`, `record_placeholder_refused`, `reset_for_tests`; `Aura_Worker_Rules::serving_rest`, `cookie_authenticated`, `bump_counter`; constants `REDACTED_COUNTER`, `PLACEHOLDER_REFUSED_COUNTER`, `STATUS_VERSION` — used identically in every task.
-- **Dry run.** The assembled class, the Rules/API/tool/bootstrap edits and all six new test files were run while writing this plan against the SiteAgent test bootstrap (PHP 8.5, PHPUnit 10.5 classes, in-memory file patches — nothing written to the repo): all 159 new test cases passed; after the Codex round-1 fixes (IFTTT trigger URLs, URL tail boundary) only `RedactDetectorsTest` was re-run — 76/76 after round 1, 84/84 after round 2 (mangled property names, encoded HTML delimiters); after round 3 (URL keys) all six new files plus the changed `AuditRulesTest` were re-run — 222/222, and the existing suite showed no new failure against an unpatched baseline under the same runner. `composer test` / `composer lint` on the real branch remain the gate, including PHP 7.4.
+- **Dry run.** The assembled class, the Rules/API/tool/bootstrap edits and all six new test files were run while writing this plan against the SiteAgent test bootstrap (PHP 8.5, PHPUnit 10.5 classes, in-memory file patches — nothing written to the repo): all 159 new test cases passed; after the Codex round-1 fixes (IFTTT trigger URLs, URL tail boundary) only `RedactDetectorsTest` was re-run — 76/76 after round 1, 84/84 after round 2 (mangled property names, encoded HTML delimiters); after round 3 (URL keys) all six new files plus the changed `AuditRulesTest` were re-run — 222/222; after round 4 (receiver URL shapes) `RedactDetectorsTest` was re-run — 122/122, and the existing suite showed no new failure against an unpatched baseline under the same runner. `composer test` / `composer lint` on the real branch remain the gate, including PHP 7.4.
