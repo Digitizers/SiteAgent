@@ -530,6 +530,13 @@ class Aura_Worker_Redact {
 			// header means nothing here and the response is redacted as usual.
 			return null;
 		}
+		// verify() binds the grant to sha256(raw token) as stored. A site
+		// still storing a legacy plaintext token would refuse every grant —
+		// and the MCP row never presents the token, so nothing else migrates
+		// it on that path (PR #111 Codex r1 P2).
+		if ( class_exists( 'Aura_Worker_Security' ) ) {
+			Aura_Worker_Security::migrate_legacy_stored_token();
+		}
 		$verdict = Aura_Worker_Grant::verify( $header, $shape['tool'], $shape['params'] );
 		if ( is_wp_error( $verdict ) ) {
 			return $verdict; // an unbound site's own refusal, 403 aura_site_unbound (R6)

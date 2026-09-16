@@ -42,7 +42,7 @@ final class RedactGrantTest extends TestCase {
 					'v'             => 1,
 					'tool'          => $tool,
 					'params_sha256' => hash( 'sha256', Aura_Worker_Grant::canonical_json( $params ) ),
-					'site'          => sa_token_hash(),
+					'site'          => hash( 'sha256', SA_RAW_SITE_TOKEN ), // what Aura signs: sha256(raw token)
 					'nonce'         => bin2hex( random_bytes( 16 ) ),
 					'iat'           => time(),
 					'exp'           => time() + 300,
@@ -376,6 +376,52 @@ final class RedactGrantTest extends TestCase {
 		// A garbage grant from the same caller is not refused either.
 		$req->set_header( 'X-Aura-Unredacted-Grant', 'garbage' );
 		$this->assertNull( $this->before( $req ) );
+	}
+
+	// --- legacy plaintext stored token (PR #111 Codex round 1) --------------
+
+	private function store_legacy_plaintext_token(): void {
+		update_option( 'aura_worker_site_token', SA_RAW_SITE_TOKEN );
+		$this->assertSame( SA_RAW_SITE_TOKEN, get_option( 'aura_worker_site_token' ), 'fixture: a pre-hash site' );
+	}
+
+	public function test_a_legacy_plaintext_site_verifies_the_mcp_row_grant_and_is_migrated(): void {
+		$this->store_legacy_plaintext_token(); // the MCP row never presents the token
+		$req = $this->export_call();
+		$req->set_header( 'X-Aura-Unredacted-Grant', $this->grant( self::EXPORT, array( 'post_id' => 7 ) ) );
+
+		$this->assertNull( $this->before( $req ), 'verified, not 403' );
+		$this->assertSame( $this->export_body(), $this->echoed( $req, $this->export_body() ), 'and exempted' );
+		$this->assertSame( hash( 'sha256', SA_RAW_SITE_TOKEN ), get_option( 'aura_worker_site_token' ), 'the stored token is its hash now' );
+	}
+
+	public function test_a_legacy_plaintext_site_verifies_the_gateway_row_grant_and_is_migrated(): void {
+		$this->store_legacy_plaintext_token();
+		$req = $this->execute_call( 'snapshot_get', array( 'id' => 'snap_1' ) ); // carries the token
+		$req->set_header( 'X-Aura-Unredacted-Grant', $this->grant( 'unredacted-read:aura/mcp#snapshot_get', array( 'id' => 'snap_1' ) ) );
+		$body = array( 'success' => true, 'result' => $this->export_body() );
+
+		$this->assertNull( $this->before( $req ) );
+		$this->assertSame( $body, $this->echoed( $req, $body ) );
+		$this->assertSame( hash( 'sha256', SA_RAW_SITE_TOKEN ), get_option( 'aura_worker_site_token' ) );
+	}
+
+	public function test_a_hashed_site_is_left_as_it_is(): void {
+		$hash = get_option( 'aura_worker_site_token' );
+		$this->assertSame( hash( 'sha256', SA_RAW_SITE_TOKEN ), $hash, 'fixture: already hashed' );
+		$req = $this->export_call();
+		$req->set_header( 'X-Aura-Unredacted-Grant', $this->grant( self::EXPORT, array( 'post_id' => 7 ) ) );
+
+		$this->assertNull( $this->before( $req ) );
+		$this->assertSame( $hash, get_option( 'aura_worker_site_token' ) );
+		Aura_Worker_Security::migrate_legacy_stored_token();
+		$this->assertSame( $hash, get_option( 'aura_worker_site_token' ), 'never hashed twice' );
+	}
+
+	public function test_no_header_migrates_nothing(): void {
+		$this->store_legacy_plaintext_token();
+		$this->assertNull( $this->before( $this->export_call() ) );
+		$this->assertSame( SA_RAW_SITE_TOKEN, get_option( 'aura_worker_site_token' ), 'only a grant check migrates' );
 	}
 
 	// --- core-style route matching (Task 2 ruling) ---------------------------

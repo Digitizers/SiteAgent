@@ -345,16 +345,6 @@ class Aura_Worker_Security {
 	 * @param string $value Stored token value.
 	 * @return bool
 	 */
-	private function is_hashed( $value ) {
-		return self::is_hashed_token( $value );
-	}
-
-	/**
-	 * is_hashed(), callable without an instance.
-	 *
-	 * @param string $value Stored token value.
-	 * @return bool
-	 */
 	private static function is_hashed_token( $value ) {
 		return (bool) preg_match( '/^[0-9a-f]{64}$/', (string) $value );
 	}
@@ -384,6 +374,27 @@ class Aura_Worker_Security {
 		}
 		// Legacy path: stored value is a raw token from an older version.
 		return hash_equals( $stored_token, $provided_token );
+	}
+
+	/**
+	 * Rewrite a legacy PLAINTEXT stored site token as its SHA-256 hash — the
+	 * form every reader of the option now expects (Aura_Worker_Grant::verify()
+	 * binds a grant to sha256(raw token)). A no-op for an empty or an
+	 * already-hashed value. It needs no presented token: the legacy value IS
+	 * the raw token. check_aura_token() runs it after a match; a grant check
+	 * that is reached without the token (Aura_Worker_Redact's MCP row) runs it
+	 * before verifying (2.18.0).
+	 *
+	 * @since 2.18.0
+	 *
+	 * @return void
+	 */
+	public static function migrate_legacy_stored_token() {
+		$stored_token = get_option( 'aura_worker_site_token', '' );
+		if ( empty( $stored_token ) || self::is_hashed_token( $stored_token ) ) {
+			return;
+		}
+		update_option( 'aura_worker_site_token', self::hash_token( $stored_token ) );
 	}
 
 	/**
@@ -552,10 +563,11 @@ class Aura_Worker_Security {
 		}
 
 		$valid = self::token_matches( $provided_token );
-		if ( $valid && ! $this->is_hashed( $stored_token ) ) {
-			// Legacy path: the stored value was a raw token from an older
-			// version. It matched, so opportunistically migrate to a stored hash.
-			update_option( 'aura_worker_site_token', self::hash_token( $provided_token ) );
+		if ( $valid ) {
+			// Legacy path: a stored raw token from an older version matched
+			// (so it equals the provided one); opportunistically migrate it to
+			// a stored hash. A no-op when it is already hashed.
+			self::migrate_legacy_stored_token();
 		}
 
 		if ( ! $valid ) {
