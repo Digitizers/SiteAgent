@@ -190,17 +190,22 @@ before stopping at the first `.php` one.
   `ftpsockets` or `ssh2` the upgrader uses credentials the probe does not have:
   the verdict is "not probed" (`null`) — no probe, no option write, no refusal.
 - **Refusals.** After the multisite refusal and before any claim, download,
-  backup or write, `self_update()`, the generic single update, every batch entry
-  and the guarded rollback refuse **any** plugin — not only SiteAgent — with
+  backup or write, `self_update()`, the generic single update and every batch
+  entry refuse **any** plugin — not only SiteAgent — with
   `code: aura_php_writes_blocked` (`php_writes: blocked`) or
   `aura_upgrade_dir_unwritable` (`php_writes: unwritable`), `in_progress: false`,
   HTTP 500 as before. The batch probes once, lazily, at the first entry the
   multisite refusal lets through, and builds its recovery helper only when an
   entry runs. The self-update adds its recovery fields, all saying nothing
-  happened; a batch entry keeps `status`/`detail` and adds `code`; the guarded
-  rollback adds `stage: preflight`. `update_plugin_safely` goes through the batch
-  and returns the entry's `code` and message (`error`). Themes, core and
-  translations are not gated.
+  happened; a batch entry keeps `status`/`detail` and adds `code`.
+  `update_plugin_safely` goes through the batch and returns the entry's `code`
+  and message (`error`). Themes, core and translations are not gated.
+- **The guarded rollback skips the upgrade-directory probe** (round 2): it never
+  writes to `wp-content/upgrade`, so `restore_plugin_guarded()` passes the gate a
+  "not probed" verdict. It keeps the multisite refusal and the claim/busy
+  handling, and relies on `restore_plugin()`'s plugins-directory preflight
+  below — a blocked `WP_PLUGIN_DIR` answers `stage: preflight` with its code; an
+  unwritable upgrade directory alone does not block a recovery.
 - **`stage: preflight` — the restore's own check.**
   `Aura_Worker_Rollback::restore_plugin()` deletes and extracts with **plain PHP
   inside `WP_PLUGIN_DIR`**, whatever the transport, so before its delete it
