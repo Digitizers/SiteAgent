@@ -16,6 +16,45 @@ the judgement call this file exists to avoid.
 
 Newest first, continuing exactly where `readme.txt`'s Changelog stops.
 
+= 2.10.1 =
+* Fix: `audit_rules` could report zero blocked/warned events for the current
+  hour. Reading the counters before the hour's first refusal put the bucket in
+  WordPress's negative option cache, and the refusal's atomic insert did not
+  clear it — so the count stayed at zero for the rest of the request, and on a
+  site with a persistent object cache until the cache was flushed. Enforcement
+  was never affected; only what the audit reported.
+* Fix: two rulesets pushed to a site at the same moment, before it held any,
+  could answer the loser with 500 instead of the ordinary "a newer ruleset is
+  already installed" decision. Aura retries a 500, so no policy was lost; the
+  site now classifies the database's duplicate-key or deadlock answer as the
+  lost race it is.
+
+= 2.10.0 =
+* New: operator rules, enforced on the site. A rule is an Aura memory entry
+  (`rule/<slug>`) naming a resource — the whole site, a page or post by ID, or a
+  plugin by slug — with an effect of `block` or `warn` and an optional expiry.
+  Aura signs the client's whole ruleset with the same key that signs approval
+  grants and pushes it to every connected site (`POST /aura/v2/rules`), the site
+  verifies it and keeps only a newer one (a replayed older ruleset is refused
+  even when validly signed). No ruleset means no policy — nothing is refused. A
+  site that has never been reconnected since signed approvals shipped holds no
+  gateway key and cannot verify a ruleset; it says so, and Aura tells you to
+  reconnect it.
+* Enforcement runs on every path a write can take: inside the tool executor
+  before anything runs or is snapshotted; explicitly on the legacy REST update
+  routes; and at WordPress core's own REST API for posts and pages — so a rule on
+  a page holds against Aura's content tools, an assistant with an application
+  password, or another plugin's MCP server alike. A `block` refuses the call and
+  names the rule; **a rule outranks an approval** — a granted call is still
+  refused, and the message says to release the rule first. A `warn` runs and
+  attaches the warning. Previews are never blocked; they now report what a call
+  touches and which rule would decide it.
+* New: `audit_rules` (read-only) — ruleset presence and age, whether the site
+  can verify one, 24h block/warn counts, expired-but-listed rules, and the
+  enforcement points in this build.
+* Every mutating tool now declares what a call touches; one that does not is
+  caught by every rule rather than by none.
+
 = 2.9.1 =
 
 * Security (hardening): SiteAgent's tools have been dual-registered as WordPress

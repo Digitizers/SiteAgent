@@ -17,7 +17,7 @@
   </a>
   <img src="https://img.shields.io/badge/WordPress-6.2%E2%80%937.1-21759b?logo=wordpress" alt="WordPress" />
   <img src="https://img.shields.io/badge/PHP-7.4%2B-777bb4?logo=php" alt="PHP" />
-  <img src="https://img.shields.io/badge/Stable-2.17.4-green" alt="Stable" />
+  <img src="https://img.shields.io/badge/Stable-2.17.5-green" alt="Stable" />
 </p>
 
 ---
@@ -238,6 +238,14 @@ These plug straight into **Aura's Fleet MCP Gateway**: read tools run on demand,
 ---
 
 ## Changelog
+
+### 2.17.5
+
+- **Plugin updates are refused on hosts that block PHP `.php` writes** (SiteAgent#95). On WP Engine, PHP-FPM gets `Permission denied` whenever it creates, overwrites, renames to or deletes a `.php` file. Every Aura-driven plugin update failed at unpack there, and the restore that followed deleted every non-PHP file of the plugin before stopping at the first `.php` (SiteAgent lost `readme.txt` on each attempt). A host probe now creates and removes a `.php` and a `.txt` file in `wp-content/upgrade/`, only where WordPress writes directly, and records the verdict in `aura_worker_host_probe`. Every Aura-driven plugin mutation (self-update, single update, batch, `update_plugin_safely`) is refused before any claim, download or backup with `aura_php_writes_blocked` / `aura_upgrade_dir_unwritable`. Verified on a WP Engine environment.
+- **A restore never starts a delete it cannot finish.** `restore_plugin()` first proves, with plain PHP, that `.php` and `.txt` files can be written and removed in `WP_PLUGIN_DIR`, and that every directory of the target plugin is writable (symlinks not followed); otherwise `stage: preflight` and nothing is deleted. The guarded rollback relies on this check, not on the upgrade-directory probe.
+- **A failed install that changed nothing is not restored.** The self-update compares a bounded manifest (path, size, mtime, mode, md5) of the plugin directory from before and after the install; unchanged → `restore_skipped: 'unchanged'`, whether or not a backup exists. A symlink anywhere in the plugin, or a manifest past its bounds, keeps the old always-restore behaviour. A restore refused after a failed health check reports `restore_stage` / `restore_code`, and the batch entry is `failed` rather than `rolled_back`.
+- **`/status` carries `host: { php_writes, checked_at }`**, read from the recorded verdict (never probed there), which Aura uses as a standing rollout blocker (Digitizers/Aura#555).
+- **`update_plugin_safely` passes a refusal's `code` and message through** — it read the batch results by key while they are a list.
 
 ### 2.17.4
 
