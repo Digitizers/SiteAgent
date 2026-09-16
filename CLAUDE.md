@@ -211,8 +211,18 @@ before stopping at the first `.php` one.
   inside `WP_PLUGIN_DIR`**, whatever the transport, so before its delete it
   proves exactly that: a `.txt` and a `.php` file created and deleted there with
   `file_put_contents`/`unlink` (`Aura_Worker_Host_Probe::for_plugin_dir()`, not
-  recorded; it runs over FTP/SSH too). Anything but `ok` answers
-  `{ success: false, stage: 'preflight', code, error }` with nothing deleted.
+  recorded; it runs over FTP/SSH too). It then checks, reading only, that the
+  **target tree** can be removed (round 4, `target_tree_problem()`):
+  `WP_PLUGIN_DIR` writable, the plugin root writable, and every real directory
+  under it writable and readable — symlinks are not followed (they are unlinked
+  as links from an already-checked parent); a walk that cannot finish fails.
+  Anything but `ok`, or any tree problem, answers
+  `{ success: false, stage: 'preflight', code, error }` with nothing deleted —
+  a tree problem uses `aura_upgrade_dir_unwritable` and names the directory.
+  Tests that exercise the deleter's own guards (`stage: clear`) switch
+  `target_tree_problem()` off through a subclass. The probe's cleanup catches
+  every step, the last `@unlink()` included, so a warnings-to-exceptions host
+  still gets the verdict.
   Seams: `plugin_dir_probe()` / `plugin_dir_php_writes_verdict()`.
 - **A refused restore says so.** Self-update results carry `restore_stage` and
   `restore_code` (`null` when not applicable); a health-check rollback refused by
