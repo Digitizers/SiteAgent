@@ -54,12 +54,18 @@ class Aura_Worker_Redact {
 	/** Regex: a colon — literal, percent-encoded (`%3A`) or an HTML character reference (`&#58;`, `&#x3A;`, `&colon;`) (#110). */
 	const RE_COLON = '(?::|%3a|&#0*58;|&#x0*3a;|&colon;)';
 
+	/** Regex: an encoded `@` (`%40`, `&#64;`, `&#x40;`, `&commat;`) (#110). */
+	const RE_ENC_AT = '(?:%40|&#0*64;|&#x0*40;|&commat;)';
+
 	/**
-	 * Regex: the end of a URL's userinfo — `@`, or `@` encoded (`%40`,
-	 * `&#64;`, `&#x40;`, `&commat;`). The userinfo before it never spans a
-	 * slash, literal or encoded (#110).
+	 * Regex: optional userinfo, up to its first `@` — literal or encoded
+	 * (RE_ENC_AT). It never spans a slash, literal or encoded (#110). Runs
+	 * of plain characters are taken whole and possessively, and a `%` or `&`
+	 * only when it starts neither an encoded slash nor an encoded `@`: a
+	 * per-character group would cost PCRE's JIT a stack frame per character
+	 * and fail a long string closed.
 	 */
-	const RE_USERINFO = '(?:(?:(?!' . self::RE_ENC_SLASH . ')[^\\s/\\\\@"\'<>])+(?:@|%40|&#0*64;|&#x0*40;|&commat;))?';
+	const RE_USERINFO = '(?:(?:[^\\s/\\\\@"\'<>%&]++|%(?!2f|40)|&(?!#0*47;|#x0*2f;|sol;|#0*64;|#x0*40;|commat;))*+(?:@|' . self::RE_ENC_AT . '))?';
 
 	/** Regex: `//` (each slash as RE_SLASH), then optional userinfo — shared by the schemed and protocol-relative prefixes. */
 	const RE_DOUBLE_SLASH_USERINFO = self::RE_SLASH . self::RE_SLASH . self::RE_USERINFO;

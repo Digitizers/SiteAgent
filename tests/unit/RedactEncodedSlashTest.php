@@ -219,6 +219,23 @@ final class RedactEncodedSlashTest extends TestCase {
 		$this->assertSame( 0, $n );
 	}
 
+	/**
+	 * The encoded userinfo must not cost PCRE a stack frame per character: a
+	 * long run after a scheme would exhaust the JIT stack and fail the whole
+	 * string closed (a regression caught while building #110).
+	 */
+	public function test_a_long_run_after_a_scheme_is_not_failed_closed(): void {
+		foreach ( array( 'https://', 'https%3A%2F%2F', 'https:&#x2F;&#x2F;', '//' ) as $scheme ) {
+			foreach ( array( str_repeat( 'a', 100000 ), str_repeat( 'a.', 50000 ), str_repeat( 'a%20', 30000 ), str_repeat( 'a&amp;', 20000 ) ) as $run ) {
+				$in = $scheme . $run;
+				$this->assertSame( $in, $this->text( $in, $n ), $scheme );
+				$this->assertSame( 0, $n );
+			}
+		}
+		$long = 'https%3A%2F%2F' . str_repeat( 'u', 100000 ) . '%40hook.eu2.make.com%2Fabc123secret';
+		$this->assertSame( 'aura-redacted:v1:make', $this->text( $long ) );
+	}
+
 	// --- carriers ---------------------------------------------------------
 
 	public function test_an_encoded_url_inside_elementor_data_is_redacted_and_the_json_round_trips(): void {
