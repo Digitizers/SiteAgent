@@ -308,10 +308,10 @@ final class RedactUrlReadingTest extends TestCase {
 
 	/** @dataProvider url_view_cases */
 	public function test_url_view_reads_exactly_the_backslash_forms( string $in, string $expect ): void {
-		// setAccessible() is unneeded (PHP 8.1+ Reflection invokes a private
-		// method directly) and deprecated as a no-op on PHP 8.5 — omitted so
-		// this test does not add a deprecation of its own.
 		$method = new ReflectionMethod( Aura_Worker_Redact::class, 'url_view' );
+		if ( PHP_VERSION_ID < 80100 ) {
+			$method->setAccessible( true ); // required before 8.1 for a private method; a deprecated no-op from 8.5
+		}
 		$this->assertSame( $expect, $method->invoke( null, $in ), $in );
 	}
 
