@@ -283,10 +283,14 @@ out of every REST response an **agent** reads.
   parameter (`?redirect=https%3A%2F%2Fhook.eu2.make.com%2F…`) is replaced whole. A
   percent escape of a non-hostname character (`%2F`, `%40`, `%3D`, a non-ASCII byte
   `%80`–`%FF`, … — never `%2D`, `%2E`, a digit or a letter) counts as a host boundary.
-  A numeric reference to `/` may lack its `;` (`&#47`, `&#x2F` — the hex form only when
-  no hex digit follows, as HTML5 decodes it), and such an unterminated `&#47`/`&#047`/
-  `&#x2F`/`&#x02F` before a host is a boundary too. The same holds for a numeric `@`
-  reference (`&#64`, `&#x40`) ending the userinfo or preceding a host. The fast reject skips a string only
+  Every encoded structural character (`/`, `:`, `@`) follows ONE rule for HTML numeric
+  references (`RE_REF_DEC_END` / `RE_REF_HEX_END`, PR #112 Codex r2): `&#N` / `&#xH`
+  (`x` either case, any zero padding) ended by `;` or — as HTML5 decodes it — by
+  nothing, the decimal form only when no digit follows and the hex form only when no
+  hex digit follows (`&#x40discord` is U+040D, not `@discord`). An unterminated one
+  before a host is a host boundary (`RE_REF_BOUNDARY`, a `\K` so any padding works).
+  Named references need their `;` (`&sol;`, `&colon;`, `&commat;` are not in HTML5's
+  legacy no-semicolon set). The fast reject skips a string only
   when it has no `/`, `%2f`, `&sol` or numeric `/` reference (a bare `&#8217;` does not
   defeat it). See Limits for what is not decoded; `SECRET_KEYS` — exact key
   names only (`webhooks`), each with its plugin/setting in a comment, never a
@@ -356,10 +360,13 @@ out of every REST response an **agent** reads.
   - re-serializing a rewritten snapshot payload loses PHP references, and an integer
     too large for PHP's int comes back from a decoded JSON carrier as a float;
   - not decoded before matching (#110): double encoding (`%252F`, `&amp;#x2F;`),
-    percent-encoded hostname characters (`hook%2Eeu2…`), JSON `\u002F` escapes in a
-    string that is never JSON-decoded, `&period;`/`&#46;` host dots, and an
-    unterminated slash reference padded past one zero (`&#0047hooks…`) as a host
-    boundary;
+    encoded hostname or path LETTERS, DIGITS and DOTS — percent (`hook%2Eeu2…`) or HTML
+    (`&#104;ooks…`, `&period;`, `&#46;`) — JSON `\u002F` escapes in a string that is
+    never JSON-decoded; only the structural `/`, `:` and `@` are accepted encoded.
+    Closing that class fully needs a decode-then-match design (decode a copy, map
+    offsets back), not more alternatives in the patterns;
+  - an HTML-encoded quote or angle bracket without `;` (`&#34`) does not end the URL
+    tail — it over-redacts, never leaks;
   - once a snapshot payload exhausts the node budget, it is withheld whole
     (`payload: null, payload_redacted: true`) and so is every later payload in that
     response; the rest of the response is still walked.

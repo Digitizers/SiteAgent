@@ -51,8 +51,48 @@ class Aura_Worker_Redact {
 	 */
 	const RE_ENC_SLASH = '(?:%2f|&' . self::RE_ENC_SLASH_REF . ')';
 
-	/** Regex (after `&`): the rest of an HTML reference to `/` — see RE_ENC_SLASH. */
-	const RE_ENC_SLASH_REF = '(?:#0*47(?:;|(?![0-9]))|#x0*2f(?:;|(?![0-9a-f]))|sol;)';
+	/*
+	 * HTML5 numeric character references — ONE rule for every structural
+	 * character the receiver patterns accept encoded (`/`, `:`, `@`; PR #112
+	 * Codex r1/r2). `&#<decimal>` / `&#x<hex>` (`x` in either case: the
+	 * patterns are case-insensitive), any number of leading zeros, ended by
+	 * `;` — or, as HTML5 also decodes it, by nothing: a decimal reference
+	 * when no digit follows, a hex one when no hex digit follows
+	 * (`&#x40discord` is U+040D, not `@discord`). Each character's
+	 * RE_ENC_*_REF is built from these fragments and nothing else.
+	 *
+	 * Named references are recognised only with `;` (`&sol;`, `&colon;`,
+	 * `&commat;`): HTML5 decodes a name without `;` only for its legacy set
+	 * (`amp`, `lt`, `gt`, `quot`, `nbsp`, `copy`, …), and none of these
+	 * three is in it.
+	 */
+
+	/** Regex: a semicolonless decimal reference ends here — no digit follows. */
+	const RE_REF_DEC_OPEN_END = '(?![0-9])';
+
+	/** Regex: a semicolonless hex reference ends here — no hex digit follows. */
+	const RE_REF_HEX_OPEN_END = '(?![0-9a-f])';
+
+	/** Regex: the end of a decimal reference — `;`, or RE_REF_DEC_OPEN_END. */
+	const RE_REF_DEC_END = '(?:;|' . self::RE_REF_DEC_OPEN_END . ')';
+
+	/** Regex: the end of a hex reference — `;`, or RE_REF_HEX_OPEN_END. */
+	const RE_REF_HEX_END = '(?:;|' . self::RE_REF_HEX_OPEN_END . ')';
+
+	/** Regex (after `&`): a reference to `/` — see RE_ENC_SLASH. */
+	const RE_ENC_SLASH_REF = '(?:#0*47' . self::RE_REF_DEC_END . '|#x0*2f' . self::RE_REF_HEX_END . '|sol;)';
+
+	/** Regex (after `&`): a reference to `:` — see RE_COLON. */
+	const RE_ENC_COLON_REF = '(?:#0*58' . self::RE_REF_DEC_END . '|#x0*3a' . self::RE_REF_HEX_END . '|colon;)';
+
+	/**
+	 * Regex: an UNterminated reference to `/`, `:` or `@` — a host boundary
+	 * when a host follows (`x&#47hooks…` is `x/hooks…`). `\K` drops the
+	 * reference from the match, so it stays in the text; unlike a
+	 * lookbehind it allows any zero padding. A terminated reference needs
+	 * none of this: its `;` is a boundary already.
+	 */
+	const RE_REF_BOUNDARY = '&#(?:0*(?:47|58|64)' . self::RE_REF_DEC_OPEN_END . '|x0*(?:2f|3a|40)' . self::RE_REF_HEX_OPEN_END . ')\\K';
 
 	/**
 	 * Regex: one piece of a URL segment that never spans a slash, literal or
@@ -66,20 +106,14 @@ class Aura_Worker_Redact {
 	/** Regex: a slash — literal and JSON-escaped any number of times (or not at all), or encoded (RE_ENC_SLASH). */
 	const RE_SLASH = '(?:(?:\\\\)*/|' . self::RE_ENC_SLASH . ')';
 
-	/** Regex: a colon — literal, percent-encoded (`%3A`) or an HTML character reference (`&#58;`, `&#x3A;`, `&colon;`) (#110). */
-	const RE_COLON = '(?::|%3a|&#0*58;|&#x0*3a;|&colon;)';
+	/** Regex: a colon — literal, percent-encoded (`%3A`) or an HTML character reference (RE_ENC_COLON_REF: `&#58`, `&#x3A`, `&colon;`) (#110). */
+	const RE_COLON = '(?::|%3a|&' . self::RE_ENC_COLON_REF . ')';
 
-	/**
-	 * Regex: an encoded `@` (`%40`, `&#64;`, `&#x40;`, `&commat;`) (#110). A
-	 * numeric reference may lack its `;` exactly as a slash reference may
-	 * (RE_ENC_SLASH_REF): `&#64` when no digit follows, `&#x40` when no hex
-	 * digit follows — `&#x40discord` is U+040D to HTML5, not `@discord`
-	 * (PR #112 Codex r1).
-	 */
+	/** Regex: an encoded `@` (`%40`, or RE_ENC_AT_REF: `&#64`, `&#x40`, `&commat;`) (#110, PR #112 Codex r1). */
 	const RE_ENC_AT = '(?:%40|&' . self::RE_ENC_AT_REF . ')';
 
 	/** Regex (after `&`): the rest of an HTML reference to `@` — see RE_ENC_AT. */
-	const RE_ENC_AT_REF = '(?:#0*64(?:;|(?![0-9]))|#x0*40(?:;|(?![0-9a-f]))|commat;)';
+	const RE_ENC_AT_REF = '(?:#0*64' . self::RE_REF_DEC_END . '|#x0*40' . self::RE_REF_HEX_END . '|commat;)';
 
 	/**
 	 * Regex: optional userinfo, up to its first `@` — literal or encoded
@@ -104,15 +138,11 @@ class Aura_Worker_Redact {
 	 * are left out), so `evil%2Ehook.eu2.make.com` still is no boundary, as
 	 * `evil.hook.eu2.make.com` is not. A non-ASCII byte (`%80`–`%FF`, e.g.
 	 * the UTF-8 of a curly quote or a no-break space) is no hostname
-	 * character either (fix round 1, I1). A terminated HTML reference ends
-	 * in `;`, which the plain lookbehind accepts; an UNterminated reference
-	 * to `/` or `@` (`&#47`, `&#047`, `&#x2F`, `&#x02F`, `&#64`, `&#064`,
-	 * `&#x40`, `&#x040` — deeper zero padding is not recognised) is a
-	 * boundary too (`@`: PR #112 Codex r1), the hex form only when no hex digit
-	 * follows, as HTML5 decodes it (fix round 1, M1). Fixed-width top-level
-	 * alternatives, as PCRE requires in a lookbehind.
+	 * character either (fix round 1, I1). HTML references are
+	 * RE_REF_BOUNDARY's. Fixed-width top-level alternatives, as PCRE
+	 * requires in a lookbehind.
 	 */
-	const RE_PCT_BOUNDARY = '(?:(?<=%[01][0-9a-f]|%2[0-9a-cf]|%3[a-f]|%40|%5[b-f]|%60|%7[b-f]|%[89a-f][0-9a-f]|&#47|&#047|&#64|&#064)|(?<=&#x2f|&#x02f|&#x40|&#x040)(?![0-9a-f]))';
+	const RE_PCT_BOUNDARY = '(?<=%[01][0-9a-f]|%2[0-9a-cf]|%3[a-f]|%40|%5[b-f]|%60|%7[b-f]|%[89a-f][0-9a-f])';
 
 	/**
 	 * Regex: the URL's prefix — full scheme (`https://`), protocol-relative
@@ -124,10 +154,11 @@ class Aura_Worker_Redact {
 	 * `evilhooks.zapier.com` never match at the `hooks.zapier.com`
 	 * substring; only a genuine boundary (start of string, whitespace,
 	 * quote, punctuation, …) does — or a percent escape of one
-	 * (RE_PCT_BOUNDARY, #110). The scheme's `:` and both slashes may be
+	 * (RE_PCT_BOUNDARY, #110), or an unterminated reference to one
+	 * (RE_REF_BOUNDARY, PR #112 Codex r2). The scheme's `:` and both slashes may be
 	 * encoded (`https%3A%2F%2F`, `https:&#x2F;&#x2F;`).
 	 */
-	const RE_HEAD = '~(?:(?<![A-Za-z0-9.-])|' . self::RE_PCT_BOUNDARY . ')(?:https?' . self::RE_COLON . self::RE_DOUBLE_SLASH_USERINFO . '|' . self::RE_DOUBLE_SLASH_USERINFO . ')?';
+	const RE_HEAD = '~(?:(?<![A-Za-z0-9.-])|' . self::RE_PCT_BOUNDARY . '|' . self::RE_REF_BOUNDARY . ')(?:https?' . self::RE_COLON . self::RE_DOUBLE_SLASH_USERINFO . '|' . self::RE_DOUBLE_SLASH_USERINFO . ')?';
 
 	/**
 	 * Regex: an optional trailing FQDN dot, an optional port, then the slash
