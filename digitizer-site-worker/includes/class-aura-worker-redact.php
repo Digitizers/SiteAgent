@@ -216,6 +216,15 @@ class Aura_Worker_Redact {
 	const RE_RUN = '/[^\s"\'<>]++/';
 
 	/**
+	 * Regex: a stage 1 placeholder whose URL tail stopped at a bare
+	 * backslash (RE_TAIL), with only handed-back sentence punctuation
+	 * between them — the one place stage 1 ends a match inside a run where
+	 * a JSON reader would read the URL on (`…/\u0061bc…`). Such a run is
+	 * judged by its ORIGINAL (pre-stage-1) layers too (#113, fix round 1).
+	 */
+	const RE_CUT_AT_BACKSLASH = '/aura-redacted:v1:[a-z]++[.,;:!?]*+\\\\/';
+
+	/**
 	 * Known receivers (spec §2.1): full-URL patterns anchored on the
 	 * registrable host, never a substring of a field name. A list of
 	 * `array( kind, regex )`, because two hosts share the `discord` kind.
@@ -869,8 +878,9 @@ class Aura_Worker_Redact {
 	 * @return string
 	 */
 	public static function redact_text( $text, &$count ) {
-		$text = self::redact_urls( (string) $text, $count );
-		return self::redact_encoded_runs( $text, $count );
+		$original = (string) $text;
+		$text     = self::redact_urls( $original, $count );
+		return self::redact_encoded_runs( $text, $count, $original );
 	}
 
 	/**
@@ -924,28 +934,44 @@ class Aura_Worker_Redact {
 	 * that holds a `%`, `&` or `\` is decoded layer by layer
 	 * (Aura_Worker_Redact_Decode::decode_layers()). When ANY layer — the raw
 	 * run included — holds a receiver URL by the stage 1 patterns, the WHOLE
-	 * original run is replaced with the placeholder of the first layer that
-	 * matches, its trailing sentence punctuation handed back. Every layer is
-	 * checked because a later pass can hide again what an earlier one
-	 * exposed (a decoded reference glued to the host). A run that cannot be
-	 * decoded within the bounds becomes the field placeholder. A run holding
+	 * run is replaced with the placeholder of the first layer that matches,
+	 * its trailing sentence punctuation handed back. Every layer is checked
+	 * because a later pass can hide again what an earlier one exposed (a
+	 * decoded reference glued to the host). A run that cannot be decoded
+	 * within the bounds becomes the field placeholder. A run holding
 	 * `aura-redacted:` is decoded like any other: a literal marker must not
 	 * shield an encoded URL next to it.
 	 *
-	 * @param string $text  Stage 1's output.
-	 * @param int    $count In/out: replacements so far.
+	 * Stage 1 ends a URL at a bare backslash, so its placeholder can stand
+	 * right before a JSON escape that continues the URL (`…:make\u0061bc…`);
+	 * judged alone, that run holds no receiver. So when a run of stage 1's
+	 * output matches RE_CUT_AT_BACKSLASH, the layers of the ORIGINAL run it
+	 * came from are checked too. The runs of the two texts pair up one to
+	 * one — a stage 1 match and its placeholder hold no run delimiter — and
+	 * a count mismatch fails the field closed all the same.
+	 *
+	 * @param string $text     Stage 1's output.
+	 * @param int    $count    In/out: replacements so far.
+	 * @param string $original The text before stage 1.
 	 * @return string
 	 */
-	private static function redact_encoded_runs( $text, &$count ) {
+	private static function redact_encoded_runs( $text, &$count, $original ) {
 		if ( ! self::has_encoding_marker( $text ) ) {
 			return $text; // field fast path: nothing is encoded
 		}
+		$originals = self::original_runs( $text, $original );
+		if ( false === $originals ) {
+			++$count; // PCRE gave up, or the runs do not pair up: fail closed (R9)
+			return self::PLACEHOLDER . 'field';
+		}
 		$failed = false;
 		$hits   = 0;
+		$index  = -1;
 		$out    = preg_replace_callback(
 			self::RE_RUN,
-			static function ( $m ) use ( &$failed, &$hits ) {
+			static function ( $m ) use ( &$failed, &$hits, &$index, $originals ) {
 				$run = $m[0];
+				++$index;
 				if ( $failed || ! self::has_encoding_marker( $run ) ) {
 					return $run; // run fast path
 				}
@@ -955,7 +981,24 @@ class Aura_Worker_Redact {
 					return self::PLACEHOLDER . 'field';
 				}
 				if ( count( $layers ) < 2 ) {
-					return $run; // nothing decodes
+					$layers = array(); // nothing decodes: the raw run is stage 1's own output
+				}
+				if ( null !== $originals ) {
+					$cut = preg_match( self::RE_CUT_AT_BACKSLASH, $run );
+					if ( false === $cut ) {
+						$failed = true;
+						return $run;
+					}
+					if ( 1 === $cut && $originals[ $index ] !== $run ) {
+						$before = Aura_Worker_Redact_Decode::decode_layers( $originals[ $index ] );
+						if ( null === $before ) {
+							++$hits;
+							return self::PLACEHOLDER . 'field';
+						}
+						// Stage 1 already judged the original run as it is
+						// (layer 0) and replaced exactly what it matched there.
+						$layers = array_merge( $layers, array_slice( $before, 1 ) );
+					}
 				}
 				foreach ( $layers as $layer ) {
 					$kind = self::receiver_kind( $layer );
@@ -982,6 +1025,31 @@ class Aura_Worker_Redact {
 	}
 
 	/**
+	 * The runs of the text before stage 1, one per run of $text — only when
+	 * stage 1 changed the text and left a placeholder cut at a backslash.
+	 *
+	 * @param string $text     Stage 1's output.
+	 * @param string $original The text before stage 1.
+	 * @return string[]|null|false The runs; null when none are needed; false
+	 *                             on a PCRE failure or a count mismatch.
+	 */
+	private static function original_runs( $text, $original ) {
+		if ( $original === $text ) {
+			return null; // stage 1 replaced nothing
+		}
+		$cut = preg_match( self::RE_CUT_AT_BACKSLASH, $text );
+		if ( 1 !== $cut ) {
+			return false === $cut ? false : null;
+		}
+		$before = preg_match_all( self::RE_RUN, $original, $m_before );
+		$after  = preg_match_all( self::RE_RUN, $text, $m_after );
+		if ( false === $before || false === $after || $before !== $after ) {
+			return false;
+		}
+		return $m_before[0];
+	}
+
+	/**
 	 * The kind of the first stage 1 pattern that matches $decoded, as a
 	 * check only — nothing is replaced.
 	 *
@@ -989,8 +1057,14 @@ class Aura_Worker_Redact {
 	 * @return string|false The kind; '' when no pattern matches; false when PCRE failed.
 	 */
 	private static function receiver_kind( $decoded ) {
-		if ( false === strpos( $decoded, '/' ) && ! self::may_hold_encoded_slash( $decoded ) ) {
-			return ''; // stage 1's own fast reject: no slash, no receiver URL
+		if ( false === strpos( $decoded, '/' ) ) {
+			$slash = self::encoded_slash_state( $decoded );
+			if ( null === $slash ) {
+				return false; // PCRE gave up: unknown, so not "no slash"
+			}
+			if ( ! $slash ) {
+				return ''; // stage 1's own fast reject: no slash, no receiver URL
+			}
 		}
 		foreach ( self::URL_PATTERNS as $pattern ) {
 			$found = preg_match( $pattern[1], $decoded );
@@ -1040,10 +1114,25 @@ class Aura_Worker_Redact {
 	 * @return bool
 	 */
 	private static function may_hold_encoded_slash( $text ) {
+		return true === self::encoded_slash_state( $text );
+	}
+
+	/**
+	 * may_hold_encoded_slash() with a PCRE failure told apart: stage 1 reads
+	 * null as "no" (2.18.1 behaviour, unchanged); stage 2 fails closed on it.
+	 *
+	 * @param string $text Text.
+	 * @return bool|null Null when PCRE gave up.
+	 */
+	private static function encoded_slash_state( $text ) {
 		if ( false !== stripos( $text, '%2f' ) || false !== stripos( $text, '&sol' ) ) {
 			return true;
 		}
-		return false !== strpos( $text, '&#' ) && 1 === preg_match( '/&#(?:0*47|x0*2f)/i', $text );
+		if ( false === strpos( $text, '&#' ) ) {
+			return false;
+		}
+		$found = preg_match( '/&#(?:0*47|x0*2f)/i', $text );
+		return false === $found ? null : 1 === $found;
 	}
 
 	/**

@@ -221,6 +221,51 @@ final class RedactEncodedRunTest extends TestCase {
 		$this->assertGreaterThanOrEqual( 1, $n );
 	}
 
+	/**
+	 * A JSON `\uXXXX` escape inside a receiver path (#113, fix round 1).
+	 * Stage 1 stops a URL at a bare backslash, so it leaves its placeholder
+	 * right before the escape (`…:zapierhooks…`); the original run's
+	 * layers are checked too, so the whole run goes. The escape sits on the
+	 * path's first letter or on the secret's first letter (plain JSON, and
+	 * after punctuation stage 1 hands back: `.`), or on the secret's second
+	 * letter (JSON-in-JSON, `\\u`: the decoder leaves `\\` as it is, so a
+	 * backslash stays in front of the letter — and telegram's token must
+	 * start right after `bot<id>:`).
+	 *
+	 * @return array<string,array{0:string,1:string,2:string}> run, kind, secret
+	 */
+	public static function json_path_cases(): array {
+		$cases = array();
+		foreach ( self::RECEIVERS as $rname => list( $host, $path, $kind, $secret ) ) {
+			$at     = strpos( $path, $secret );
+			$prefix = substr( $path, 0, $at );
+			$after  = substr( $path, $at + 1 );
+			$escape = '\\u00' . bin2hex( $secret[0] );
+
+			$cases[ "{$rname} / json path letter" ]           = array( "https://{$host}/\\u00" . bin2hex( $path[0] ) . substr( $path, 1 ), $kind, $secret );
+			$cases[ "{$rname} / json secret letter" ]         = array( "https://{$host}/{$prefix}{$escape}{$after}", $kind, $secret );
+			$cases[ "{$rname} / json-in-json secret letter" ] = array( "https://{$host}/{$prefix}{$secret[0]}\\\\u00" . bin2hex( $secret[1] ) . substr( $path, $at + 2 ), $kind, $secret );
+			$cases[ "{$rname} / json after punctuation" ]     = array( "https://{$host}/{$prefix}x.{$escape}{$after}", $kind, $secret );
+		}
+		return $cases;
+	}
+
+	/** @dataProvider json_path_cases */
+	public function test_a_json_escape_in_a_receiver_path_is_redacted( string $run, string $kind, string $secret ): void {
+		$out = $this->text( $run, $n );
+		$this->assertSame( 'aura-redacted:v1:' . $kind, $out, $run );
+		$this->assertStringNotContainsString( substr( $secret, 1 ), $out );
+		$this->assertGreaterThanOrEqual( 1, $n );
+	}
+
+	/** @dataProvider json_path_cases */
+	public function test_a_json_escape_in_a_receiver_path_is_redacted_inside_prose( string $run, string $kind, string $secret ): void {
+		$out = $this->text( "Posted to {$run} today, then {$run}. Done.", $n );
+		$this->assertSame( "Posted to aura-redacted:v1:{$kind} today, then aura-redacted:v1:{$kind}. Done.", $out );
+		$this->assertStringNotContainsString( substr( $secret, 1 ), $out );
+		$this->assertGreaterThanOrEqual( 2, $n );
+	}
+
 	/** @return array<string,array{0:string}> */
 	public static function controls(): array {
 		return array(
@@ -249,21 +294,140 @@ final class RedactEncodedRunTest extends TestCase {
 		$this->assertSame( 0, $n );
 	}
 
-	public function test_a_pcre_failure_fails_the_field_closed(): void {
-		$jit   = ini_get( 'pcre.jit' );
-		$limit = ini_get( 'pcre.backtrack_limit' );
+	/**
+	 * Run $test with the JIT off and pcre.backtrack_limit at $limit.
+	 *
+	 * @param int      $limit pcre.backtrack_limit.
+	 * @param callable $test  The assertions.
+	 */
+	private function with_pcre_limit( int $limit, callable $test ): void {
+		$jit = ini_get( 'pcre.jit' );
+		$old = ini_get( 'pcre.backtrack_limit' );
 		ini_set( 'pcre.jit', '0' ); // phpcs:ignore WordPress.PHP.IniSet.Risky
-		ini_set( 'pcre.backtrack_limit', '1' ); // phpcs:ignore WordPress.PHP.IniSet.Risky
+		ini_set( 'pcre.backtrack_limit', (string) $limit ); // phpcs:ignore WordPress.PHP.IniSet.Risky
 		try {
-			// No `/` and no encoded slash: stage 1 never runs a regex, stage 2 does.
-			$this->assertSame( 'aura-redacted:v1:field', $this->text( 'keep hooks.zapier.com%252Fx keep', $n ) );
-			$this->assertSame( 1, $n );
-			$this->assertSame( 'plain words only', $this->text( 'plain words only', $n ), 'the field fast path runs no regex' );
-			$this->assertSame( 0, $n );
+			$test();
 		} finally {
-			ini_set( 'pcre.backtrack_limit', (string) $limit ); // phpcs:ignore WordPress.PHP.IniSet.Risky
+			ini_set( 'pcre.backtrack_limit', (string) $old ); // phpcs:ignore WordPress.PHP.IniSet.Risky
 			ini_set( 'pcre.jit', (string) $jit ); // phpcs:ignore WordPress.PHP.IniSet.Risky
 		}
+	}
+
+	/**
+	 * The lowest pcre.backtrack_limit (JIT off) at which $passes holds and
+	 * $fails holds too. What a regex costs depends on the PCRE build, so
+	 * the limit is probed rather than pinned; the test is skipped when this
+	 * build has none. The tests that use it run in their own process: a
+	 * pattern an earlier test JIT-compiled stays cached and keeps matching
+	 * under the JIT after pcre.jit is turned off, and the JIT does not
+	 * count against these limits the same way.
+	 *
+	 * @param callable $passes The regexes that must succeed: true when they did.
+	 * @param callable $fails  The regex that must fail: true when it did.
+	 */
+	private function limit_between( callable $passes, callable $fails ): int {
+		for ( $limit = 1; $limit <= 500; ++$limit ) {
+			$found = false;
+			$this->with_pcre_limit(
+				$limit,
+				static function () use ( $passes, $fails, &$found ) {
+					$found = $passes() && $fails();
+				}
+			);
+			if ( $found ) {
+				return $limit;
+			}
+		}
+		$this->markTestSkipped( 'this PCRE build has no limit that fails only the targeted regex' );
+	}
+
+	private static function split_succeeds( string $text ): bool {
+		return null !== preg_replace_callback( Aura_Worker_Redact::RE_RUN, 'current', $text );
+	}
+
+	/**
+	 * @runInSeparateProcess
+	 * @preserveGlobalState disabled
+	 */
+	public function test_a_pcre_failure_on_the_split_fails_the_field_closed(): void {
+		// (a) The run split itself fails. No `/` and no encoded slash: stage 1
+		// never runs a regex, stage 2 does.
+		$text  = 'keep hooks.zapier.com%252Fx keep';
+		$limit = $this->limit_between(
+			'__return_true',
+			static function () use ( $text ) {
+				return ! self::split_succeeds( $text );
+			}
+		);
+		$this->with_pcre_limit(
+			$limit,
+			function () use ( $text ) {
+				$this->assertSame( 'aura-redacted:v1:field', $this->text( $text, $n ) );
+				$this->assertSame( 1, $n );
+				$this->assertSame( 'plain words only', $this->text( 'plain words only', $n ), 'the field fast path runs no regex' );
+				$this->assertSame( 0, $n );
+			}
+		);
+	}
+
+	/**
+	 * @runInSeparateProcess
+	 * @preserveGlobalState disabled
+	 */
+	public function test_a_pcre_failure_on_a_layer_check_fails_the_field_closed(): void {
+		// (b) The split and the decoder succeed; a receiver pattern on the
+		// decoded layer `hooks.zapier.com%2Fx` does not.
+		$text  = 'keep hooks.zapier.com%252Fx keep';
+		$limit = $this->limit_between(
+			static function () use ( $text ) {
+				return self::split_succeeds( $text ) && null !== Aura_Worker_Redact_Decode::decode_layers( 'hooks.zapier.com%252Fx' );
+			},
+			static function () {
+				foreach ( Aura_Worker_Redact::URL_PATTERNS as $pattern ) {
+					$found = preg_match( $pattern[1], 'hooks.zapier.com%2Fx' );
+					if ( 1 === $found ) {
+						return false; // a match before any failure: no failure is reached
+					}
+					if ( false === $found ) {
+						return true;
+					}
+				}
+				return false;
+			}
+		);
+		$this->with_pcre_limit(
+			$limit,
+			function () use ( $text ) {
+				$this->assertSame( 'aura-redacted:v1:field', $this->text( $text, $n ) );
+				$this->assertSame( 1, $n );
+			}
+		);
+	}
+
+	/**
+	 * @runInSeparateProcess
+	 * @preserveGlobalState disabled
+	 */
+	public function test_a_pcre_failure_in_the_decoder_fails_only_the_run(): void {
+		// (c) The split succeeds; the numeric reference regex does not, so
+		// decode_layers() is null and only that run becomes the placeholder.
+		$run   = str_repeat( 'a&#8217;', 50 );
+		$text  = "keep {$run} keep";
+		$limit = $this->limit_between(
+			static function () use ( $text ) {
+				return self::split_succeeds( $text );
+			},
+			static function () use ( $run ) {
+				return null === Aura_Worker_Redact_Decode::decode_layers( $run );
+			}
+		);
+		$this->with_pcre_limit(
+			$limit,
+			function () use ( $text ) {
+				$this->assertSame( 'keep aura-redacted:v1:field keep', $this->text( $text, $n ) );
+				$this->assertSame( 1, $n );
+			}
+		);
 	}
 
 	// --- carriers ---------------------------------------------------------
