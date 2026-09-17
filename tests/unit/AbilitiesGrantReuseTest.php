@@ -140,4 +140,26 @@ final class AbilitiesGrantReuseTest extends TestCase {
 		$refused = ( $this->gate() )( $params );
 		$this->assertTrue( is_wp_error( $refused ) || false === $refused );
 	}
+
+	public function test_a_legacy_plaintext_site_accepts_a_valid_grant_and_is_migrated(): void {
+		// SiteAgent #110: a site still storing its token in plaintext must not
+		// refuse every grant on the MCP / Application-Password path, which
+		// never presents the token (so nothing else migrates it there).
+		$GLOBALS['_options']['aura_worker_site_token'] = 'raw-site-token';
+		$params = array( 'target' => 'homepage' );
+		$_SERVER['HTTP_X_AURA_APPROVAL_GRANT'] = $this->mint( 'test_double_tool', $params );
+		Aura_Worker_Call_Context::set_rest_route_for_tests( '/mcp/angie' );
+
+		$this->assertTrue( true === ( $this->gate() )( $params ), 'a valid grant was refused on a legacy-token site' );
+		$this->assertSame( $this->site_hash, get_option( 'aura_worker_site_token' ), 'the stored token is its hash now' );
+	}
+
+	public function test_no_grant_migrates_nothing(): void {
+		$GLOBALS['_options']['aura_worker_site_token'] = 'raw-site-token';
+		Aura_Worker_Call_Context::set_rest_route_for_tests( '/mcp/angie' );
+
+		$refused = ( $this->gate() )( array( 'target' => 'homepage' ) );
+		$this->assertTrue( is_wp_error( $refused ) || false === $refused );
+		$this->assertSame( 'raw-site-token', get_option( 'aura_worker_site_token' ), 'only a grant check migrates' );
+	}
 }

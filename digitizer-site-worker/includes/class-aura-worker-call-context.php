@@ -425,7 +425,14 @@ class Aura_Worker_Call_Context {
 			return self::$verified[ $key ];
 		}
 
-		$ok                     = true === Aura_Worker_Grant::verify( $grant, (string) $tool_name, $params );
+		// verify() binds the grant to sha256(raw token) as stored. A site still
+		// storing a legacy plaintext token would refuse every grant, and this
+		// path never presents the token, so nothing else migrates it here
+		// (SiteAgent #110 — the same guard as Aura_Worker_Redact's grant check).
+		if ( class_exists( 'Aura_Worker_Security' ) ) {
+			Aura_Worker_Security::migrate_legacy_stored_token();
+		}
+		$ok = true === Aura_Worker_Grant::verify( $grant, (string) $tool_name, $params );
 		// Only a success is remembered. A failure may be transient (a clock
 		// skew, a grant that has not started yet), and caching it would deny a
 		// call that would otherwise be allowed moments later in the same
