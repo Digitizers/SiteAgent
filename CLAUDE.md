@@ -339,12 +339,25 @@ out of every REST response an **agent** reads.
   backslash there stays userinfo text (`RE_USERINFO_ANY_AT` already accepts `%2f`),
   while at a host end or in a path an encoded slash is already the slash `RE_SLASH` /
   `RE_TAIL` accept, #110 — one reading now serves userinfo, the host end and the path
-  alike) against `url_patterns()` — the same patterns with the prefix REQUIRED: a special scheme
+  alike) against `url_patterns()` — the prefix REQUIRED: a special scheme
   (`http`, `https`, `ws`, `wss`, `ftp`) + `:` + zero or more slashes (a WHATWG parser
   skips any number after a special scheme, so `https:\host`, `https:/host` and
   `https:host` all count), or two or more slashes not preceded by a literal scheme
-  colon (`:`/`%3a`) or another slash (protocol-relative: `//host`, `///host`); (4)
-  both mappings together. A run whose layers hold nothing to
+  colon (`:`/`%3a`) or another slash (protocol-relative: `//host`, `///host`) — and the
+  port EMPTY as well as digits (`RE_HOST_END_URL`'s `[0-9]*+`: `host:/path`,
+  `host:\path` name the host with no port, as a WHATWG parser reads it; `stage_2_patterns()`
+  keeps `RE_HOST_END`'s `[0-9]+`, so the plain-text, un-encoded form of this is a stage 1
+  miss, filed separately as #121 — Codex r4 on PR #120); (4) both mappings together.
+  Views 3–4 judge `url_patterns()`, a DIFFERENT pattern set from views 1–2's
+  `stage_2_patterns()` (required prefix, empty port allowed, vs. no left boundary, digit
+  port required), so they run even when a view's output is the SAME TEXT the layer
+  already is — an unchanged `url_view()` reading still has to be judged against the
+  other pattern set (Codex r5 on PR #120: `https://ｈooks.zapier.com:/hooks/…` — a
+  mapped host, empty port, no backslash — was missed because the old code treated "same
+  text" as "already judged", when only views 1–2 had run that text). A view is skipped
+  only when its text duplicates another view already run against the SAME patterns
+  (view 4 is skipped when it equals view 3's text, never merely because it equals
+  `$layer`). A run whose layers hold nothing to
   decode gets views 2–4 of its raw layer but not view 1 (stage 1 judged that with its
   host boundary). Checking every layer and view matters because a later pass can hide
   again what an earlier one exposed. On the first view of the first layer that

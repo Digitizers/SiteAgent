@@ -161,6 +161,11 @@ final class RedactUrlReadingTest extends TestCase {
 			// non-digit after the colon fails the port AND leaves no slash
 			// right after the host, so this is not a receiver.
 			'colon then a non-digit is not a port' => array( 'https://hooks.zapier.com:evil\\x' ),
+			// #116, Codex r5 on PR #120: no backslash here, so url_view() is a
+			// no-op and view 3 now runs anyway (against url_patterns(), not
+			// stage_2_patterns()) — still no match, since a letter right after
+			// the colon is not an (empty) port either way.
+			'colon then a letter is no port, view 3 runs anyway' => array( 'https://hooks.zapier.com:evil/hooks%2Fx' ),
 		);
 	}
 
@@ -294,6 +299,32 @@ final class RedactUrlReadingTest extends TestCase {
 		foreach ( array( 'file&#58;//hooks.zapier.com\\x', 'file\\u003A//hooks.zapier.com\\x', 'file%253A//hooks.zapier.com\\x' ) as $in ) {
 			$this->assertSame( 'aura-redacted:v1:zapier', $this->text( $in ), $in );
 		}
+	}
+
+	/**
+	 * #116, Codex r5 on PR #120: when a run enters stage 2 for a reason
+	 * OTHER than a backslash (a mapped host, or an encoded byte elsewhere
+	 * in the run), url_view() can be a no-op — but url_patterns() (views
+	 * 3–4) must still be judged, since it is a DIFFERENT pattern set (an
+	 * empty port allowed) than stage_2_patterns() (views 1–2, a digit port
+	 * required). judge_layer() used to skip views 3–4 whenever
+	 * $url === $layer, treating "same text" as "already judged" even
+	 * though the two views judge it against different patterns.
+	 */
+	public static function empty_port_in_stage_2(): array {
+		return array(
+			'mapped host, empty port, plain slash'          => array( "https://\u{FF48}ooks.zapier.com:/hooks/catch/1/zsecret9" ),
+			'plain host, empty port, encoded path slash'    => array( 'https://hooks.zapier.com:/hooks%2Fcatch/1/zsecret9' ),
+			'mapped host via numeric reference, empty port' => array( 'https://hooks&#x3002;zapier.com:/hooks/catch/1/zsecret9' ),
+		);
+	}
+
+	/** @dataProvider empty_port_in_stage_2 */
+	public function test_an_empty_port_before_a_plain_slash_is_redacted_when_the_run_enters_stage_2( string $in ): void {
+		$out = $this->text( $in, $count );
+		$this->assertStringNotContainsString( 'zsecret9', $out, $in );
+		$this->assertSame( 'aura-redacted:v1:zapier', $out, $in );
+		$this->assertSame( 1, $count, $in );
 	}
 
 	public function test_the_write_guard_is_unchanged(): void {

@@ -1333,11 +1333,19 @@ class Aura_Worker_Redact {
 	 * The kind of the first VIEW of $layer that holds a receiver URL (spec
 	 * §3.1, #116): the layer as it is (view 1 — only when $judge_raw: a
 	 * layer stage 1 already judged with its host boundary is not judged
-	 * again without it), its UTS-46 mapping (view 2), the URL parser's
-	 * reading (view 3, url_view(): a literal backslash is a slash, an
-	 * encoded one is an encoded slash — see url_view()) and both mappings
-	 * together (view 4). A view that equals the text it came from is not
-	 * run again. A PCRE failure in url_view() (view 3 or 4) returns false
+	 * again without it), its UTS-46 mapping (view 2) — both against
+	 * `stage_2_patterns()` — the URL parser's reading (view 3, url_view():
+	 * a literal backslash is a slash, an encoded one is an encoded slash —
+	 * see url_view()) and both mappings together (view 4) — both against
+	 * `url_patterns()`. The two pattern sets are DIFFERENT (`url_patterns()`
+	 * requires a prefix but allows an EMPTY port, `stage_2_patterns()` is
+	 * the reverse — #116, Codex r5 on PR #120), so views 3–4 are always run,
+	 * even when `url_view()` is a no-op (`$url === $layer`): an unchanged
+	 * TEXT still needs judging against a different pattern set. Only a view
+	 * whose produced text duplicates another view already run against the
+	 * SAME pattern set is skipped — view 4 is skipped when its text equals
+	 * view 3's (both `url_patterns()`), never merely because it equals
+	 * `$layer`. A PCRE failure in url_view() (view 3 or 4) returns false
 	 * at once: unknown, so not "no receiver".
 	 *
 	 * @param string $layer     One layer of a run.
@@ -1361,9 +1369,6 @@ class Aura_Worker_Redact {
 		$url = self::url_view( $layer );
 		if ( null === $url ) {
 			return false; // PCRE gave up: unknown, so not "no receiver"
-		}
-		if ( $url === $layer ) {
-			return '';
 		}
 		$kind = self::receiver_kind( $url, self::url_patterns() );
 		if ( '' !== $kind ) {
