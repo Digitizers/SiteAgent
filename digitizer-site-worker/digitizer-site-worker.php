@@ -77,6 +77,7 @@ require_once AURA_WORKER_DIR . 'includes/class-aura-worker-grant.php';
 require_once AURA_WORKER_DIR . 'includes/class-aura-worker-mcp.php';
 require_once AURA_WORKER_DIR . 'includes/class-aura-worker-call-context.php';
 require_once AURA_WORKER_DIR . 'includes/class-aura-worker-rules.php';
+require_once AURA_WORKER_DIR . 'includes/class-aura-worker-redact-decode.php';
 require_once AURA_WORKER_DIR . 'includes/class-aura-worker-redact.php';
 require_once AURA_WORKER_DIR . 'includes/class-aura-worker-door-log.php';
 require_once AURA_WORKER_DIR . 'includes/class-aura-worker-door-holds.php';
