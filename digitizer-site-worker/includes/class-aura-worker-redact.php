@@ -246,6 +246,14 @@ class Aura_Worker_Redact {
 	const RE_HOST_END = '\.?(?:' . self::RE_COLON . '[0-9]+)?' . self::RE_SLASH;
 
 	/**
+	 * Regex: RE_HOST_END as a WHATWG parser reads it — the port may be
+	 * EMPTY (`host:/path`, `host:\path` name the host with no port). Used
+	 * by url_patterns() only (#116, Codex r4 on PR #120); stage 1 keeps
+	 * RE_HOST_END's `[0-9]+` (see #121).
+	 */
+	const RE_HOST_END_URL = '\.?(?:' . self::RE_COLON . '[0-9]*+)?' . self::RE_SLASH;
+
+	/**
 	 * Regex (after `&`): the name of an HTML-encoded quote or angle bracket —
 	 * `quot`, `#34`, `#x22`, `apos`, `#39`, `#x27`, `gt`, `#62`, `#x3e`,
 	 * `lt`, `#60`, `#x3c` (the pattern is case-insensitive).
@@ -1270,8 +1278,11 @@ class Aura_Worker_Redact {
 	/**
 	 * Stage 2's patterns for the URL parser's reading (#116): each
 	 * URL_PATTERNS entry, same kind and order, with RE_HEAD swapped for
-	 * RE_HEAD_SCHEMED — no left host boundary, prefix REQUIRED. Run against
-	 * url_view() of a layer only: in plain text a backslash is not a slash.
+	 * RE_HEAD_SCHEMED — no left host boundary, prefix REQUIRED — and
+	 * RE_HOST_END swapped for RE_HOST_END_URL — the port may be empty, as a
+	 * WHATWG parser reads it (`host:/path`, `host:\path`; Codex r4 on PR
+	 * #120). Run against url_view() of a layer only: in plain text a
+	 * backslash is not a slash.
 	 *
 	 * @return array<int,array{0:string,1:string}>
 	 */
@@ -1279,7 +1290,13 @@ class Aura_Worker_Redact {
 		if ( null === self::$url_patterns ) {
 			$patterns = array();
 			foreach ( self::URL_PATTERNS as $pattern ) {
-				$patterns[] = array( $pattern[0], self::RE_HEAD_SCHEMED . substr( $pattern[1], strlen( self::RE_HEAD ) ) );
+				$body = substr( $pattern[1], strlen( self::RE_HEAD ) );
+				if ( 1 !== substr_count( $body, self::RE_HOST_END ) ) {
+					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- the message is escaped; the kind is a fixed URL_PATTERNS literal, never rendered.
+					throw new LogicException( esc_html( 'url_patterns(): ' . $pattern[0] . ' does not have exactly one RE_HOST_END' ) );
+				}
+				$body       = str_replace( self::RE_HOST_END, self::RE_HOST_END_URL, $body );
+				$patterns[] = array( $pattern[0], self::RE_HEAD_SCHEMED . $body );
 			}
 			self::$url_patterns = $patterns;
 		}
