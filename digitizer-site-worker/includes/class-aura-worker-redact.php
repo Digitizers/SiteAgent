@@ -182,14 +182,15 @@ class Aura_Worker_Redact {
 	 * a special scheme (`http:` / `https:`) followed by ANY number of
 	 * slashes, none included (the parser's "special authority ignore
 	 * slashes" state: `https:\host`, `https:/host`, `https:host` and
-	 * `https:///host` all name `host`), or exactly `//` (protocol-relative:
-	 * with a base URL `//host` is an authority, `/host` a path) — its `//`
-	 * must not be the tail of another scheme's `://` nor of a longer slash
-	 * run. No left host boundary, as RE_HEAD_UNBOUNDED. The `:` and the
-	 * slashes may be encoded, as in RE_URL_PREFIX. Used by url_patterns()
-	 * only (#116).
+	 * `https:///host` all name `host`), or two or more slashes not preceded
+	 * by a scheme colon or another slash (protocol-relative: `//host`, and
+	 * `///host` which a parser with a base also reads as an authority);
+	 * `file:///host` stays out because every two-slash start inside it
+	 * follows `:` or `/`. No left host boundary, as RE_HEAD_UNBOUNDED. The
+	 * `:` and the slashes may be encoded, as in RE_URL_PREFIX. Used by
+	 * url_patterns() only (#116).
 	 */
-	const RE_HEAD_SCHEMED = '~(?:https?' . self::RE_COLON . self::RE_SLASH . '*+' . self::RE_USERINFO . '|(?<!:|%3a|/)' . self::RE_DOUBLE_SLASH_USERINFO . ')';
+	const RE_HEAD_SCHEMED = '~(?:https?' . self::RE_COLON . self::RE_SLASH . '*+' . self::RE_USERINFO . '|(?<!:|%3a|/)' . self::RE_SLASH . self::RE_SLASH . self::RE_SLASH . '*+' . self::RE_USERINFO . ')';
 
 	/**
 	 * Regex: a backslash as url_view() reads it — literal, or encoded as
@@ -997,16 +998,17 @@ class Aura_Worker_Redact {
 	 * Stage 2 (#113, widened #116): decode, then match through up to four
 	 * VIEWS. A field enters when it holds a `%`, `&` or `\` (an encoding
 	 * marker), OR a byte outside ASCII next to a slash — literal, or
-	 * `may_hold_encoded_slash()` — since a UTS-46-mapped hostname still
+	 * `encoded_slash_state()` — since a UTS-46-mapped hostname still
 	 * needs its slash to be a receiver URL (`needs_stage_2()`). The field
 	 * is split into runs (RE_RUN); a run is decoded and viewed only when it
 	 * holds an encoding marker or a byte outside ASCII (`needs_stage_2_run()`);
 	 * otherwise it is kept (run fast path). A run that needs it is decoded
 	 * layer by layer (Aura_Worker_Redact_Decode::decode_layers()), and each
 	 * layer is judged through up to four views (`judge_layer()`, spec §3.1):
-	 * the layer as it is (view 1 — stage 1's own bounded patterns, only when
-	 * this is the layer stage 1 has not already judged that way); its
-	 * UTS-46 hostname mapping (view 2, Aura_Worker_Redact_Idna::map());
+	 * the layer as it is (view 1 — stage_2_patterns(), no left host
+	 * boundary, only when this is the layer stage 1 has not already judged
+	 * that way); its UTS-46 hostname mapping (view 2,
+	 * Aura_Worker_Redact_Idna::map());
 	 * the URL parser's reading, every backslash — literal or encoded — read
 	 * as `/` under a required scheme (view 3, `url_view()` against
 	 * `url_patterns()`); and both mappings together (view 4). On the first
@@ -1019,7 +1021,7 @@ class Aura_Worker_Redact {
 	 * marker must not shield an encoded or backslash-read URL next to it.
 	 *
 	 * Stage 1 ends a URL at a bare backslash, so its placeholder can stand
-	 * right before a JSON escape that continues the URL (`—:make\u0061bc—`);
+	 * right before a JSON escape that continues the URL (`…:make\u0061bc…`);
 	 * judged alone, that run holds no receiver. So when a run of stage 1's
 	 * output matches RE_CUT_AT_BACKSLASH, the layers of the ORIGINAL run it
 	 * came from are viewed too — always past view 1 (views 2-4 are readings

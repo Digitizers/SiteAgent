@@ -51,6 +51,8 @@ final class RedactUrlReadingTest extends TestCase {
 			'&#x5C;'         => static function ( $h, $p ) { return "https://{$h}" . str_replace( '\\', '&#x5C;', "\\{$p}" ); },
 			'pct whole'      => static function ( $h, $p ) { return rawurlencode( "https://{$h}\\{$p}" ); },
 			'json \\\\'      => static function ( $h, $p ) { return "https://{$h}" . str_replace( '\\', '\\\\', "\\{$p}" ); },
+			'///'            => static function ( $h, $p ) { return "///{$h}\\{$p}"; },
+			'json \\/\\/\\/' => static function ( $h, $p ) { return '\\/\\/\\/' . $h . str_replace( '\\', '\\\\', "\\{$p}" ); },
 		);
 	}
 
@@ -109,6 +111,7 @@ final class RedactUrlReadingTest extends TestCase {
 			'bare host, backslash path' => array( 'hooks.zapier.com\\hooks\\catch\\1\\S' ),
 			'windows path'              => array( 'C:\\Users\\hooks.zapier.com\\x' ),
 			'file url'                  => array( 'file://hooks.zapier.com\\x' ),
+			'file:///host'              => array( 'file:///hooks.zapier.com\\x' ),
 			'unc, other host'           => array( '\\\\server\\share\\hooks.zapier.com' ),
 			'one slash: a path'         => array( '/hooks.zapier.com\\x' ),
 			'prose with a backslash'    => array( 'either\\or, see hooks.zapier.com' ),
@@ -298,7 +301,41 @@ final class RedactUrlReadingTest extends TestCase {
 		$this->assertSame( 0, preg_match( $url[2][1], '/hooks.zapier.com/hooks/catch/1/x' ) );
 		$this->assertSame( 0, preg_match( $url[2][1], 'file://hooks.zapier.com/hooks/catch/1/x' ), 'another scheme\'s // is not protocol-relative' );
 		$this->assertSame( 0, preg_match( $url[2][1], 'file%3A//hooks.zapier.com/hooks/catch/1/x' ) );
-		$this->assertSame( 0, preg_match( $url[2][1], '////hooks.zapier.com/hooks/catch/1/x' ) );
+		$this->assertSame( 0, preg_match( $url[2][1], 'file:///hooks.zapier.com/hooks/catch/1/x' ), 'every two-slash start inside file:/// follows : or /' );
+		$this->assertSame( 1, preg_match( $url[2][1], '////hooks.zapier.com/hooks/catch/1/x' ) );
 		$this->assertSame( 1, preg_match( $url[2][1], 'https:////hooks.zapier.com/hooks/catch/1/x' ) );
+	}
+
+	/** @dataProvider url_view_cases */
+	public function test_url_view_reads_exactly_the_backslash_forms( string $in, string $expect ): void {
+		// setAccessible() is unneeded (PHP 8.1+ Reflection invokes a private
+		// method directly) and deprecated as a no-op on PHP 8.5 — omitted so
+		// this test does not add a deprecation of its own.
+		$method = new ReflectionMethod( Aura_Worker_Redact::class, 'url_view' );
+		$this->assertSame( $expect, $method->invoke( null, $in ), $in );
+	}
+
+	public static function url_view_cases(): array {
+		return array(
+			// Every RE_ENC_BACKSLASH form becomes `/`.
+			'literal backslash'        => array( 'a\\b', 'a/b' ),
+			'%5C'                      => array( '%5C', '/' ),
+			'%5c'                      => array( '%5c', '/' ),
+			'&#92;'                    => array( '&#92;', '/' ),
+			'&#092'                    => array( '&#092', '/' ),
+			'&#0000092;'               => array( '&#0000092;', '/' ),
+			'&#x5C;'                   => array( '&#x5C;', '/' ),
+			'&#x5c'                    => array( '&#x5c', '/' ),
+			'&#x005c;'                 => array( '&#x005c;', '/' ),
+			'&bsol;'                   => array( '&bsol;', '/' ),
+			// Everything else is left exactly as it is.
+			'not 92: &#920;'           => array( '&#920;', '&#920;' ),
+			'not 92: &#921;'           => array( '&#921;', '&#921;' ),
+			'not 5c: &#x5cab'          => array( '&#x5cab', '&#x5cab' ),
+			'double-encoded: %255C'    => array( '%255C', '%255C' ),
+			'entity-escaped: &amp;#92;' => array( '&amp;#92;', '&amp;#92;' ),
+			'tab stays'                => array( "a\tb", "a\tb" ),
+			'a forward slash: %2F'     => array( '%2F', '%2F' ),
+		);
 	}
 }
