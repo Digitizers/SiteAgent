@@ -125,6 +125,23 @@ class Aura_Worker_Redact {
 	 */
 	const RE_USERINFO = '(?:(?:[^\\s/\\\\@"\'<>%&]++|%(?!2f|40)|&(?!' . self::RE_ENC_SLASH_REF . '|' . self::RE_ENC_AT_REF . '))*+(?:@|' . self::RE_ENC_AT . '))?';
 
+	/**
+	 * Regex: userinfo as a WHATWG parser reads it — the LAST `@` before the
+	 * host is the delimiter, and any earlier `@` is part of the userinfo
+	 * (`a@b@host`). One or more RE_USERINFO groups, each ending in its own
+	 * `@` (or an encoded one), possessive: linear, and the host always
+	 * follows the final `@`. Unlike RE_USERINFO, an encoded slash (`%2F`,
+	 * `&#47;`/`&sol;`-style, RE_ENC_SLASH_REF) is NOT excluded here: a URL
+	 * parser never decodes userinfo before finding the last `@`, so an
+	 * encoded slash inside userinfo is just userinfo, not a delimiter — only
+	 * a LITERAL `/` (or `\`, already turned into `/` by url_view()) ends the
+	 * authority (`https://a/b@host` has host `a`) (#116, Codex round 2 on
+	 * PR #120). RE_USERINFO keeps excluding it: stage 1 (#110) reads an
+	 * encoded slash as structural there. Used by RE_HEAD_SCHEMED only (#116,
+	 * Codex r1 on PR #120); stage 1 and stage_2_patterns() keep RE_USERINFO.
+	 */
+	const RE_USERINFO_ANY_AT = '(?:(?:[^\\s/\\\\@"\'<>%&]++|%(?!40)|&(?!' . self::RE_ENC_AT_REF . '))*+(?:@|' . self::RE_ENC_AT . '))*+';
+
 	/** Regex: `//` (each slash as RE_SLASH), then optional userinfo — shared by the schemed and protocol-relative prefixes. */
 	const RE_DOUBLE_SLASH_USERINFO = self::RE_SLASH . self::RE_SLASH . self::RE_USERINFO;
 
@@ -178,6 +195,47 @@ class Aura_Worker_Redact {
 	const RE_HEAD_UNBOUNDED = '~' . self::RE_URL_PREFIX;
 
 	/**
+	 * Regex: the prefix a WHATWG parser needs before it reads `\` as `/` —
+	 * a SPECIAL scheme (`http:`, `https:`, `ws:`, `wss:`, `ftp:` — and
+	 * `file:`, excluded on purpose: owner decision, see CLAUDE.md Limits)
+	 * followed by ANY number of slashes, none included (the parser's
+	 * "special authority ignore slashes" state: `https:\host`,
+	 * `https:/host`, `https:host` and `https:///host` all name `host`), or
+	 * two or more slashes not preceded by a scheme colon or another slash —
+	 * a LITERAL `:`, `%3a` or `/`: an encoded colon or encoded slashes
+	 * before the host are not seen (`file:%2f%2f%2fhost\x` is redacted:
+	 * the encoded-lookalike cost, see CLAUDE.md Limits) (protocol-relative:
+	 * `//host`, and `///host` which a parser with a base also reads as an
+	 * authority); `file:///host` stays out because
+	 * every two-slash start inside it follows `:` or `/`. No left host
+	 * boundary, as RE_HEAD_UNBOUNDED. The `:` and the slashes may be
+	 * encoded, as in RE_URL_PREFIX. Userinfo is RE_USERINFO_ANY_AT, not
+	 * RE_USERINFO: a WHATWG parser reads the LAST `@` before the host as
+	 * the delimiter, so `a@b@host` has to be read that way too (#116,
+	 * Codex r1 on PR #120). Used by url_patterns() only (#116).
+	 */
+	const RE_HEAD_SCHEMED = '~(?:(?:https?|wss?|ftp)' . self::RE_COLON . self::RE_SLASH . '*+' . self::RE_USERINFO_ANY_AT . '|(?<!:|%3a|/)' . self::RE_SLASH . self::RE_SLASH . self::RE_SLASH . '*+' . self::RE_USERINFO_ANY_AT . ')';
+
+	/**
+	 * Regex: an ENCODED backslash only — `%5C`, `&#92;` / `&#x5C;` (leading
+	 * zeros allowed, `;` optional, the same open-ended forms RE_ENC_SLASH_REF
+	 * accepts for `/`) or `&bsol;` — no literal `\` alternative. url_view()
+	 * (#116, Codex r3 on PR #120) maps every match to `%2f`, an ENCODED
+	 * slash, not a literal one: inside userinfo `RE_USERINFO_ANY_AT` reads
+	 * `%2f` as plain userinfo (round 2, an encoded slash there is not a
+	 * delimiter for a parser, which never decodes userinfo before its last
+	 * `@`), while at a host end or in a path `RE_SLASH` and `RE_TAIL` already
+	 * read `%2f` as the slash (#110) — so one reading now serves both
+	 * positions, closing the round-1 known limit where an encoded backslash
+	 * in BOTH userinfo and the path matched neither of two split readings.
+	 * A LITERAL backslash is handled separately, by a plain strtr() in
+	 * url_view() itself, because a parser reads it as `/` everywhere,
+	 * including as a userinfo-ending delimiter. Case-insensitive; every
+	 * alternative is fixed or possessive: linear.
+	 */
+	const RE_ENC_BACKSLASH_ENCODED = '/%5c|&(?:#0*92' . self::RE_REF_DEC_END . '|#x0*5c' . self::RE_REF_HEX_END . '|bsol;)/i';
+
+	/**
 	 * Regex: an optional trailing FQDN dot, an optional port, then the slash
 	 * that ends the host (fix round 1, Codex r1 P3: `hooks.zapier.com./...`
 	 * is the same host as `hooks.zapier.com/...`; the dot never lets a
@@ -186,6 +244,14 @@ class Aura_Worker_Redact {
 	 * and the slash may be encoded (#110): `hook.eu2.make.com%2Fabc`.
 	 */
 	const RE_HOST_END = '\.?(?:' . self::RE_COLON . '[0-9]+)?' . self::RE_SLASH;
+
+	/**
+	 * Regex: RE_HOST_END as a WHATWG parser reads it — the port may be
+	 * EMPTY (`host:/path`, `host:\path` name the host with no port). Used
+	 * by url_patterns() only (#116, Codex r4 on PR #120); stage 1 keeps
+	 * RE_HOST_END's `[0-9]+` (see #121).
+	 */
+	const RE_HOST_END_URL = '\.?(?:' . self::RE_COLON . '[0-9]*+)?' . self::RE_SLASH;
 
 	/**
 	 * Regex (after `&`): the name of an HTML-encoded quote or angle bracket —
@@ -393,6 +459,14 @@ class Aura_Worker_Redact {
 	 * @var array<int,array{0:string,1:string}>|null
 	 */
 	private static $stage_2_patterns = null;
+
+	/**
+	 * URL_PATTERNS with RE_HEAD_SCHEMED in place of RE_HEAD, built once by
+	 * url_patterns().
+	 *
+	 * @var array<int,array{0:string,1:string}>|null
+	 */
+	private static $url_patterns = null;
 
 	/**
 	 * Hook the read seam and the counters. Called from Aura_Worker::init(),
@@ -964,27 +1038,42 @@ class Aura_Worker_Redact {
 	}
 
 	/**
-	 * Stage 2 (#113): decode, then match. Each run — a maximal stretch of
-	 * characters other than whitespace, `"`, `'`, `<` and `>` (RE_RUN) —
-	 * that holds a `%`, `&` or `\` is decoded layer by layer
-	 * (Aura_Worker_Redact_Decode::decode_layers()). When ANY layer — the raw
-	 * run included — holds a receiver URL by the stage 2 patterns (the stage
-	 * 1 ones without the left host boundary, fix round 4), the WHOLE
-	 * run is replaced with the placeholder of the first layer that matches,
-	 * its trailing sentence punctuation handed back. Every layer is checked
-	 * because a later pass can hide again what an earlier one exposed (a
-	 * decoded reference glued to the host). A run that cannot be decoded
+	 * Stage 2 (#113, widened #116): decode, then match through up to four
+	 * VIEWS. A field enters when it holds a `%`, `&` or `\` (an encoding
+	 * marker), OR a byte outside ASCII next to a slash — literal, or
+	 * `encoded_slash_state()` — since a UTS-46-mapped hostname still
+	 * needs its slash to be a receiver URL (`needs_stage_2()`). The field
+	 * is split into runs (RE_RUN); a run is decoded and viewed only when it
+	 * holds an encoding marker or a byte outside ASCII (`needs_stage_2_run()`);
+	 * otherwise it is kept (run fast path). A run that needs it is decoded
+	 * layer by layer (Aura_Worker_Redact_Decode::decode_layers()), and each
+	 * layer is judged through up to four views (`judge_layer()`, spec §3.1):
+	 * the layer as it is (view 1 — stage_2_patterns(), no left host
+	 * boundary, only when this is the layer stage 1 has not already judged
+	 * that way); its UTS-46 hostname mapping (view 2,
+	 * Aura_Worker_Redact_Idna::map());
+	 * the URL parser's reading, every backslash — literal or encoded — read
+	 * as `/` under a required scheme (view 3, `url_view()` against
+	 * `url_patterns()`); and both mappings together (view 4). On the first
+	 * view of the first layer that matches, the WHOLE run is replaced with
+	 * the placeholder of that view's kind, its trailing sentence punctuation
+	 * handed back. Every layer and view is checked because a later pass can
+	 * hide again what an earlier one exposed. A run that cannot be decoded
 	 * within the bounds becomes the field placeholder. A run holding
-	 * `aura-redacted:` is decoded like any other: a literal marker must not
-	 * shield an encoded URL next to it.
+	 * `aura-redacted:` is decoded and viewed like any other: a literal
+	 * marker must not shield an encoded or backslash-read URL next to it.
 	 *
 	 * Stage 1 ends a URL at a bare backslash, so its placeholder can stand
 	 * right before a JSON escape that continues the URL (`…:make\u0061bc…`);
 	 * judged alone, that run holds no receiver. So when a run of stage 1's
 	 * output matches RE_CUT_AT_BACKSLASH, the layers of the ORIGINAL run it
-	 * came from are checked too. The runs of the two texts pair up one to
-	 * one — a stage 1 match and its placeholder hold no run delimiter — and
-	 * a count mismatch fails the field closed all the same.
+	 * came from are viewed too — always past view 1 (views 2-4 are readings
+	 * stage 1 never took), and at view 1 as well only when the cut backslash
+	 * starts a real JSON escape (RE_CUT_AT_JSON_ESCAPE): stage 1 already
+	 * judged that original layer 0 as it is otherwise. The runs of the two
+	 * texts pair up one to one — a stage 1 match and its placeholder hold no
+	 * run delimiter — and a count mismatch fails the field closed all the
+	 * same.
 	 *
 	 * @param string $text     Stage 1's output.
 	 * @param int    $count    In/out: replacements so far.
@@ -992,8 +1081,8 @@ class Aura_Worker_Redact {
 	 * @return string
 	 */
 	private static function redact_encoded_runs( $text, &$count, $original ) {
-		if ( ! self::has_encoding_marker( $text ) ) {
-			return $text; // field fast path: nothing is encoded
+		if ( ! self::needs_stage_2( $text ) ) {
+			return $text; // field fast path: nothing encoded, nothing non-ASCII next to a slash
 		}
 		$originals = self::original_runs( $text, $original );
 		if ( false === $originals ) {
@@ -1008,7 +1097,7 @@ class Aura_Worker_Redact {
 			static function ( $m ) use ( &$failed, &$hits, &$index, $originals ) {
 				$run = $m[0];
 				++$index;
-				if ( $failed || ! self::has_encoding_marker( $run ) ) {
+				if ( $failed || ! self::needs_stage_2_run( $run ) ) {
 					return $run; // run fast path
 				}
 				$layers = Aura_Worker_Redact_Decode::decode_layers( $run );
@@ -1016,39 +1105,37 @@ class Aura_Worker_Redact {
 					++$hits; // too deep, too large, or PCRE gave up: fail closed
 					return self::PLACEHOLDER . 'field';
 				}
-				if ( count( $layers ) < 2 ) {
-					$layers = array(); // nothing decodes: the raw run is stage 1's own output
+				// Each entry: [ layer, judge its raw view (view 1)? ]. When nothing
+				// decodes, layer 0 is stage 1's own output, already judged with the
+				// host boundary — only its other views (spec §3.1) are new readings.
+				$judged   = array();
+				$raw_only = count( $layers ) < 2;
+				foreach ( $layers as $i => $layer ) {
+					$judged[] = array( $layer, ! ( $raw_only && 0 === $i ) );
 				}
-				if ( null !== $originals ) {
-					$cut = preg_match( self::RE_CUT_AT_BACKSLASH, $run );
-					if ( false === $cut ) {
+				if ( null !== $originals && isset( $originals[ $index ] ) && $originals[ $index ] !== $run ) {
+					$before = Aura_Worker_Redact_Decode::decode_layers( $originals[ $index ] );
+					if ( null === $before ) {
+						++$hits;
+						return self::PLACEHOLDER . 'field';
+					}
+					$escape = preg_match( self::RE_CUT_AT_JSON_ESCAPE, $run );
+					if ( false === $escape ) {
 						$failed = true;
 						return $run;
 					}
-					if ( 1 === $cut && $originals[ $index ] !== $run ) {
-						$before = Aura_Worker_Redact_Decode::decode_layers( $originals[ $index ] );
-						if ( null === $before ) {
-							++$hits;
-							return self::PLACEHOLDER . 'field';
-						}
-						$escape = preg_match( self::RE_CUT_AT_JSON_ESCAPE, $run );
-						if ( false === $escape ) {
-							$failed = true;
-							return $run;
-						}
-						// Stage 2 follows the plain-text/JSON reading, the same as
-						// stage 1's RE_TAIL: a bare backslash that does not start a
-						// JSON escape ends the match, so stage 1 already judged the
-						// original run as it is (layer 0) and replaced exactly what
-						// it matched there. A JSON escape does not end it, so layer 0
-						// is judged again, whole. (A WHATWG URL parser instead treats
-						// a bare `\` as `/` in an http(s) URL — that reading is a
-						// known limit, not followed here; see CLAUDE.md Limits.)
-						$layers = array_merge( $layers, 1 === $escape ? $before : array_slice( $before, 1 ) );
+					// Stage 1 ended its match at this backslash under the plain-text/
+					// JSON reading and replaced exactly what it matched, so the
+					// original run's layer 0 as it is was judged already — unless the
+					// backslash starts a JSON escape, which does not end the URL for
+					// a JSON reader (view 1 again, whole). Its URL-parser and UTS-46
+					// views are readings stage 1 never took (#116).
+					foreach ( $before as $i => $layer ) {
+						$judged[] = array( $layer, 1 === $escape || 0 !== $i );
 					}
 				}
-				foreach ( $layers as $layer ) {
-					$kind = self::receiver_kind( $layer );
+				foreach ( $judged as $entry ) {
+					$kind = self::judge_layer( $entry[0], $entry[1] );
 					if ( false === $kind ) {
 						$failed = true;
 						return $run;
@@ -1072,13 +1159,21 @@ class Aura_Worker_Redact {
 	}
 
 	/**
-	 * The runs of the text before stage 1, one per run of $text — only when
-	 * stage 1 changed the text and left a placeholder cut at a backslash.
+	 * The ORIGINAL (pre-stage-1) run at every index where stage 1's output
+	 * holds a placeholder cut at a backslash (RE_CUT_AT_BACKSLASH) — only
+	 * those, so a field of millions of runs costs its own size, not an
+	 * array per run (#116). Two passes with the run regex both texts are
+	 * split by: the first records the cut indexes and counts the runs of
+	 * $text, the second keeps the original runs at those indexes and counts
+	 * again. The runs pair up one to one — a stage 1 match and its
+	 * placeholder hold no run delimiter — and a count mismatch fails the
+	 * field closed all the same.
 	 *
 	 * @param string $text     Stage 1's output.
 	 * @param string $original The text before stage 1.
-	 * @return string[]|null|false The runs; null when none are needed; false
-	 *                             on a PCRE failure or a count mismatch.
+	 * @return array<int,string>|null|false index => original run; null when
+	 *                                      none are needed; false on a PCRE
+	 *                                      failure or a count mismatch.
 	 */
 	private static function original_runs( $text, $original ) {
 		if ( $original === $text ) {
@@ -1088,23 +1183,57 @@ class Aura_Worker_Redact {
 		if ( 1 !== $cut ) {
 			return false === $cut ? false : null;
 		}
-		$before = preg_match_all( self::RE_RUN, $original, $m_before );
-		$after  = preg_match_all( self::RE_RUN, $text, $m_after );
-		if ( false === $before || false === $after || $before !== $after ) {
+		$cuts   = array();
+		$failed = false;
+		$index  = -1;
+		$after  = preg_replace_callback(
+			self::RE_RUN,
+			static function ( $m ) use ( &$cuts, &$failed, &$index ) {
+				++$index;
+				if ( ! $failed && false !== strpos( $m[0], self::PLACEHOLDER_MARK ) ) {
+					$is_cut = preg_match( self::RE_CUT_AT_BACKSLASH, $m[0] );
+					if ( false === $is_cut ) {
+						$failed = true;
+					} elseif ( 1 === $is_cut ) {
+						$cuts[ $index ] = '';
+					}
+				}
+				return $m[0];
+			},
+			$text
+		);
+		if ( null === $after || $failed ) {
 			return false;
 		}
-		return $m_before[0];
+		unset( $after ); // a full copy of $text; freeing it before the second pass keeps the peak near 3× the field
+		$after_count = $index + 1;
+		$index       = -1;
+		$before      = preg_replace_callback(
+			self::RE_RUN,
+			static function ( $m ) use ( &$cuts, &$index ) {
+				++$index;
+				if ( isset( $cuts[ $index ] ) ) {
+					$cuts[ $index ] = $m[0];
+				}
+				return $m[0];
+			},
+			$original
+		);
+		if ( null === $before || $index + 1 !== $after_count ) {
+			return false;
+		}
+		return $cuts;
 	}
 
 	/**
-	 * The kind of the first stage 2 pattern (stage_2_patterns(): no left
-	 * host boundary) that matches $decoded, as a check only — nothing is
-	 * replaced.
+	 * The kind of the first pattern in $patterns that matches $decoded, as
+	 * a check only — nothing is replaced.
 	 *
-	 * @param string $decoded One layer of a run.
+	 * @param string                              $decoded  One view of a layer.
+	 * @param array<int,array{0:string,1:string}> $patterns stage_2_patterns() or url_patterns().
 	 * @return string|false The kind; '' when no pattern matches; false when PCRE failed.
 	 */
-	private static function receiver_kind( $decoded ) {
+	private static function receiver_kind( $decoded, $patterns ) {
 		if ( false === strpos( $decoded, '/' ) ) {
 			$slash = self::encoded_slash_state( $decoded );
 			if ( null === $slash ) {
@@ -1114,7 +1243,7 @@ class Aura_Worker_Redact {
 				return ''; // stage 1's own fast reject: no slash, no receiver URL
 			}
 		}
-		foreach ( self::stage_2_patterns() as $pattern ) {
+		foreach ( $patterns as $pattern ) {
 			$found = preg_match( $pattern[1], $decoded );
 			if ( false === $found ) {
 				return false;
@@ -1147,6 +1276,117 @@ class Aura_Worker_Redact {
 	}
 
 	/**
+	 * Stage 2's patterns for the URL parser's reading (#116): each
+	 * URL_PATTERNS entry, same kind and order, with RE_HEAD swapped for
+	 * RE_HEAD_SCHEMED — no left host boundary, prefix REQUIRED — and
+	 * RE_HOST_END swapped for RE_HOST_END_URL — the port may be empty, as a
+	 * WHATWG parser reads it (`host:/path`, `host:\path`; Codex r4 on PR
+	 * #120). Run against url_view() of a layer only: in plain text a
+	 * backslash is not a slash.
+	 *
+	 * @return array<int,array{0:string,1:string}>
+	 */
+	public static function url_patterns() {
+		if ( null === self::$url_patterns ) {
+			$patterns = array();
+			foreach ( self::URL_PATTERNS as $pattern ) {
+				$body = substr( $pattern[1], strlen( self::RE_HEAD ) );
+				if ( 1 !== substr_count( $body, self::RE_HOST_END ) ) {
+					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- the message is escaped; the kind is a fixed URL_PATTERNS literal, never rendered.
+					throw new LogicException( esc_html( 'url_patterns(): ' . $pattern[0] . ' does not have exactly one RE_HOST_END' ) );
+				}
+				$body       = str_replace( self::RE_HOST_END, self::RE_HOST_END_URL, $body );
+				$patterns[] = array( $pattern[0], self::RE_HEAD_SCHEMED . $body );
+			}
+			self::$url_patterns = $patterns;
+		}
+		return self::$url_patterns;
+	}
+
+	/**
+	 * The URL parser's reading of a run (#116; one reading again as of Codex
+	 * r3 round 2 on PR #120): a LITERAL backslash becomes `/` (`strtr()` —
+	 * a parser reads it as a slash everywhere, including as the delimiter
+	 * that ends userinfo), then every ENCODED backslash
+	 * (RE_ENC_BACKSLASH_ENCODED: `%5C`, `&#92;`/`&#x5C;`, `&bsol;`) becomes
+	 * `%2f`, an ENCODED slash — not `/` — because a parser does NOT decode
+	 * userinfo before finding its last `@`, so an encoded backslash there is
+	 * still just userinfo text (`RE_USERINFO_ANY_AT` already accepts `%2f`
+	 * as userinfo, round 2 on PR #120), while at a host end or in a path an
+	 * encoded slash is already the slash `RE_SLASH` and `RE_TAIL` accept
+	 * (#110) — so this single two-step reading serves userinfo, the host
+	 * end and the path alike, closing the round-1 split's known limit (an
+	 * encoded backslash in BOTH userinfo and the path matched neither of
+	 * two separate views). An encoded backslash is read here (not left for
+	 * a later decode pass) because a decoder pass that exposes `\uXXXX`
+	 * consumes it in the same pass (plan D11). TAB, LF and CR are NOT
+	 * stripped — a documented limit, see CLAUDE.md.
+	 *
+	 * @param string $s One layer of a run.
+	 * @return string|null Null when PCRE gave up.
+	 */
+	private static function url_view( $s ) {
+		return preg_replace( self::RE_ENC_BACKSLASH_ENCODED, '%2f', strtr( $s, '\\', '/' ) );
+	}
+
+	/**
+	 * The kind of the first VIEW of $layer that holds a receiver URL (spec
+	 * §3.1, #116): the layer as it is (view 1 — only when $judge_raw: a
+	 * layer stage 1 already judged with its host boundary is not judged
+	 * again without it), its UTS-46 mapping (view 2) — both against
+	 * `stage_2_patterns()` — the URL parser's reading (view 3, url_view():
+	 * a literal backslash is a slash, an encoded one is an encoded slash —
+	 * see url_view()) and both mappings together (view 4) — both against
+	 * `url_patterns()`. The two pattern sets are DIFFERENT (`url_patterns()`
+	 * requires a prefix but allows an EMPTY port, `stage_2_patterns()` is
+	 * the reverse — #116, Codex r5 on PR #120), so views 3–4 are always run,
+	 * even when `url_view()` is a no-op (`$url === $layer`): an unchanged
+	 * TEXT still needs judging against a different pattern set. Only a view
+	 * whose produced text duplicates another view already run against the
+	 * SAME pattern set is skipped — view 4 is skipped when its text equals
+	 * view 3's (both `url_patterns()`), never merely because it equals
+	 * `$layer`. A PCRE failure in url_view() (view 3 or 4) returns false
+	 * at once: unknown, so not "no receiver".
+	 *
+	 * @param string $layer     One layer of a run.
+	 * @param bool   $judge_raw Run view 1?
+	 * @return string|false The kind; '' when no view matches; false when PCRE failed.
+	 */
+	private static function judge_layer( $layer, $judge_raw ) {
+		if ( $judge_raw ) {
+			$kind = self::receiver_kind( $layer, self::stage_2_patterns() );
+			if ( '' !== $kind ) {
+				return $kind;
+			}
+		}
+		$mapped = Aura_Worker_Redact_Idna::map( $layer );
+		if ( $mapped !== $layer ) {
+			$kind = self::receiver_kind( $mapped, self::stage_2_patterns() );
+			if ( '' !== $kind ) {
+				return $kind;
+			}
+		}
+		$url = self::url_view( $layer );
+		if ( null === $url ) {
+			return false; // PCRE gave up: unknown, so not "no receiver"
+		}
+		$kind = self::receiver_kind( $url, self::url_patterns() );
+		if ( '' !== $kind ) {
+			return $kind;
+		}
+		if ( $mapped !== $layer ) {
+			$url_mapped = self::url_view( $mapped );
+			if ( null === $url_mapped ) {
+				return false;
+			}
+			if ( $url_mapped !== $url ) {
+				return self::receiver_kind( $url_mapped, self::url_patterns() );
+			}
+		}
+		return '';
+	}
+
+	/**
 	 * Does $text hold a character an encoding starts with — `%`, `&` or `\`?
 	 *
 	 * @param string $text Text.
@@ -1154,6 +1394,52 @@ class Aura_Worker_Redact {
 	 */
 	private static function has_encoding_marker( $text ) {
 		return false !== strpbrk( $text, '%&\\' );
+	}
+
+	/**
+	 * Does $s hold a byte outside ASCII? A byte class, no `u` flag, so text
+	 * that is not valid UTF-8 is scanned like any other. A PCRE failure
+	 * counts as yes (fail towards checking).
+	 *
+	 * @param string $s Text.
+	 * @return bool
+	 */
+	private static function has_high_byte( $s ) {
+		return 0 !== preg_match( '/[\x80-\xff]/', $s );
+	}
+
+	/**
+	 * Does this field need stage 2 (#116)? When it holds an encoding
+	 * marker, as before; or a byte outside ASCII AND a literal slash — a
+	 * UTS-46-mapped host still needs its slash. An ENCODED slash never
+	 * reaches this check on its own: has_encoding_marker() already caught
+	 * the `%` or `&` it is written with, so the only new case here is a
+	 * literal `/`. Prose in Hebrew, Arabic or emoji without a slash never
+	 * splits.
+	 *
+	 * @param string $text Text.
+	 * @return bool
+	 */
+	private static function needs_stage_2( $text ) {
+		if ( self::has_encoding_marker( $text ) ) {
+			return true;
+		}
+		if ( ! self::has_high_byte( $text ) ) {
+			return false;
+		}
+		return false !== strpos( $text, '/' );
+	}
+
+	/**
+	 * Does this run need decoding and viewing (#116)? An encoding marker,
+	 * or a byte outside ASCII; receiver_kind()'s own fast reject answers
+	 * for a run without a slash.
+	 *
+	 * @param string $run One run.
+	 * @return bool
+	 */
+	private static function needs_stage_2_run( $run ) {
+		return self::has_encoding_marker( $run ) || self::has_high_byte( $run );
 	}
 
 	/**

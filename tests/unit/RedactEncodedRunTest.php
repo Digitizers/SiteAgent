@@ -669,4 +669,35 @@ final class RedactEncodedRunTest extends TestCase {
 			ini_set( 'pcre.jit', (string) $old ); // phpcs:ignore WordPress.PHP.IniSet.Risky
 		}
 	}
+
+	public function test_a_cut_field_of_millions_of_runs_stays_within_four_times_its_size(): void {
+		if ( ! function_exists( 'memory_reset_peak_usage' ) ) {
+			$this->markTestSkipped( 'memory_reset_peak_usage() needs PHP 8.2' );
+		}
+		$old = ini_set( 'memory_limit', '512M' ); // phpcs:ignore WordPress.PHP.IniSet.Risky
+		try {
+			// One stage 1 cut at a JSON escape, then ~2M one-letter runs.
+			$field = 'https://hooks.zapier.com/x\u0041 ' . str_repeat( 'a ', 2000000 );
+			$size  = strlen( $field );
+			$before = memory_get_usage();
+			memory_reset_peak_usage();
+			$count = 0;
+			$out   = Aura_Worker_Redact::redact_text( $field, $count );
+			$peak  = memory_get_peak_usage() - $before;
+			$this->assertStringStartsWith( 'aura-redacted:v1:zapier ', $out );
+			$this->assertSame( 2, $count );
+			// The 4x bound is for ONE cut; $cuts (original_runs()) grows with the
+			// number of cut runs, not with the field size on its own.
+			$this->assertLessThan( 4 * $size, $peak, sprintf( 'peak growth %d bytes on a %d-byte field', $peak, $size ) );
+		} finally {
+			ini_set( 'memory_limit', (string) $old ); // phpcs:ignore WordPress.PHP.IniSet.Risky
+		}
+	}
+
+	public function test_a_cut_at_a_json_escape_still_reads_the_original_run_whole(): void {
+		// Unchanged from 2.18.2: the escape continues the URL for a JSON reader,
+		// so the original run's raw layer is judged again, whole.
+		$this->assertSame( 'aura-redacted:v1:make', $this->text( 'https://hook.eu2.make.com/abc\u0031def' ) );
+		$this->assertSame( 'x aura-redacted:v1:zapier y', $this->text( 'x https://hooks.zapier.com/hooks\\/catch/1/S y' ) );
+	}
 }
