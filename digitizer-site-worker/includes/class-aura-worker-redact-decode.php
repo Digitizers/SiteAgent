@@ -13,8 +13,10 @@
  *     end-state mapping), then named: a name followed by `;` that
  *     html_entity_decode() knows, else the longest LEGACY name without `;`;
  *  2. percent escapes (`%XX` only — `+` stays, an invalid `%` stays);
- *  3. JSON escapes (`\uXXXX`, a surrogate pair as one code point, a lone
- *     surrogate left as it is; `\/`).
+ *  3. JSON escapes, in one left-to-right scan: `\\` (a JSON-escaped
+ *     backslash, so JSON-in-JSON unwraps one level per pass), `\/`, and
+ *     `\uXXXX` (a surrogate pair as one code point, a lone surrogate left
+ *     as it is). Any other backslash stays.
  * A later step in the same pass sees what an earlier one produced; that
  * only ever decodes more, never less.
  *
@@ -62,12 +64,16 @@ class Aura_Worker_Redact_Decode {
 	const RE_NAMED = '/&([A-Za-z][A-Za-z0-9]*+)(;?+)/';
 
 	/**
-	 * Regex: a JSON `\u` escape — a valid surrogate pair first, else one
-	 * code unit. JSON only defines lowercase `\u`, so the escape marker is
-	 * case-sensitive (`\U0041` does not match); the hex digits themselves
-	 * stay case-insensitive via explicit `[0-9A-Fa-f]`-style classes.
+	 * Regex: one JSON escape, the alternatives tried at the same position so
+	 * a scan left to right reads each backslash once — a `\u` escape (a
+	 * valid surrogate pair first, else one code unit: groups 1–2, or 3), or
+	 * `\\` / `\/` (group 4: the escaped character). `\\u0073` is therefore
+	 * `s` after one pass and `s` after the next. JSON only defines
+	 * lowercase `\u`, so the escape marker is case-sensitive (`\U0041` does
+	 * not match); the hex digits stay case-insensitive via explicit
+	 * `[0-9A-Fa-f]`-style classes. Fixed-length alternatives: linear.
 	 */
-	const RE_JSON_UNICODE = '/\\\\u(?:([dD][89abAB][0-9A-Fa-f]{2})\\\\u([dD][c-fC-F][0-9A-Fa-f]{2})|([0-9A-Fa-f]{4}))/';
+	const RE_JSON_ESCAPE = '/\\\\(?:u(?:([dD][89abAB][0-9A-Fa-f]{2})\\\\u([dD][c-fC-F][0-9A-Fa-f]{2})|([0-9A-Fa-f]{4}))|([\\\\\\/]))/';
 
 	/** The longest name in LEGACY_NAMES. */
 	const LEGACY_MAX_LENGTH = 6;
@@ -206,11 +212,10 @@ class Aura_Worker_Redact_Decode {
 			$text = rawurldecode( $text ); // `%XX` only: `+` stays, an invalid escape stays
 		}
 		if ( false !== strpos( $text, '\\' ) ) {
-			$text = preg_replace_callback( self::RE_JSON_UNICODE, array( __CLASS__, 'json_unicode' ), $text );
+			$text = preg_replace_callback( self::RE_JSON_ESCAPE, array( __CLASS__, 'json_escape' ), $text );
 			if ( null === $text ) {
 				return null;
 			}
-			$text = str_replace( '\\/', '/', $text );
 		}
 		return $text;
 	}
@@ -300,12 +305,15 @@ class Aura_Worker_Redact_Decode {
 	}
 
 	/**
-	 * RE_JSON_UNICODE callback.
+	 * RE_JSON_ESCAPE callback.
 	 *
-	 * @param array<int,string> $m Match: [1][2] a surrogate pair, or [3] one code unit.
+	 * @param array<int,string> $m Match: [1][2] a surrogate pair, [3] one code unit, or [4] an escaped `\` or `/`.
 	 * @return string
 	 */
-	private static function json_unicode( array $m ) {
+	private static function json_escape( array $m ) {
+		if ( isset( $m[4] ) && '' !== $m[4] ) {
+			return $m[4];
+		}
 		if ( isset( $m[3] ) && '' !== $m[3] ) {
 			$unit = (int) hexdec( $m[3] );
 			if ( $unit >= 0xD800 && $unit <= 0xDFFF ) {

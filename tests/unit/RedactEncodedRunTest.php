@@ -228,9 +228,10 @@ final class RedactEncodedRunTest extends TestCase {
 	 * layers are checked too, so the whole run goes. The escape sits on the
 	 * path's first letter or on the secret's first letter (plain JSON, and
 	 * after punctuation stage 1 hands back: `.`), or on the secret's second
-	 * letter (JSON-in-JSON, `\\u`: the decoder leaves `\\` as it is, so a
-	 * backslash stays in front of the letter — and telegram's token must
-	 * start right after `bot<id>:`).
+	 * letter (JSON-in-JSON, `\\u`). JSON-in-JSON also escapes the path's
+	 * first letter — inside a receiver's FIXED prefix (`services`, `api`,
+	 * `hooks`, `trigger`, `bot`) — and the secret's first letter (telegram:
+	 * right after `bot<id>:`); the decoder reads `\\` as `\` (fix round 2).
 	 *
 	 * @return array<string,array{0:string,1:string,2:string}> run, kind, secret
 	 */
@@ -244,6 +245,8 @@ final class RedactEncodedRunTest extends TestCase {
 
 			$cases[ "{$rname} / json path letter" ]           = array( "https://{$host}/\\u00" . bin2hex( $path[0] ) . substr( $path, 1 ), $kind, $secret );
 			$cases[ "{$rname} / json secret letter" ]         = array( "https://{$host}/{$prefix}{$escape}{$after}", $kind, $secret );
+			$cases[ "{$rname} / json-in-json path letter" ]   = array( "https://{$host}/\\\\u00" . bin2hex( $path[0] ) . substr( $path, 1 ), $kind, $secret );
+			$cases[ "{$rname} / json-in-json secret first" ]  = array( "https://{$host}/{$prefix}\\{$escape}{$after}", $kind, $secret );
 			$cases[ "{$rname} / json-in-json secret letter" ] = array( "https://{$host}/{$prefix}{$secret[0]}\\\\u00" . bin2hex( $secret[1] ) . substr( $path, $at + 2 ), $kind, $secret );
 			$cases[ "{$rname} / json after punctuation" ]     = array( "https://{$host}/{$prefix}x.{$escape}{$after}", $kind, $secret );
 		}

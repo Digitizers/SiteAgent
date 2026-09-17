@@ -175,6 +175,8 @@ final class RedactDecodeTest extends TestCase {
 			'high then non-low'     => array( '\\ud83d\\u0041', '\\ud83dA' ),
 			'short escape'          => array( '\\u12', '\\u12' ),
 			'other escape'          => array( 'a\\nb', 'a\\nb' ),
+			'escaped backslash'     => array( 'a\\\\b', 'a\\b' ),
+			'windows path'          => array( 'C:\\\\Users\\\\x', 'C:\\Users\\x' ),
 		);
 	}
 
@@ -287,6 +289,14 @@ final class RedactDecodeTest extends TestCase {
 				),
 			),
 			'no-op run'          => array( 'plain', array( 'plain' ) ),
+			'json-in-json: the escaped backslash first, the escape next' => array(
+				'\\\\u0073',
+				array( '\\\\u0073', '\\u0073', 's' ),
+			),
+			'json-in-json-in-json' => array(
+				'\\\\\\\\u0073',
+				array( '\\\\\\\\u0073', '\\\\u0073', '\\u0073', 's' ),
+			),
 			'exactly four layers' => array(
 				'%2525252F',
 				array( '%2525252F', '%25252F', '%252F', '%2F', '/' ),
@@ -301,13 +311,23 @@ final class RedactDecodeTest extends TestCase {
 		$this->assertSame( end( $expected ), Aura_Worker_Redact_Decode::decode_run( $in ) );
 	}
 
+	public function test_a_windows_path_is_decoded_and_kept_by_stage_2(): void {
+		// Fix round 2 (#113): `\\` is a JSON escape, but `\U` and `\x` are
+		// not, so the path settles after one pass and holds no receiver.
+		$run = 'C:\\\\Users\\\\x';
+		$this->assertSame( array( $run, 'C:\\Users\\x' ), Aura_Worker_Redact_Decode::decode_layers( $run ) );
+		$n = 0;
+		$this->assertSame( "see {$run} now", Aura_Worker_Redact::redact_text( "see {$run} now", $n ) );
+		$this->assertSame( 0, $n );
+	}
+
 	public function test_decode_layers_refuses_a_fifth_layer_same_as_decode_run(): void {
 		$this->assertNull( Aura_Worker_Redact_Decode::decode_layers( '%252525252F' ) );
 		$this->assertNull( Aura_Worker_Redact_Decode::decode_run( '%252525252F' ) );
 	}
 
 	/**
-	 * Minor 2 (#113): JSON only defines lowercase `\u`, so RE_JSON_UNICODE
+	 * Minor 2 (#113): JSON only defines lowercase `\u`, so RE_JSON_ESCAPE
 	 * must not decode `\U`; the hex digits themselves stay case-insensitive.
 	 */
 	public function test_only_lowercase_u_starts_a_json_escape(): void {
