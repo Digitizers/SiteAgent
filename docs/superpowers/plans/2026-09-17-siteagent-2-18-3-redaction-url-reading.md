@@ -15,7 +15,7 @@
 ## Global Constraints
 
 - **Backslash reads as `/` only under a prefix** (spec §2.1, §3.1): `url_patterns()` require `https?` + `:` + ZERO or more slashes, or exactly `//`. A bare host followed by `\` (`hooks.zapier.com\nNext`), a Windows path, a UNC path whose host is not a receiver, a `file:` URL, and `/host` (one slash: a path) are KEPT.
-- **`url_view( $s )` is `strtr( $s, '\\', '/' )` and nothing else** — TAB, LF and CR are NOT stripped (spec §3.1, owner decision).
+- **`url_view( $s )` turns every backslash — literal, or encoded as `%5C`, `&#92;`, `&#x5C;` (leading zeros, `;` optional as in `RE_ENC_SLASH_REF`) or `&bsol;` — into `/`, and nothing else** (spec §3.1 amended by D11) — TAB, LF and CR are NOT stripped (owner decision).
 - **UTS-46 by the generated table only** (spec §2.2, §3.2): Unicode 18.0.0 `IdnaMappingTable.txt`, SHA-256 `a03b1eb38032268c696406a83f0972d6a815acd2c8d4151d42ec0fda70ffced1`, URL `https://www.unicode.org/Public/18.0.0/idna/IdnaMappingTable.txt`. Entries: code point > 0x7F with status `mapped` or `disallowed_STD3_mapped` and a target entirely in `[a-z0-9.-]` (1043 single-character + 189 multi-character, longest target 4), plus every `ignored` code point deleted (294). Total 1526. `valid`, `disallowed`, `deviation` and non-hostname targets are left out.
 - **Views per layer, in this order** (spec §3.1): (1) `L` vs `stage_2_patterns()`; (2) `map(L)` vs `stage_2_patterns()` when it differs from `L`; (3) `url(L)` vs `url_patterns()` when it differs from `L`; (4) `url(map(L))` vs `url_patterns()` when views 2 and 3 both apply and it differs from view 3. The first view that matches gives the kind; the whole run is replaced, `trailing_punctuation( <run> )` appended.
 - **The raw layer when nothing decodes** gets views 2–4 but NOT view 1 (spec §3.1). The original run's layer 0 at a stage 1 cut gets view 1 only when the cut backslash starts a JSON escape (`RE_CUT_AT_JSON_ESCAPE`); its views 2–4 always.
@@ -40,6 +40,7 @@
 - **D7 — the memory ceiling is `4 × strlen( $field )`**, asserted on a ~5 MB field with ~2M runs and one cut, after `memory_reset_peak_usage()`. Expected peak: the field, stage 1's copy, `preg_replace_callback()`'s transient output copy and the cut runs, ≈ 3×. The old code peaked at ~19× (100 MB on 5.4 MB). If the measured growth lands above 4×, report the number as a concern — do not raise the ceiling.
 - **D8 — `RE_HEAD_SCHEMED` is `'~(?:https?' . RE_COLON . RE_SLASH . '*+' . RE_USERINFO . '|(?<!:|%3a|/)' . RE_DOUBLE_SLASH_USERINFO . ')'`.** `RE_SLASH` is already a `(?:…)` group, so `*+` applies to the whole slash alternative (literal, JSON-escaped or encoded). `RE_USERINFO` is an optional group, so `https:hooks.zapier.com/x` matches with no userinfo. The protocol-relative `//` carries a lookbehind (Codex r2 on this plan): without it, `file://hooks.zapier.com\x` — `file://hooks.zapier.com/x` after `url_view()` — would match at its `//`, and stage 2 has no left boundary to stop it. `:` and `%3a` cover a plain and a percent-encoded scheme colon; `/` keeps a longer slash run (`////host`, from `\\\\host`) from matching at an inner position. An ENCODED scheme colon is not covered — an HTML reference (`file&#58;//…`) is variable-length and cannot sit in a lookbehind, a JSON escape (`file\u003A//…`) becomes `file/u003A//…` under `url_view()`, and a doubly percent-encoded one (`file%253A//…`) is still `%253A` in the raw layer — so an encoded `file:` URL that names a receiver host in a run with a backslash IS redacted, through the raw layer's view 3. That is over-redaction of an encoded lookalike, never a leak: the same cost stage 2 already accepts for its missing left boundary (#113, owner decision), pinned by `test_an_encoded_scheme_colon_before_a_receiver_host_is_the_lookalike_cost()`. Chasing each encoding in a lookbehind is the per-encoding patching #113 replaced (Codex r3 on this plan).
 - **D9 — the generator is not tested by PHPUnit.** It is a hand-run script (`php bin/generate-idna-map.php`), and `bin/` is outside the lint gate. What IS tested is its output: `RedactIdnaTest` pins the entry counts, the key/target shapes, `LEAD`, and fixed mappings, so a regeneration from a different table or a hand edit fails CI.
+- **D11 — `url_view()` reads an ENCODED backslash as a slash too** (`RE_ENC_BACKSLASH`: `%5c`, `&#0*92`, `&#x0*5c` with `;` optional, `&bsol;` — the backslash twins of `RE_ENC_SLASH`), one linear `preg_replace()`. Reason (Codex r4 on this plan, P1): one decoder pass runs the percent/HTML step and then the JSON step, so `https://hooks.zapier.com%5Cu0061SECRET` decodes straight to `…comaSECRET` — the intermediate `…com\u0061SECRET` is never a layer, and the raw layer holds no literal backslash for `url_view()` to turn. A percent-decoding consumer reads that text as a backslash-separated URL and a URL parser resolves it to the receiver. Reading the encoded backslash in the raw layer's view 3 closes it without touching the decoder (spec §3.5). This amends spec §3.1 (`url( $s )`): record it in the spec amendment at release time. A `preg_replace()` failure (`null`) makes `judge_layer()` return `false` — the field fails closed.
 - **D10 — `RedactUrlReadingTest`'s receivers table** reuses `RedactEncodedRunTest`'s nine rows (copied, not shared: test classes do not import from each other in this suite).
 
 ## File structure
@@ -793,6 +794,27 @@ final class RedactUrlReadingTest extends TestCase {
 		$this->assertSame( 'myhooks.zapier.com/x', $this->text( 'myhooks.zapier.com/x' ) );
 	}
 
+	/** @dataProvider encoded_backslash_then_json_escape */
+	public function test_an_encoded_backslash_before_a_json_escape_is_read_in_the_raw_layer( string $in, string $kind ): void {
+		// D11: `%5Cu0061` decodes to `a` within ONE pass, so no layer ever holds
+		// the backslash; url_view() reads the encoded one in the raw layer.
+		$out = $this->text( $in, $count );
+		$this->assertSame( 'aura-redacted:v1:' . $kind, $out, $in );
+		$this->assertSame( 1, $count );
+	}
+
+	public static function encoded_backslash_then_json_escape(): array {
+		$cases = array();
+		foreach ( self::RECEIVERS as $name => $r ) {
+			foreach ( array( '%5C', '%5c', '&#92;', '&#092', '&#x5C;', '&#x5c', '&bsol;' ) as $enc ) {
+				// `u0061` + the secret: a JSON escape for a percent/HTML-decoding reader.
+				$cases[ "{$name} / {$enc}" ] = array( "https://{$r[0]}{$enc}u0061{$r[3]}", $r[2] );
+			}
+		}
+		$cases['zapier / encoded backslash, no escape after it'] = array( 'https://hooks.zapier.com%5Chooks%5Ccatch%5C1%5CS', 'zapier' );
+		return $cases;
+	}
+
 	public function test_an_encoded_scheme_colon_before_a_receiver_host_is_the_lookalike_cost(): void {
 		// D8: the plain file: URL is kept (RE_HEAD_SCHEMED's lookbehind sees its
 		// colon); an ENCODED colon is not a colon in the raw layer's URL view, so
@@ -882,6 +904,16 @@ After `RE_HEAD_UNBOUNDED` (`:178`):
 	const RE_HEAD_SCHEMED = '~(?:https?' . self::RE_COLON . self::RE_SLASH . '*+' . self::RE_USERINFO . '|(?<!:|%3a|/)' . self::RE_DOUBLE_SLASH_USERINFO . ')';
 ```
 
+```php
+	/**
+	 * Regex: a backslash as url_view() reads it — literal, or encoded as
+	 * `%5C`, `&#92;` / `&#x5C;` (leading zeros allowed, `;` optional, the
+	 * same open-ended forms RE_ENC_SLASH_REF accepts for `/`) or `&bsol;`.
+	 * Case-insensitive; every alternative is fixed or possessive: linear.
+	 */
+	const RE_ENC_BACKSLASH = '/\\\\|%5c|&(?:#0*92' . self::RE_REF_DEC_END . '|#x0*5c' . self::RE_REF_HEX_END . '|bsol;)/i';
+```
+
 (The lookbehind on the protocol-relative alternative: its `//` must not be the tail of another scheme's `://` — `file://hooks.zapier.com/x` after `url_view()` — nor of a longer slash run. Two fixed-length alternatives, as PCRE requires; `%3a` is matched case-insensitively by the pattern's `i` flag. Update the docblock's "or exactly `//`" sentence to say so.)
 
 After `$stage_2_patterns`:
@@ -919,15 +951,18 @@ After `stage_2_patterns()`:
 	}
 
 	/**
-	 * The URL parser's reading of a run (#116): every backslash is a slash
-	 * (the special-scheme rule; url_patterns() then insist on the scheme).
-	 * TAB, LF and CR are NOT stripped — a documented limit, see CLAUDE.md.
+	 * The URL parser's reading of a run (#116): every backslash — literal
+	 * or encoded (RE_ENC_BACKSLASH) — is a slash (the special-scheme rule;
+	 * url_patterns() then insist on the scheme). An encoded one is read
+	 * here because a decoder pass that exposes `\uXXXX` consumes it in the
+	 * same pass (plan D11). TAB, LF and CR are NOT stripped — a documented
+	 * limit, see CLAUDE.md.
 	 *
 	 * @param string $s One layer of a run.
-	 * @return string
+	 * @return string|null Null when PCRE gave up.
 	 */
 	private static function url_view( $s ) {
-		return strtr( $s, '\\', '/' );
+		return preg_replace( self::RE_ENC_BACKSLASH, '/', $s );
 	}
 
 	/**
@@ -957,6 +992,9 @@ After `stage_2_patterns()`:
 			}
 		}
 		$url = self::url_view( $layer );
+		if ( null === $url ) {
+			return false; // PCRE gave up: unknown, so not "no receiver"
+		}
 		if ( $url === $layer ) {
 			return '';
 		}
@@ -966,6 +1004,9 @@ After `stage_2_patterns()`:
 		}
 		if ( $mapped !== $layer ) {
 			$url_mapped = self::url_view( $mapped );
+			if ( null === $url_mapped ) {
+				return false;
+			}
 			if ( $url_mapped !== $url ) {
 				return self::receiver_kind( $url_mapped, self::url_patterns() );
 			}
