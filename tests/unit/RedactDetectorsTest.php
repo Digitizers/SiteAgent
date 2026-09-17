@@ -306,6 +306,92 @@ final class RedactDetectorsTest extends TestCase {
 		$this->assertStringNotContainsString( 'dK-9', $out );
 	}
 
+	// --- #121: an empty port after a receiver host is a port -------------
+
+	/** name => [ host, path after the host's slash, kind, secret ] — one per URL_PATTERNS entry (copied from RedactUrlReadingTest::RECEIVERS, #121). */
+	private const EMPTY_PORT_RECEIVERS = array(
+		'make'       => array( 'hook.eu2.make.com', 'abc123secret', 'make', 'abc123secret' ),
+		'celonis'    => array( 'hook.eu1.make.celonis.com', 'cel123secret', 'make', 'cel123secret' ),
+		'integromat' => array( 'hook.integromat.com', 'isecret1', 'integromat', 'isecret1' ),
+		'zapier'     => array( 'hooks.zapier.com', 'hooks/catch/1/zsecret9', 'zapier', 'zsecret9' ),
+		'slack'      => array( 'hooks.slack.com', 'services/T000/B000/SLACKSECRET', 'slack', 'SLACKSECRET' ),
+		'discord'    => array( 'discord.com', 'api/webhooks/123/dsecret-tok', 'discord', 'dsecret-tok' ),
+		'discordapp' => array( 'discordapp.com', 'api/v10/webhooks/123/dsecret-tok', 'discord', 'dsecret-tok' ),
+		'ifttt'      => array( 'maker.ifttt.com', 'trigger/ev/with/key/ksecret_1', 'ifttt', 'ksecret_1' ),
+		'telegram'   => array( 'api.telegram.org', 'bot123456:AAsecret_x/sendMessage', 'telegram', 'AAsecret_x' ),
+	);
+
+	/**
+	 * #121: RE_HOST_END's port is now possessive `[0-9]*+` — an EMPTY port
+	 * (`host:/path`) is a port for a URL parser, so stage 1 now redacts
+	 * plain text carrying one, with no `%`, `&`, `\` or non-ASCII byte
+	 * needed to reach stage 2. Five forms per receiver: a full URL, a bare
+	 * (schemeless) host, a trailing FQDN dot before the empty port, the
+	 * empty port followed by an ENCODED slash (RE_SLASH already accepts
+	 * `%2F` — only the slash right after the colon is encoded, so this is
+	 * simple to build for every receiver), and inside prose.
+	 *
+	 * @return array<string,array{0:string,1:string,2:string}> input, expected output, secret
+	 */
+	public static function empty_port_cases(): array {
+		$cases = array();
+		foreach ( self::EMPTY_PORT_RECEIVERS as $name => $r ) {
+			list( $host, $path, $kind, $secret ) = $r;
+			$expect = 'aura-redacted:v1:' . $kind;
+			$plain  = "https://{$host}:/{$path}";
+
+			$cases[ "{$name} / schemed" ]       = array( $plain, $expect, $secret );
+			$cases[ "{$name} / bare" ]          = array( "{$host}:/{$path}", $expect, $secret );
+			$cases[ "{$name} / trailing dot" ]  = array( "{$host}.:/{$path}", $expect, $secret );
+			$cases[ "{$name} / encoded slash" ] = array( "https://{$host}:%2F{$path}", $expect, $secret );
+			$cases[ "{$name} / prose" ]         = array( "see {$plain} now", "see {$expect} now", $secret );
+		}
+		return $cases;
+	}
+
+	/** @dataProvider empty_port_cases */
+	public function test_an_empty_port_after_a_receiver_host_is_a_port( string $in, string $expected, string $secret ): void {
+		$out = $this->text( $in, $n );
+		$this->assertStringNotContainsString( $secret, $out, $in );
+		$this->assertSame( $expected, $out, $in );
+		$this->assertSame( 1, $n, $in );
+	}
+
+	/**
+	 * #121: a colon after a receiver host is a port only when zero or more
+	 * DIGITS follow it and a slash follows those digits directly — anything
+	 * else leaves RE_HOST_END with no match at that position, exactly as
+	 * before this fix. `[0-9]*+` is possessive: once it has consumed every
+	 * digit, it never gives one back to let RE_SLASH match earlier.
+	 *
+	 * @return array<string,array{0:string}> input
+	 */
+	public static function colon_not_a_port_cases(): array {
+		return array(
+			'letter, no slash right after' => array( 'https://hooks.zapier.com:evil/x' ),
+			// Digits, but no slash right after them — and nothing for the
+			// possessive quantifier to give back.
+			'digits, no slash after them'  => array( 'hooks.zapier.com:8443x' ),
+			// End of text: no RE_SLASH can follow at all.
+			'colon at the end of the text' => array( 'hooks.zapier.com:' ),
+			// A space, not a slash, follows the colon.
+			'space after the colon'        => array( 'hooks.zapier.com: /hooks' ),
+		);
+	}
+
+	/** @dataProvider colon_not_a_port_cases */
+	public function test_a_colon_that_is_not_a_port_is_kept( string $in ): void {
+		$this->assertSame( $in, $this->text( $in, $n ), $in );
+		$this->assertSame( 0, $n, $in );
+	}
+
+	/** Control: a real (digit) port still works — the fix did not break the existing case. */
+	public function test_a_real_port_still_works(): void {
+		$out = $this->text( 'https://hooks.zapier.com:8443/hooks/catch/1/S', $n );
+		$this->assertSame( 'aura-redacted:v1:zapier', $out );
+		$this->assertSame( 1, $n );
+	}
+
 	// --- §2.2 known fields -----------------------------------------------
 
 	public function test_webhooks_on_an_unlisted_host_is_redacted_in_a_structured_tree(): void {

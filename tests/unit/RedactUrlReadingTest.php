@@ -49,9 +49,10 @@ final class RedactUrlReadingTest extends TestCase {
 			'//'             => static function ( $h, $p ) { return "//{$h}\\{$p}"; },
 			'\\\\'           => static function ( $h, $p ) { return "\\\\{$h}\\{$p}"; },
 			// #116, Codex r4 on PR #120: a WHATWG parser resolves an EMPTY port
-			// (`host:/path`, `host:\path`) to the host with no port — RE_HOST_END's
-			// `[0-9]+` requires a digit and missed these; RE_HOST_END_URL's `[0-9]*+`
-			// does not.
+			// (`host:/path`, `host:\path`) to the host with no port. As of #121,
+			// RE_HOST_END's own port is possessive `[0-9]*+` — url_patterns() and
+			// stage_2_patterns() (both built from it) read it this way, and so
+			// does stage 1's own plain-text match.
 			'empty port'                => static function ( $h, $p ) { return "https://{$h}:\\{$p}"; },
 			'empty port, no slashes'    => static function ( $h, $p ) { return "https:{$h}:\\{$p}"; },
 			// A real port still works (pins that the change did not break the digit form).
@@ -156,10 +157,11 @@ final class RedactUrlReadingTest extends TestCase {
 			// the control case for the encoded-backslash-in-userinfo fix:
 			// url_view() turns this one into `/`, same as a parser reads it.
 			'literal backslash in userinfo ends the authority' => array( 'https://a\\@hooks.zapier.com\\x' ),
-			// #116, Codex r4 on PR #120: with RE_HOST_END_URL's `[0-9]*+`, the
-			// optional port group still needs RE_SLASH right after it — a
-			// non-digit after the colon fails the port AND leaves no slash
-			// right after the host, so this is not a receiver.
+			// #116, Codex r4 on PR #120; RE_HOST_END's own port is possessive
+			// `[0-9]*+` as of #121: the optional port group still needs
+			// RE_SLASH right after it — a non-digit after the colon fails the
+			// port AND leaves no slash right after the host, so this is not a
+			// receiver.
 			'colon then a non-digit is not a port' => array( 'https://hooks.zapier.com:evil\\x' ),
 			// #116, Codex r5 on PR #120: no backslash here, so url_view() is a
 			// no-op and view 3 now runs anyway (against url_patterns(), not
@@ -390,19 +392,17 @@ final class RedactUrlReadingTest extends TestCase {
 		// for a parser, unlike a literal one.
 		$this->assertSame( 1, preg_match( $url[2][1], 'https://a%2Fb@hooks.zapier.com/hooks/catch/1/x' ) );
 		$this->assertSame( 0, preg_match( $url[2][1], 'https://a/b@hooks.zapier.com/hooks/catch/1/x' ) );
-		// #116, Codex r4 on PR #120: RE_HOST_END_URL accepts an EMPTY port —
-		// the url patterns themselves accept a bare colon before the path
-		// separator. The plain-text form never reaches these patterns, since
-		// needs_stage_2()/needs_stage_2_run() require a `%`, `&`, `\` or a
-		// non-ASCII byte before a run is decoded and viewed here — that miss
-		// is stage 1's, filed as #121, and out of this PR's scope.
+		// #116, Codex r4 on PR #120: the url patterns accept an EMPTY port —
+		// a bare colon before the path separator. As of #121, plain text now
+		// reaches stage 1 with the same reading: RE_HOST_END itself accepts
+		// an empty port, so this is no longer only a stage-2/url_patterns()
+		// behaviour.
 		$this->assertSame( 1, preg_match( $url[2][1], 'https://hooks.zapier.com:/hooks/catch/1/x' ) );
-		// Every url pattern swaps RE_HOST_END for RE_HOST_END_URL exactly
-		// once; RE_HOST_END itself must not still appear (the guard in
-		// url_patterns() would have thrown LogicException otherwise).
+		// Every url pattern contains RE_HOST_END exactly once (#121: there is
+		// no separate RE_HOST_END_URL to swap in any more — url_patterns()
+		// builds its body the same way stage_2_patterns() does).
 		foreach ( $url as $pattern ) {
-			$this->assertSame( 1, substr_count( $pattern[1], Aura_Worker_Redact::RE_HOST_END_URL ), $pattern[0] . ': RE_HOST_END_URL must appear exactly once' );
-			$this->assertSame( 0, substr_count( $pattern[1], Aura_Worker_Redact::RE_HOST_END ), $pattern[0] . ': RE_HOST_END must not appear' );
+			$this->assertSame( 1, substr_count( $pattern[1], Aura_Worker_Redact::RE_HOST_END ), $pattern[0] . ': RE_HOST_END must appear exactly once' );
 		}
 	}
 

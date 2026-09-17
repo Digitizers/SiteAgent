@@ -241,17 +241,17 @@ class Aura_Worker_Redact {
 	 * is the same host as `hooks.zapier.com/...`; the dot never lets a
 	 * lookalike host — `hooks.zapier.com.evil.tld` — through, since nothing
 	 * follows the single dot but the required port/slash). The port's colon
-	 * and the slash may be encoded (#110): `hook.eu2.make.com%2Fabc`.
+	 * and the slash may be encoded (#110): `hook.eu2.make.com%2Fabc`. The
+	 * port itself may be EMPTY (`[0-9]*+`, possessive — #121, the first
+	 * change to a stage 1 constant since 2.18.1): `host:/path` names the
+	 * host with no port, as a URL parser reads it. A colon followed by
+	 * anything but digits-then-slash is still no port: the optional group
+	 * fails there (with nothing for the possessive quantifier to give back)
+	 * and a slash must then follow the host directly (`host:evil/x` is
+	 * kept). `url_patterns()` and `stage_2_patterns()` (built from
+	 * URL_PATTERNS, which uses this constant) inherit the change.
 	 */
-	const RE_HOST_END = '\.?(?:' . self::RE_COLON . '[0-9]+)?' . self::RE_SLASH;
-
-	/**
-	 * Regex: RE_HOST_END as a WHATWG parser reads it — the port may be
-	 * EMPTY (`host:/path`, `host:\path` name the host with no port). Used
-	 * by url_patterns() only (#116, Codex r4 on PR #120); stage 1 keeps
-	 * RE_HOST_END's `[0-9]+` (see #121).
-	 */
-	const RE_HOST_END_URL = '\.?(?:' . self::RE_COLON . '[0-9]*+)?' . self::RE_SLASH;
+	const RE_HOST_END = '\.?(?:' . self::RE_COLON . '[0-9]*+)?' . self::RE_SLASH;
 
 	/**
 	 * Regex (after `&`): the name of an HTML-encoded quote or angle bracket —
@@ -1278,11 +1278,13 @@ class Aura_Worker_Redact {
 	/**
 	 * Stage 2's patterns for the URL parser's reading (#116): each
 	 * URL_PATTERNS entry, same kind and order, with RE_HEAD swapped for
-	 * RE_HEAD_SCHEMED — no left host boundary, prefix REQUIRED — and
-	 * RE_HOST_END swapped for RE_HOST_END_URL — the port may be empty, as a
-	 * WHATWG parser reads it (`host:/path`, `host:\path`; Codex r4 on PR
-	 * #120). Run against url_view() of a layer only: in plain text a
-	 * backslash is not a slash.
+	 * RE_HEAD_SCHEMED — no left host boundary, prefix REQUIRED. The host end
+	 * is RE_HOST_END, unswapped — as of #121 its own port is possessive
+	 * `[0-9]*+` and may be empty, as a WHATWG parser reads it (`host:/path`,
+	 * `host:\path`; Codex r4 on PR #120), the same reading stage 1 and
+	 * stage_2_patterns() now use, so there is no longer a separate host-end
+	 * pattern to swap in here. Run against url_view() of a layer only: in
+	 * plain text a backslash is not a slash.
 	 *
 	 * @return array<int,array{0:string,1:string}>
 	 */
@@ -1290,13 +1292,8 @@ class Aura_Worker_Redact {
 		if ( null === self::$url_patterns ) {
 			$patterns = array();
 			foreach ( self::URL_PATTERNS as $pattern ) {
-				$body = substr( $pattern[1], strlen( self::RE_HEAD ) );
-				if ( 1 !== substr_count( $body, self::RE_HOST_END ) ) {
-					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- the message is escaped; the kind is a fixed URL_PATTERNS literal, never rendered.
-					throw new LogicException( esc_html( 'url_patterns(): ' . $pattern[0] . ' does not have exactly one RE_HOST_END' ) );
-				}
-				$body       = str_replace( self::RE_HOST_END, self::RE_HOST_END_URL, $body );
-				$patterns[] = array( $pattern[0], self::RE_HEAD_SCHEMED . $body );
+				// Every entry starts with RE_HEAD; the rest is kept as it is.
+				$patterns[] = array( $pattern[0], self::RE_HEAD_SCHEMED . substr( $pattern[1], strlen( self::RE_HEAD ) ) );
 			}
 			self::$url_patterns = $patterns;
 		}
@@ -1338,8 +1335,8 @@ class Aura_Worker_Redact {
 	 * a literal backslash is a slash, an encoded one is an encoded slash —
 	 * see url_view()) and both mappings together (view 4) — both against
 	 * `url_patterns()`. The two pattern sets are DIFFERENT (`url_patterns()`
-	 * requires a prefix but allows an EMPTY port, `stage_2_patterns()` is
-	 * the reverse — #116, Codex r5 on PR #120), so views 3–4 are always run,
+	 * requires a prefix, `stage_2_patterns()` does not — #116, Codex r5 on PR
+	 * #120; both now accept an EMPTY port, #121), so views 3–4 are always run,
 	 * even when `url_view()` is a no-op (`$url === $layer`): an unchanged
 	 * TEXT still needs judging against a different pattern set. Only a view
 	 * whose produced text duplicates another view already run against the
