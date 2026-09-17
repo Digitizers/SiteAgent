@@ -17,7 +17,7 @@
   </a>
   <img src="https://img.shields.io/badge/WordPress-6.2%E2%80%937.1-21759b?logo=wordpress" alt="WordPress" />
   <img src="https://img.shields.io/badge/PHP-7.4%2B-777bb4?logo=php" alt="PHP" />
-  <img src="https://img.shields.io/badge/Stable-2.18.3-green" alt="Stable" />
+  <img src="https://img.shields.io/badge/Stable-2.18.4-green" alt="Stable" />
 </p>
 
 ---
@@ -238,6 +238,12 @@ These plug straight into **Aura's Fleet MCP Gateway**: read tools run on demand,
 ---
 
 ## Changelog
+
+### 2.18.4
+
+- **An empty port after a receiver host is a port.** Stage 1's `RE_HOST_END` now accepts `host:/path` (`[0-9]*+`), as a WHATWG parser does, so `https://hooks.zapier.com:/hooks/catch/1/SECRET` and bare `hooks.zapier.com:/x` are redacted in plain text — the #121 limit 2.18.3 shipped with. `host:evil/x` and the left host boundary are unchanged; the URL-parser view shares the same host end (`RE_HOST_END_URL` removed). First behavioural change to a stage 1 constant since 2.18.1.
+
+Ships Digitizers/SiteAgent#123.
 
 ### 2.18.3
 

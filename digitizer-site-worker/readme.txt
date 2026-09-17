@@ -4,7 +4,7 @@ Tags: ai, automation, maintenance, updates, wordpress management
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.18.3
+Stable tag: 2.18.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -252,6 +252,9 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 7. Connections: provider connections (Cloudways, Cloudflare, Bunny, Hostinger, Vultr, xCloud) with resource counts, status, and credential-rotation reminders.
 
 == Changelog ==
+
+= 2.18.4 =
+* Security: an empty port after a webhook host (`https://hooks.zapier.com:/hooks/...`, `hooks.zapier.com:/...`) is now read as a URL parser reads it, so such URLs are redacted in plain text too — the case 2.18.3 listed as a known limit. A colon followed by anything but a port and a slash is still not a port.
 
 = 2.18.3 =
 * Security: redaction now reads a URL the way a browser's URL parser does. A backslash used as the path separator under http, https, ws, wss, ftp or a protocol-relative prefix (`https://hooks.zapier.com\hooks\catch\1/…`, also percent- or HTML-encoded) is redacted whole, including the part after the first backslash that earlier releases left in place.
