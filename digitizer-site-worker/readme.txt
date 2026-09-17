@@ -4,7 +4,7 @@ Tags: ai, automation, maintenance, updates, wordpress management
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.18.0
+Stable tag: 2.18.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -253,6 +253,12 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 
 == Changelog ==
 
+= 2.18.1 =
+* Security: receiver URLs are now redacted even when their `/`, `:` or `@` are percent-encoded or HTML-escaped, including numeric character references left without a trailing semicolon. Before this, an encoded Make, Zapier, Slack, Discord, IFTTT or Telegram hook URL could reach an agent unredacted.
+* The redaction walk now runs under a total node budget, so a self-referencing payload no longer runs until the request times out; a snapshot payload that exhausts the budget is withheld as `payload: null, payload_redacted: true` instead.
+* The gateway's early placeholder/grant check now only fires for a caller the IP/Origin allowlist and token throttle would already admit, so a throttled or disallowed caller no longer learns whether its token was right.
+* A legacy plaintext token is migrated before an MCP-path grant is verified.
+
 = 2.18.0 =
 * Security: known webhook endpoints no longer leave the site in a REST response an AI agent reads — Aura's gateway tools, an MCP client using an Application Password, or any logged-in non-browser caller. Make, Zapier, Slack, Discord, IFTTT and Telegram hook URLs, and Elementor Pro form webhooks on any host, are replaced with `aura-redacted:v1:<kind>`, including inside Elementor page data and snapshot payloads. People in wp-admin, public visitors and Aura's own system calls see the real values.
 * An agent write that carries a redacted placeholder is refused (`aura_redacted_placeholder`): leave that field out and the stored value is kept.
@@ -484,19 +490,10 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
   a site whose row is missing or empty can be given its first token the same
   way.
 
-= 2.10.2 =
-* Fix: a site moved from one Aura client to another while the old client's
-  last push was still in flight could end up holding the old client's ruleset
-  and refuse the new client's rules until it was reconnected. The connect
-  callback now names the client the site belongs to (a signed, optional field
-  — older dashboards keep working unchanged) and writes that binding into the
-  ruleset store itself, so a ruleset for any other client is refused from then
-  on, whatever was in flight.
-
-= 2.10.1 and earlier =
+= 2.10.2 and earlier =
 
 * WordPress.org truncates a Changelog over 5,000 words, and this plugin's history is longer than that.
-  The entries for 2.10.1 and every release before it were moved out of this file verbatim and are kept in full at:
+  The entries for 2.10.2 and every release before it were moved out of this file verbatim and are kept in full at:
   https://github.com/Digitizers/SiteAgent/blob/main/docs/changelog-archive.md
 
 == Upgrade Notice ==

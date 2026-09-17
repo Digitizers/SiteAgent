@@ -16,6 +16,15 @@ the judgement call this file exists to avoid.
 
 Newest first, continuing exactly where `readme.txt`'s Changelog stops.
 
+= 2.10.2 =
+* Fix: a site moved from one Aura client to another while the old client's
+  last push was still in flight could end up holding the old client's ruleset
+  and refuse the new client's rules until it was reconnected. The connect
+  callback now names the client the site belongs to (a signed, optional field
+  — older dashboards keep working unchanged) and writes that binding into the
+  ruleset store itself, so a ruleset for any other client is refused from then
+  on, whatever was in flight.
+
 = 2.10.1 =
 * Fix: `audit_rules` could report zero blocked/warned events for the current
   hour. Reading the counters before the hour's first refusal put the bucket in
