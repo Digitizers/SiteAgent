@@ -194,6 +194,20 @@ class Aura_Worker_Redact {
 	 */
 	const MAX_WALK_DEPTH = 512;
 
+	/**
+	 * Containers walk() and walk_with_carrier() may enter in ONE redaction —
+	 * one served response, every carrier inside it included (#110).
+	 * MAX_WALK_DEPTH bounds a path, not the total: a value that refers back
+	 * to itself two or more times (a snapshot payload of
+	 * `a:2:{i:0;R:1;i:1;R:1;}`) would otherwise be walked in 2^depth steps.
+	 * 200000 is far above any real response — a 100-post `wp/v2` page with
+	 * Elementor data, or a large page's `_elementor_data`, is in the low tens
+	 * of thousands of containers — and still walks in well under a second.
+	 * Past it, each further container is the field placeholder: fail closed,
+	 * as at the depth bound.
+	 */
+	const MAX_WALK_NODES = 200000;
+
 	/** Hourly counter: responses with at least one replacement (spec §4). */
 	const REDACTED_COUNTER = 'aura_worker_redacted_h';
 
@@ -236,6 +250,14 @@ class Aura_Worker_Redact {
 	 * @var int
 	 */
 	private static $walk_level = 0;
+
+	/**
+	 * How many containers the current redaction has entered (MAX_WALK_NODES).
+	 * Reset by redact(), the only entry point of a walk.
+	 *
+	 * @var int
+	 */
+	private static $walk_nodes = 0;
 
 	/**
 	 * Hook the read seam and the counters. Called from Aura_Worker::init(),
@@ -688,6 +710,7 @@ class Aura_Worker_Redact {
 	public static function reset_for_tests() {
 		self::$exempt     = array();
 		self::$walk_level = 0;
+		self::$walk_nodes = 0;
 	}
 
 	/**
@@ -731,6 +754,9 @@ class Aura_Worker_Redact {
 	 */
 	public static function redact( $data, &$count = 0 ) {
 		$count = 0;
+		// One node budget for the whole response: every carrier below is
+		// walked from inside this call, never from a fresh one.
+		self::$walk_nodes = 0;
 		return self::walk( $data, 0, false, $count );
 	}
 
@@ -883,7 +909,7 @@ class Aura_Worker_Redact {
 		if ( ! is_array( $node ) && ! is_object( $node ) ) {
 			return $node; // int, float, bool, null
 		}
-		if ( self::$walk_level >= self::MAX_WALK_DEPTH ) {
+		if ( ! self::enter_container() ) {
 			++$count;
 			return self::PLACEHOLDER . 'field';
 		}
@@ -893,6 +919,21 @@ class Aura_Worker_Redact {
 		} finally {
 			--self::$walk_level;
 		}
+	}
+
+	/**
+	 * May the walk enter one more container? No past the nesting bound
+	 * (MAX_WALK_DEPTH, this path) or the node budget (MAX_WALK_NODES, this
+	 * redaction); each container entered spends one node.
+	 *
+	 * @return bool
+	 */
+	private static function enter_container() {
+		if ( self::$walk_level >= self::MAX_WALK_DEPTH || self::$walk_nodes >= self::MAX_WALK_NODES ) {
+			return false;
+		}
+		++self::$walk_nodes;
+		return true;
 	}
 
 	/**
@@ -1096,7 +1137,7 @@ class Aura_Worker_Redact {
 		if ( ! $is_object && ! is_array( $container ) ) {
 			return self::walk( $container, $depth, $in_payload, $count );
 		}
-		if ( self::$walk_level >= self::MAX_WALK_DEPTH ) {
+		if ( ! self::enter_container() ) {
 			++$count;
 			return self::PLACEHOLDER . 'field'; // as walk(): a carrier container can nest in itself too
 		}
