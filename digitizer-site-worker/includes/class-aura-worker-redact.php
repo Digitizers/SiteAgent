@@ -217,12 +217,23 @@ class Aura_Worker_Redact {
 	const RE_HEAD_SCHEMED = '~(?:(?:https?|wss?|ftp)' . self::RE_COLON . self::RE_SLASH . '*+' . self::RE_USERINFO_ANY_AT . '|(?<!:|%3a|/)' . self::RE_SLASH . self::RE_SLASH . self::RE_SLASH . '*+' . self::RE_USERINFO_ANY_AT . ')';
 
 	/**
-	 * Regex: a backslash as url_view() reads it — literal, or encoded as
-	 * `%5C`, `&#92;` / `&#x5C;` (leading zeros allowed, `;` optional, the
-	 * same open-ended forms RE_ENC_SLASH_REF accepts for `/`) or `&bsol;`.
-	 * Case-insensitive; every alternative is fixed or possessive: linear.
+	 * Regex: an ENCODED backslash only — `%5C`, `&#92;` / `&#x5C;` (leading
+	 * zeros allowed, `;` optional, the same open-ended forms RE_ENC_SLASH_REF
+	 * accepts for `/`) or `&bsol;` — no literal `\` alternative. url_view()
+	 * (#116, Codex r3 on PR #120) maps every match to `%2f`, an ENCODED
+	 * slash, not a literal one: inside userinfo `RE_USERINFO_ANY_AT` reads
+	 * `%2f` as plain userinfo (round 2, an encoded slash there is not a
+	 * delimiter for a parser, which never decodes userinfo before its last
+	 * `@`), while at a host end or in a path `RE_SLASH` and `RE_TAIL` already
+	 * read `%2f` as the slash (#110) — so one reading now serves both
+	 * positions, closing the round-1 known limit where an encoded backslash
+	 * in BOTH userinfo and the path matched neither of two split readings.
+	 * A LITERAL backslash is handled separately, by a plain strtr() in
+	 * url_view() itself, because a parser reads it as `/` everywhere,
+	 * including as a userinfo-ending delimiter. Case-insensitive; every
+	 * alternative is fixed or possessive: linear.
 	 */
-	const RE_ENC_BACKSLASH = '/\\\\|%5c|&(?:#0*92' . self::RE_REF_DEC_END . '|#x0*5c' . self::RE_REF_HEX_END . '|bsol;)/i';
+	const RE_ENC_BACKSLASH_ENCODED = '/%5c|&(?:#0*92' . self::RE_REF_DEC_END . '|#x0*5c' . self::RE_REF_HEX_END . '|bsol;)/i';
 
 	/**
 	 * Regex: an optional trailing FQDN dot, an optional port, then the slash
@@ -1276,59 +1287,41 @@ class Aura_Worker_Redact {
 	}
 
 	/**
-	 * The URL parser's LITERAL-backslash-only reading of a run (view 3a/4a,
-	 * #116, Codex r3 on PR #120): a literal `\` is a slash (the
-	 * special-scheme rule; url_patterns() then insist on the scheme), but an
-	 * ENCODED backslash (`%5C`, `&#92;`, …) is left exactly as it is. Inside
-	 * userinfo that distinction matters: a WHATWG parser never decodes
-	 * userinfo before finding the authority's last `@`, so an encoded
-	 * backslash there is just userinfo text, while a literal one ends the
-	 * authority. url_view() (the literal-AND-encoded reading, view 3b/4b)
-	 * used to be the only reading, which turned `a%5C@host` into `a/@host`
-	 * and hid the receiver after the `@` a parser actually resolves.
-	 * strtr() never fails: this never returns null.
-	 *
-	 * @param string $s One layer of a run.
-	 * @return string
-	 */
-	private static function url_view_literal( $s ) {
-		return strtr( $s, '\\', '/' );
-	}
-
-	/**
-	 * The URL parser's LITERAL-AND-ENCODED backslash reading of a run (view
-	 * 3b/4b, #116): every backslash — literal or encoded (RE_ENC_BACKSLASH)
-	 * — is a slash (the special-scheme rule; url_patterns() then insist on
-	 * the scheme). An encoded one is read here because a decoder pass that
-	 * exposes `\uXXXX` consumes it in the same pass (plan D11), and because
-	 * outside userinfo (e.g. in the path) an encoded backslash IS resolved
-	 * as a path separator, unlike inside userinfo — see url_view_literal().
-	 * TAB, LF and CR are NOT stripped — a documented limit, see CLAUDE.md.
+	 * The URL parser's reading of a run (#116; one reading again as of Codex
+	 * r3 round 2 on PR #120): a LITERAL backslash becomes `/` (`strtr()` —
+	 * a parser reads it as a slash everywhere, including as the delimiter
+	 * that ends userinfo), then every ENCODED backslash
+	 * (RE_ENC_BACKSLASH_ENCODED: `%5C`, `&#92;`/`&#x5C;`, `&bsol;`) becomes
+	 * `%2f`, an ENCODED slash — not `/` — because a parser does NOT decode
+	 * userinfo before finding its last `@`, so an encoded backslash there is
+	 * still just userinfo text (`RE_USERINFO_ANY_AT` already accepts `%2f`
+	 * as userinfo, round 2 on PR #120), while at a host end or in a path an
+	 * encoded slash is already the slash `RE_SLASH` and `RE_TAIL` accept
+	 * (#110) — so this single two-step reading serves userinfo, the host
+	 * end and the path alike, closing the round-1 split's known limit (an
+	 * encoded backslash in BOTH userinfo and the path matched neither of
+	 * two separate views). An encoded backslash is read here (not left for
+	 * a later decode pass) because a decoder pass that exposes `\uXXXX`
+	 * consumes it in the same pass (plan D11). TAB, LF and CR are NOT
+	 * stripped — a documented limit, see CLAUDE.md.
 	 *
 	 * @param string $s One layer of a run.
 	 * @return string|null Null when PCRE gave up.
 	 */
 	private static function url_view( $s ) {
-		return preg_replace( self::RE_ENC_BACKSLASH, '/', $s );
+		return preg_replace( self::RE_ENC_BACKSLASH_ENCODED, '%2f', strtr( $s, '\\', '/' ) );
 	}
 
 	/**
 	 * The kind of the first VIEW of $layer that holds a receiver URL (spec
-	 * §3.1, #116; six readings since Codex r3 on PR #120): the layer as it
-	 * is (view 1 — only when $judge_raw: a layer stage 1 already judged
-	 * with its host boundary is not judged again without it); its UTS-46
-	 * mapping (view 2); the URL parser's LITERAL-backslash reading (view
-	 * 3a, url_view_literal()) — checked only when it differs from $layer;
-	 * the URL parser's LITERAL-AND-ENCODED reading (view 3b, url_view(),
-	 * the original single reading) — checked only when it differs from view
-	 * 3a, because an encoded backslash inside userinfo is userinfo text for
-	 * a parser, not an authority delimiter, so 3a alone can already resolve
-	 * the real host (#116, Codex r3); and both mappings, split the same way
-	 * — view 4a (url_view_literal() of the UTS-46 mapping), checked only
-	 * when it differs from view 3a, then view 4b (url_view() of the
-	 * mapping), checked only when it differs from BOTH view 4a and view 3b.
-	 * A PCRE failure in url_view() (3b or 4b) returns false at once, as
-	 * before; url_view_literal() (strtr()) never fails.
+	 * §3.1, #116): the layer as it is (view 1 — only when $judge_raw: a
+	 * layer stage 1 already judged with its host boundary is not judged
+	 * again without it), its UTS-46 mapping (view 2), the URL parser's
+	 * reading (view 3, url_view(): a literal backslash is a slash, an
+	 * encoded one is an encoded slash — see url_view()) and both mappings
+	 * together (view 4). A view that equals the text it came from is not
+	 * run again. A PCRE failure in url_view() (view 3 or 4) returns false
+	 * at once: unknown, so not "no receiver".
 	 *
 	 * @param string $layer     One layer of a run.
 	 * @param bool   $judge_raw Run view 1?
@@ -1348,41 +1341,24 @@ class Aura_Worker_Redact {
 				return $kind;
 			}
 		}
-		// View 3a: literal backslashes only (#116, Codex r3).
-		$literal = self::url_view_literal( $layer );
-		if ( $literal !== $layer ) {
-			$kind = self::receiver_kind( $literal, self::url_patterns() );
-			if ( '' !== $kind ) {
-				return $kind;
-			}
-		}
-		// View 3b: literal and encoded backslashes.
-		$encoded = self::url_view( $layer );
-		if ( null === $encoded ) {
+		$url = self::url_view( $layer );
+		if ( null === $url ) {
 			return false; // PCRE gave up: unknown, so not "no receiver"
 		}
-		if ( $encoded !== $literal ) {
-			$kind = self::receiver_kind( $encoded, self::url_patterns() );
-			if ( '' !== $kind ) {
-				return $kind;
-			}
+		if ( $url === $layer ) {
+			return '';
+		}
+		$kind = self::receiver_kind( $url, self::url_patterns() );
+		if ( '' !== $kind ) {
+			return $kind;
 		}
 		if ( $mapped !== $layer ) {
-			// View 4a: the UTS-46 mapping's literal-only reading.
-			$literal_mapped = self::url_view_literal( $mapped );
-			if ( $literal_mapped !== $literal ) {
-				$kind = self::receiver_kind( $literal_mapped, self::url_patterns() );
-				if ( '' !== $kind ) {
-					return $kind;
-				}
-			}
-			// View 4b: the UTS-46 mapping's literal-and-encoded reading.
-			$encoded_mapped = self::url_view( $mapped );
-			if ( null === $encoded_mapped ) {
+			$url_mapped = self::url_view( $mapped );
+			if ( null === $url_mapped ) {
 				return false;
 			}
-			if ( $encoded_mapped !== $literal_mapped && $encoded_mapped !== $encoded ) {
-				return self::receiver_kind( $encoded_mapped, self::url_patterns() );
+			if ( $url_mapped !== $url ) {
+				return self::receiver_kind( $url_mapped, self::url_patterns() );
 			}
 		}
 		return '';

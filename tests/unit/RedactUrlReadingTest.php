@@ -63,13 +63,17 @@ final class RedactUrlReadingTest extends TestCase {
 			'userinfo, encoded slash'       => static function ( $h, $p ) { return "https://a%2Fb@{$h}\\{$p}"; },
 			'userinfo, encoded slash ref'   => static function ( $h, $p ) { return "https://a&sol;b@{$h}\\{$p}"; },
 			'userinfo, encoded slash + two @' => static function ( $h, $p ) { return "https://a%2Fb@c@{$h}\\{$p}"; },
-			// #116, Codex r3 on PR #120: an ENCODED backslash inside userinfo is
-			// userinfo text for a parser, not an authority delimiter, so the
-			// LITERAL backslash right after the host (view 3a) still finds the
-			// receiver even though the global (literal+encoded) reading turns
-			// `a%5C@host` into `a/@host` and would miss it (view 3b alone).
+			// #116, Codex r3 round 2 on PR #120: url_view() maps an ENCODED
+			// backslash to an ENCODED slash (`%2f`), not a literal one, so it
+			// stays userinfo (RE_USERINFO_ANY_AT already accepts `%2f`) while
+			// still ending the host / a path segment (RE_SLASH, RE_TAIL already
+			// accept `%2f`, #110) — one reading serves both positions.
 			'userinfo, encoded backslash'   => static function ( $h, $p ) { return "https://a%5C@{$h}\\{$p}"; },
 			'userinfo, encoded backslash ref' => static function ( $h, $p ) { return "https://a&#92;@{$h}\\{$p}"; },
+			// The round-1 known limit, now closed by mapping the encoded
+			// backslash to `%2f` everywhere in one pass: userinfo's `%5C` stays
+			// userinfo, and the path's `%5C`s are still read as the slash.
+			'userinfo AND path, encoded backslash' => static function ( $h, $p ) { return 'https://a%5C@' . $h . '%5C' . str_replace( '\\', '%5C', $p ); },
 		);
 	}
 
@@ -140,19 +144,9 @@ final class RedactUrlReadingTest extends TestCase {
 			'userinfo ended by a literal slash, encoded @ after' => array( 'https://a/b%40hooks.zapier.com\\x' ),
 			// #116, Codex r3: a LITERAL backslash in userinfo is a real authority
 			// delimiter for a parser (host becomes `a`, not `hooks.zapier.com`) —
-			// the control case for the encoded-backslash-in-userinfo fix: views
-			// 3a and 3b agree here (userinfo cannot cross a `/` either way).
+			// the control case for the encoded-backslash-in-userinfo fix:
+			// url_view() turns this one into `/`, same as a parser reads it.
 			'literal backslash in userinfo ends the authority' => array( 'https://a\\@hooks.zapier.com\\x' ),
-			// Known limit (#116, Codex r3): a parser resolves this to host
-			// `hooks.zapier.com` (userinfo `a%5C` ends at the LAST `@`, and the
-			// path backslashes are its "special authority ignore slashes"
-			// state), but no single reading matches it. View 3a (literal-only)
-			// leaves BOTH the userinfo and the path `%5C`s alone, so there is no
-			// `/` after the host to end it. View 3b (literal+encoded) turns the
-			// userinfo `%5C` into `/` too, so userinfo ends at that `/`
-			// (`a/@host…`), same as the plain-text reading — host `a`, not the
-			// receiver. Neither view reaches the parser's actual answer.
-			'encoded backslash in userinfo AND path (limit)' => array( 'https://a%5C@hooks.zapier.com%5Chooks%5Ccatch%5C1%5CS' ),
 		);
 	}
 
@@ -364,18 +358,24 @@ final class RedactUrlReadingTest extends TestCase {
 
 	public static function url_view_cases(): array {
 		return array(
-			// Every RE_ENC_BACKSLASH form becomes `/`.
+			// A literal backslash becomes `/`.
 			'literal backslash'        => array( 'a\\b', 'a/b' ),
-			'%5C'                      => array( '%5C', '/' ),
-			'%5c'                      => array( '%5c', '/' ),
-			'&#92;'                    => array( '&#92;', '/' ),
-			'&#092'                    => array( '&#092', '/' ),
-			'&#0000092;'               => array( '&#0000092;', '/' ),
-			'&#x5C;'                   => array( '&#x5C;', '/' ),
-			'&#x5c'                    => array( '&#x5c', '/' ),
-			'&#x005c;'                 => array( '&#x005c;', '/' ),
-			'&bsol;'                   => array( '&bsol;', '/' ),
-			// Everything else is left exactly as it is.
+			// Every RE_ENC_BACKSLASH_ENCODED form becomes `%2f` — an ENCODED
+			// slash, not `/` (#116, Codex r3 round 2 on PR #120): userinfo
+			// keeps it (RE_USERINFO_ANY_AT accepts `%2f`), a host end or a
+			// path segment reads it as the slash (RE_SLASH, RE_TAIL, #110).
+			'%5C'                      => array( '%5C', '%2f' ),
+			'%5c'                      => array( '%5c', '%2f' ),
+			'&#92;'                    => array( '&#92;', '%2f' ),
+			'&#092'                    => array( '&#092', '%2f' ),
+			'&#0000092;'               => array( '&#0000092;', '%2f' ),
+			'&#x5C;'                   => array( '&#x5C;', '%2f' ),
+			'&#x5c'                    => array( '&#x5c', '%2f' ),
+			'&#x005c;'                 => array( '&#x005c;', '%2f' ),
+			'&bsol;'                   => array( '&bsol;', '%2f' ),
+			// Everything else is left exactly as it is (the reject set is
+			// unchanged from RE_ENC_BACKSLASH: only the accepted forms above
+			// now map to `%2f` instead of `/`).
 			'not 92: &#920;'           => array( '&#920;', '&#920;' ),
 			'not 92: &#921;'           => array( '&#921;', '&#921;' ),
 			'not 5c: &#x5cab'          => array( '&#x5cab', '&#x5cab' ),
@@ -383,32 +383,6 @@ final class RedactUrlReadingTest extends TestCase {
 			'entity-escaped: &amp;#92;' => array( '&amp;#92;', '&amp;#92;' ),
 			'tab stays'                => array( "a\tb", "a\tb" ),
 			'a forward slash: %2F'     => array( '%2F', '%2F' ),
-		);
-	}
-
-	/**
-	 * #116, Codex r3 on PR #120: url_view_literal() (view 3a/4a) turns ONLY a
-	 * literal backslash into `/` — every encoded form (`%5C`, `&#92;`, …) is
-	 * left exactly as it is, unlike url_view() (view 3b/4b), which reads
-	 * both. That split is what lets `a%5C@host` still resolve to `host`
-	 * (view 3a sees plain userinfo up to a real `@`) instead of being read
-	 * as `a/@host` (view 3b, host `a`).
-	 *
-	 * @dataProvider url_view_literal_cases
-	 */
-	public function test_url_view_literal_turns_only_literal_backslashes( string $in, string $expect ): void {
-		$method = new ReflectionMethod( Aura_Worker_Redact::class, 'url_view_literal' );
-		if ( PHP_VERSION_ID < 80100 ) {
-			$method->setAccessible( true ); // required before 8.1 for a private method; a deprecated no-op from 8.5
-		}
-		$this->assertSame( $expect, $method->invoke( null, $in ), $in );
-	}
-
-	public static function url_view_literal_cases(): array {
-		return array(
-			'literal backslash' => array( 'a\\b', 'a/b' ),
-			'%5C stays'          => array( '%5C', '%5C' ),
-			'&#92; stays'        => array( '&#92;', '&#92;' ),
 		);
 	}
 }

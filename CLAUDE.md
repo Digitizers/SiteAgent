@@ -331,9 +331,15 @@ out of every REST response an **agent** reads.
   (2) its UTS-46 mapping (`Aura_Worker_Redact_Idna::map()`: fullwidth and mathematical
   letters, `。` / `．` / `｡`, and deletions of soft hyphen, zero-width space, word
   joiner, BOM and variation selectors — 1526 entries) against the same patterns; (3)
-  the URL parser's reading (`url_view()`: every backslash — literal, `%5C`, `&#92;` /
-  `&#x5C;` (leading zeros, `;` optional) or `&bsol;` — read as `/`) against
-  `url_patterns()` — the same patterns with the prefix REQUIRED: a special scheme
+  the URL parser's reading (`url_view()`, two steps, #116 Codex r3 round 2: a LITERAL
+  backslash becomes `/` first — a parser reads it as a slash everywhere, including as
+  the delimiter that ends userinfo; then every ENCODED backslash (`%5C`, `&#92;` /
+  `&#x5C;` (leading zeros, `;` optional) or `&bsol;`) becomes `%2f`, an ENCODED slash,
+  not `/` — a parser never decodes userinfo before its last `@`, so an encoded
+  backslash there stays userinfo text (`RE_USERINFO_ANY_AT` already accepts `%2f`),
+  while at a host end or in a path an encoded slash is already the slash `RE_SLASH` /
+  `RE_TAIL` accept, #110 — one reading now serves userinfo, the host end and the path
+  alike) against `url_patterns()` — the same patterns with the prefix REQUIRED: a special scheme
   (`http`, `https`, `ws`, `wss`, `ftp`) + `:` + zero or more slashes (a WHATWG parser
   skips any number after a special scheme, so `https:\host`, `https:/host` and
   `https:host` all count), or two or more slashes not preceded by a literal scheme
