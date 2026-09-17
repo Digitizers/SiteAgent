@@ -329,7 +329,13 @@ final class RedactDetectorsTest extends TestCase {
 	 * (schemeless) host, a trailing FQDN dot before the empty port, the
 	 * empty port followed by an ENCODED slash (RE_SLASH already accepts
 	 * `%2F` — only the slash right after the colon is encoded, so this is
-	 * simple to build for every receiver), and inside prose.
+	 * simple to build for every receiver), and inside prose. The `encoded
+	 * slash` rows (`:%2F…`) were already caught before #121 — the `%`
+	 * already sent them through stage 2, where `url_patterns()` already
+	 * allowed an empty port (formerly `RE_HOST_END_URL`) — so `redact_text()`
+	 * gave the same answer either side of this fix; the other four forms
+	 * (schemed, bare, trailing dot, prose) were unredacted before the
+	 * change and pin stage 1 itself.
 	 *
 	 * @return array<string,array{0:string,1:string,2:string}> input, expected output, secret
 	 */

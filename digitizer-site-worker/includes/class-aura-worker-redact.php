@@ -243,7 +243,8 @@ class Aura_Worker_Redact {
 	 * follows the single dot but the required port/slash). The port's colon
 	 * and the slash may be encoded (#110): `hook.eu2.make.com%2Fabc`. The
 	 * port itself may be EMPTY (`[0-9]*+`, possessive — #121, the first
-	 * change to a stage 1 constant since 2.18.1): `host:/path` names the
+	 * BEHAVIOURAL change to a stage 1 constant since 2.18.1 — RE_HEAD was
+	 * refactored value-identically in 2.18.2): `host:/path` names the
 	 * host with no port, as a URL parser reads it. A colon followed by
 	 * anything but digits-then-slash is still no port: the optional group
 	 * fails there (with nothing for the possessive quantifier to give back)

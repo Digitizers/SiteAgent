@@ -304,14 +304,27 @@ final class RedactUrlReadingTest extends TestCase {
 	}
 
 	/**
-	 * #116, Codex r5 on PR #120: when a run enters stage 2 for a reason
-	 * OTHER than a backslash (a mapped host, or an encoded byte elsewhere
-	 * in the run), url_view() can be a no-op — but url_patterns() (views
-	 * 3–4) must still be judged, since it is a DIFFERENT pattern set (an
-	 * empty port allowed) than stage_2_patterns() (views 1–2, a digit port
-	 * required). judge_layer() used to skip views 3–4 whenever
-	 * $url === $layer, treating "same text" as "already judged" even
-	 * though the two views judge it against different patterns.
+	 * #116, Codex r5 on PR #120; corrected for #121 (review): `url_patterns()`
+	 * and `stage_2_patterns()` now differ only in the PREFIX they require
+	 * (`url_patterns()`'s RE_HEAD_SCHEMED demands one — a special scheme or
+	 * protocol-relative `//`, userinfo read to its last `@`;
+	 * `stage_2_patterns()`'s RE_HEAD_UNBOUNDED needs none, and drops the
+	 * left host boundary too) — both now accept an EMPTY port, since
+	 * RE_HOST_END itself does (#121, both sets are built from it). Because
+	 * `stage_2_patterns()`'s prefix is optional where `url_patterns()`'s is
+	 * required, and its host boundary is looser still, any text
+	 * `url_patterns()` matches without a `url_view()` rewrite (`$url ===
+	 * $layer`, a no-op) is already matched by views 1–2 too — so after #121
+	 * no fixture here is known to NEED views 3–4 for that reason.
+	 * `judge_layer()` still always runs them regardless (Codex r5): a guard
+	 * against the two pattern sets diverging again, not something these
+	 * three rows still prove necessary. They keep pinning that an empty
+	 * port is read as a port once a run is through stage 2's decode/mapping
+	 * machinery (a mapped host, an encoded path slash, a host built from a
+	 * numeric character reference) — not which view catches it. As of
+	 * #121 the middle row (`hooks%2Fcatch`) is fully redacted by stage 1
+	 * ALONE — a literal slash follows the empty port directly — and never
+	 * reaches stage 2 at all; it stays here as empty-port coverage even so.
 	 */
 	public static function empty_port_in_stage_2(): array {
 		return array(

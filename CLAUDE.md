@@ -346,8 +346,9 @@ out of every REST response an **agent** reads.
   colon (`:`/`%3a`) or another slash (protocol-relative: `//host`, `///host`) — and the
   port EMPTY as well as digits (`host:/path`, `host:\path` name the host with no port,
   as a WHATWG parser reads it — Codex r4 on PR #120; as of 2.18.4, `RE_HOST_END` itself
-  accepts an empty port too — `[0-9]*+`, possessive, the first change to a stage 1
-  constant since 2.18.1 (#121) — so the plain-text, un-encoded form now reaches stage 1
+  accepts an empty port too — `[0-9]*+`, possessive, the first BEHAVIOURAL change to a
+  stage 1 constant since 2.18.1 (`RE_HEAD` was refactored value-identically in 2.18.2)
+  (#121) — so the plain-text, un-encoded form now reaches stage 1
   directly, with no separate `RE_HOST_END_URL`; `url_patterns()` and
   `stage_2_patterns()`, both built from `URL_PATTERNS`, inherit it too); (4) both
   mappings together.
