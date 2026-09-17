@@ -158,7 +158,24 @@ class Aura_Worker_Redact {
 	 * (RE_REF_BOUNDARY, PR #112 Codex r2). The scheme's `:` and both slashes may be
 	 * encoded (`https%3A%2F%2F`, `https:&#x2F;&#x2F;`).
 	 */
-	const RE_HEAD = '~(?:(?<![A-Za-z0-9.-])|' . self::RE_PCT_BOUNDARY . '|' . self::RE_REF_BOUNDARY . ')(?:https?' . self::RE_COLON . self::RE_DOUBLE_SLASH_USERINFO . '|' . self::RE_DOUBLE_SLASH_USERINFO . ')?';
+	const RE_HEAD = '~(?:(?<![A-Za-z0-9.-])|' . self::RE_PCT_BOUNDARY . '|' . self::RE_REF_BOUNDARY . ')' . self::RE_URL_PREFIX;
+
+	/**
+	 * Regex: RE_HEAD's optional prefix — full scheme, protocol-relative, or
+	 * neither — without its host boundary.
+	 */
+	const RE_URL_PREFIX = '(?:https?' . self::RE_COLON . self::RE_DOUBLE_SLASH_USERINFO . '|' . self::RE_DOUBLE_SLASH_USERINFO . ')?';
+
+	/**
+	 * Regex: RE_HEAD with NO left host boundary, for stage 2 only (#113, fix
+	 * round 4, owner decision). Decoding a reference or an escape glued
+	 * before a host (`&#65;hooks.slack.com/\u0073ervices/…`) glues a letter
+	 * to the host in every decoded layer, so in a decoded (or encoded raw)
+	 * run a receiver host counts wherever it stands. The cost: an encoded
+	 * run with a lookalike host (`myhooks.zapier.com%2Fx`) is redacted too.
+	 * Stage 1 (plain text) keeps RE_HEAD.
+	 */
+	const RE_HEAD_UNBOUNDED = '~' . self::RE_URL_PREFIX;
 
 	/**
 	 * Regex: an optional trailing FQDN dot, an optional port, then the slash
@@ -368,6 +385,14 @@ class Aura_Worker_Redact {
 	 * @var bool
 	 */
 	private static $payload_budget_spent = false;
+
+	/**
+	 * URL_PATTERNS with RE_HEAD_UNBOUNDED in place of RE_HEAD, built once by
+	 * stage_2_patterns().
+	 *
+	 * @var array<int,array{0:string,1:string}>|null
+	 */
+	private static $stage_2_patterns = null;
 
 	/**
 	 * Hook the read seam and the counters. Called from Aura_Worker::init(),
@@ -943,7 +968,8 @@ class Aura_Worker_Redact {
 	 * characters other than whitespace, `"`, `'`, `<` and `>` (RE_RUN) —
 	 * that holds a `%`, `&` or `\` is decoded layer by layer
 	 * (Aura_Worker_Redact_Decode::decode_layers()). When ANY layer — the raw
-	 * run included — holds a receiver URL by the stage 1 patterns, the WHOLE
+	 * run included — holds a receiver URL by the stage 2 patterns (the stage
+	 * 1 ones without the left host boundary, fix round 4), the WHOLE
 	 * run is replaced with the placeholder of the first layer that matches,
 	 * its trailing sentence punctuation handed back. Every layer is checked
 	 * because a later pass can hide again what an earlier one exposed (a
@@ -1067,8 +1093,9 @@ class Aura_Worker_Redact {
 	}
 
 	/**
-	 * The kind of the first stage 1 pattern that matches $decoded, as a
-	 * check only — nothing is replaced.
+	 * The kind of the first stage 2 pattern (stage_2_patterns(): no left
+	 * host boundary) that matches $decoded, as a check only — nothing is
+	 * replaced.
 	 *
 	 * @param string $decoded One layer of a run.
 	 * @return string|false The kind; '' when no pattern matches; false when PCRE failed.
@@ -1083,7 +1110,7 @@ class Aura_Worker_Redact {
 				return ''; // stage 1's own fast reject: no slash, no receiver URL
 			}
 		}
-		foreach ( self::URL_PATTERNS as $pattern ) {
+		foreach ( self::stage_2_patterns() as $pattern ) {
 			$found = preg_match( $pattern[1], $decoded );
 			if ( false === $found ) {
 				return false;
@@ -1093,6 +1120,26 @@ class Aura_Worker_Redact {
 			}
 		}
 		return '';
+	}
+
+	/**
+	 * Stage 2's receiver patterns: each URL_PATTERNS entry, same kind and
+	 * order, with its RE_HEAD (the left host boundary plus the optional
+	 * prefix) swapped for RE_HEAD_UNBOUNDED (the same prefix, no boundary).
+	 * The host, RE_HOST_END, the path and RE_TAIL are the entry's own.
+	 *
+	 * @return array<int,array{0:string,1:string}>
+	 */
+	public static function stage_2_patterns() {
+		if ( null === self::$stage_2_patterns ) {
+			$patterns = array();
+			foreach ( self::URL_PATTERNS as $pattern ) {
+				// Every entry starts with RE_HEAD; the rest is kept as it is.
+				$patterns[] = array( $pattern[0], self::RE_HEAD_UNBOUNDED . substr( $pattern[1], strlen( self::RE_HEAD ) ) );
+			}
+			self::$stage_2_patterns = $patterns;
+		}
+		return self::$stage_2_patterns;
 	}
 
 	/**

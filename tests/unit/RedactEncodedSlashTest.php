@@ -184,10 +184,6 @@ final class RedactEncodedSlashTest extends TestCase {
 			'html non-webhook'           => array( 'https:&#x2F;&#x2F;n8n.example.com&#x2F;webhook&#x2F;abc' ),
 			'encoded marketing page'     => array( rawurlencode( 'https://www.make.com/en/pricing' ) ),
 			'no path after the host'     => array( 'example.com%2Fhook.eu2.make.com' ),
-			'prefixed host'              => array( 'myhook.eu2.make.com%2Fabc123secret' ),
-			'encoded-dot prefixed host'  => array( 'evil%2Ehook.eu2.make.com%2Fabc123secret' ),
-			'encoded-dash prefixed host' => array( 'evil%2dhooks.zapier.com%2Fhooks%2Fcatch%2F1' ),
-			'encoded-digit prefix'       => array( 'x%31hooks.zapier.com%2Fhooks%2Fcatch%2F1' ),
 			'encoded suffixed host'      => array( rawurlencode( 'https://hooks.zapier.com.evil.tld/hooks/catch/1/' ) ),
 			'encoded userinfo decoy'     => array( rawurlencode( 'https://hooks.zapier.com@evil.tld/hooks/catch/1/' ) ),
 			'encoded slack non-hook'     => array( rawurlencode( 'https://hooks.slack.com/help/articles/1' ) ),
@@ -211,7 +207,20 @@ final class RedactEncodedSlashTest extends TestCase {
 	}
 
 	public function test_a_long_encoded_near_miss_does_not_time_out(): void {
+		// #113 fix round 4: these lookalike hosts are encoded runs, so stage 2
+		// (no left host boundary) now replaces each of them.
 		$text  = str_repeat( 'x%2Fxhooks.zapier.com%2Fa evil%2Ehooks.zapier.com%2Fa &#x2F;myhook.eu2.make.com&#47; ', 20000 );
+		$start = microtime( true );
+		$out   = $this->text( $text, $n );
+		$this->assertLessThan( 2.0, microtime( true ) - $start );
+		$this->assertSame( str_repeat( 'aura-redacted:v1:zapier aura-redacted:v1:zapier aura-redacted:v1:make ', 20000 ), $out );
+		$this->assertSame( 60000, $n );
+	}
+
+	public function test_a_long_encoded_near_miss_without_a_receiver_host_does_not_time_out(): void {
+		// Every run holds a receiver host but no host end: each receiver
+		// pattern is tried on every layer and fails.
+		$text  = str_repeat( 'x%2Fxhooks.zapier.comx%2Fa evil%2Ehooks.zapier.com.evil%2Fa &#x2F;myhook.eu2.make.co&#47; ', 20000 );
 		$start = microtime( true );
 		$out   = $this->text( $text, $n );
 		$this->assertLessThan( 2.0, microtime( true ) - $start );
@@ -287,11 +296,8 @@ final class RedactEncodedSlashTest extends TestCase {
 	/** @return array<string,array{0:string}> */
 	public static function round1_negatives(): array {
 		return array(
-			'encoded dot prefix'     => array( 'evil%2Ehook.eu2.make.com%2Fx' ),
-			'encoded digit prefix'   => array( 'x%31hooks.zapier.com%2Fx' ),
 			'decimal 475 is no slash' => array( 'hooks.zapier.com&#475hooks' ),
 			'hex 2fa is no slash'     => array( 'hooks.zapier.com&#x2Fahooks' ),
-			'hex 2fd before discord'  => array( 'x&#x2Fdiscord.com/api/webhooks/1/SECRET' ),
 		);
 	}
 
@@ -403,11 +409,6 @@ final class RedactEncodedSlashTest extends TestCase {
 	/** @return array<string,array{0:string}> */
 	public static function unterminated_at_negatives(): array {
 		return array(
-			// `&#x40d…` is U+040D to HTML5, not `@` + `d…`: no receiver there.
-			'hex before discord'  => array( 'https://user&#x40discord.com/api/webhooks/1/SECRET' ),
-			'hex before canary'   => array( 'https://user&#x40canary.discord.com/api/webhooks/1/SECRET' ),
-			'hex before api'      => array( 'https://user&#x40api.telegram.org/bot1:AASECRET/x' ),
-			'bare hex before api' => array( 'user&#x40api.telegram.org/bot1:AASECRET/x' ),
 			'decoy after at'      => array( 'https://hooks.zapier.com&#64evil.tld/hooks/catch/1/' ),
 			'hex decoy after at'  => array( 'https://hooks.zapier.com&#x40evil.tld/hooks/catch/1/' ),
 		);
@@ -417,6 +418,44 @@ final class RedactEncodedSlashTest extends TestCase {
 	public function test_unterminated_at_controls_stay_untouched( string $in ): void {
 		$this->assertSame( $in, $this->text( $in, $n ) );
 		$this->assertSame( 0, $n );
+	}
+
+	// --- #113 fix round 4: controls kept only by the left host boundary ----
+
+	/**
+	 * Encoded runs that were kept only because the receiver host had no
+	 * LEFT boundary: a hostname character glued in front (`myhook.…`,
+	 * `evil.hook…`, `x1hooks…`), or a semicolonless hex reference that
+	 * HTML5 extends into the host's first letter (`&#x40d…` is U+040D, so
+	 * the decoded layer reads `Ѝiscord.com`). Owner decision: in stage 2 a
+	 * receiver host needs no left boundary, in any layer, the raw one
+	 * included, so the whole run is replaced.
+	 *
+	 * @return array<string,array{0:string,1:string}> input, expected
+	 */
+	public static function left_boundary_flips(): array {
+		return array(
+			// Were negatives().
+			'prefixed host'              => array( 'myhook.eu2.make.com%2Fabc123secret', 'aura-redacted:v1:make' ),
+			'encoded-dot prefixed host'  => array( 'evil%2Ehook.eu2.make.com%2Fabc123secret', 'aura-redacted:v1:make' ),
+			'encoded-dash prefixed host' => array( 'evil%2dhooks.zapier.com%2Fhooks%2Fcatch%2F1', 'aura-redacted:v1:zapier' ),
+			'encoded-digit prefix'       => array( 'x%31hooks.zapier.com%2Fhooks%2Fcatch%2F1', 'aura-redacted:v1:zapier' ),
+			// Were round1_negatives().
+			'encoded dot prefix'         => array( 'evil%2Ehook.eu2.make.com%2Fx', 'aura-redacted:v1:make' ),
+			'encoded digit prefix'       => array( 'x%31hooks.zapier.com%2Fx', 'aura-redacted:v1:zapier' ),
+			'hex 2fd before discord'     => array( 'x&#x2Fdiscord.com/api/webhooks/1/SECRET', 'aura-redacted:v1:discord' ),
+			// Were unterminated_at_negatives().
+			'hex before discord'         => array( 'https://user&#x40discord.com/api/webhooks/1/SECRET', 'aura-redacted:v1:discord' ),
+			'hex before canary'          => array( 'https://user&#x40canary.discord.com/api/webhooks/1/SECRET', 'aura-redacted:v1:discord' ),
+			'hex before api'             => array( 'https://user&#x40api.telegram.org/bot1:AASECRET/x', 'aura-redacted:v1:telegram' ),
+			'bare hex before api'        => array( 'user&#x40api.telegram.org/bot1:AASECRET/x', 'aura-redacted:v1:telegram' ),
+		);
+	}
+
+	/** @dataProvider left_boundary_flips */
+	public function test_encoded_runs_kept_only_by_the_left_boundary_are_redacted( string $in, string $expected ): void {
+		$this->assertSame( $expected, $this->text( $in, $n ), $in );
+		$this->assertSame( 1, $n );
 	}
 
 	// --- #113: controls that only recorded a limit stage 2 closes ---------

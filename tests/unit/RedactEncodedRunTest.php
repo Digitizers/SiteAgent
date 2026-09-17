@@ -308,14 +308,101 @@ final class RedactEncodedRunTest extends TestCase {
 		$this->assertSame( 4, $n );
 	}
 
+	/**
+	 * A boundary reference glued before the host, and a JSON escape where
+	 * stage 1 never matches the raw run — in a receiver's FIXED path prefix
+	 * (`services`, `api`, `hooks`, `trigger`, `bot`) or on the telegram
+	 * token's first letter (#113, fix round 4). Stage 1 leaves no cut to
+	 * hook onto, and every decoded layer glues the decoded letter to the
+	 * host (`Ahooks.slack.com/services/…`). Owner decision: in stage 2 a
+	 * receiver host needs no LEFT boundary, so the glued host counts.
+	 *
+	 * @return array<string,array{0:string,1:string,2:string}> run, kind, secret
+	 */
+	public static function glued_host_json_cases(): array {
+		$cases = array(
+			'slack literal'    => array( '&#65;hooks.slack.com/\\u0073ervices/T/B/SLACKSECRET', 'slack', 'SLACKSECRET' ),
+			'discord literal'  => array( '&#65;discord.com/\\u0061pi/webhooks/1/dsecret-tok', 'discord', 'dsecret-tok' ),
+			'telegram literal' => array( '&#65;api.telegram.org/bot1:\\u0041Asecret_x/sendMessage', 'telegram', 'AAsecret_x' ),
+		);
+		foreach ( self::RECEIVERS as $rname => list( $host, $path, $kind, $secret ) ) {
+			$at    = strpos( $path, $secret );
+			$first = '\\u00' . bin2hex( $path[0] ) . substr( $path, 1 );
+			$token = substr( $path, 0, $at ) . '\\u00' . bin2hex( $secret[0] ) . substr( $path, $at + 1 );
+			foreach ( array( '&#65;', '&#x41;', 'x&#65;' ) as $reference ) {
+				$cases[ "{$rname} / {$reference} / path letter" ]   = array( "{$reference}{$host}/{$first}", $kind, $secret );
+				$cases[ "{$rname} / {$reference} / secret letter" ] = array( "{$reference}{$host}/{$token}", $kind, $secret );
+			}
+		}
+		return $cases;
+	}
+
+	/** @dataProvider glued_host_json_cases */
+	public function test_a_glued_host_and_a_json_escape_are_redacted( string $run, string $kind, string $secret ): void {
+		$out = $this->text( $run, $n );
+		$this->assertSame( 'aura-redacted:v1:' . $kind, $out, $run );
+		$this->assertStringNotContainsString( substr( $secret, 1 ), $out );
+		$this->assertGreaterThanOrEqual( 1, $n );
+	}
+
+	/** @dataProvider glued_host_json_cases */
+	public function test_a_glued_host_and_a_json_escape_are_redacted_inside_prose( string $run, string $kind, string $secret ): void {
+		$out = $this->text( "Hook: {$run}, then {$run}. End", $n );
+		$this->assertSame( "Hook: aura-redacted:v1:{$kind}, then aura-redacted:v1:{$kind}. End", $out );
+		$this->assertStringNotContainsString( substr( $secret, 1 ), $out );
+		$this->assertGreaterThanOrEqual( 2, $n );
+	}
+
+	/**
+	 * The cost of the owner decision (#113, fix round 4): in an ENCODED run a
+	 * lookalike host (a receiver host with a hostname character glued in
+	 * front) is redacted — these were controls kept only by the left host
+	 * boundary. The same lookalikes in plain text are still kept (stage 1
+	 * keeps its boundary).
+	 *
+	 * @return array<string,array{0:string,1:string,2:string}> encoded run, kind, plain-text twin
+	 */
+	public static function lookalike_cases(): array {
+		return array(
+			'glued letters, pct slash' => array( 'myhooks.zapier.com%2Fx', 'zapier', 'myhooks.zapier.com/x' ),
+			'glued letters, 252F'      => array( 'myhooks.zapier.com%252Fx', 'zapier', 'myhooks.zapier.com/x' ),
+			'encoded digit prefix'     => array( 'x%31hooks.zapier.com%2Fx', 'zapier', 'x1hooks.zapier.com/x' ),
+			'encoded dot prefix'       => array( 'evil%2Ehooks.zapier.com%252Fx', 'zapier', 'evil.hooks.zapier.com/x' ),
+			'encoded prefixed host'    => array( 'myhook%2Eeu2.make.com%2Fabc', 'make', 'myhook.eu2.make.com/abc' ),
+			'hex 40d before discord'   => array( '&#x40discord.com/api/webhooks/1/x', 'discord', 'Xdiscord.com/api/webhooks/1/x' ),
+			'userinfo hex 40d'         => array( 'https://user&#x40discord.com/api/webhooks/1/x', 'discord', 'https://userXdiscord.com/api/webhooks/1/x' ),
+		);
+	}
+
+	/** @dataProvider lookalike_cases */
+	public function test_an_encoded_lookalike_host_run_is_redacted( string $run, string $kind, string $plain ): void {
+		$this->assertSame( 'aura-redacted:v1:' . $kind, $this->text( $run, $n ) );
+		$this->assertSame( 1, $n );
+	}
+
+	/** @dataProvider lookalike_cases */
+	public function test_the_same_lookalike_host_in_plain_text_is_kept( string $run, string $kind, string $plain ): void {
+		$this->assertSame( "see {$plain} now", $this->text( "see {$plain} now", $n ) );
+		$this->assertSame( 0, $n );
+	}
+
+	public function test_stage_2_patterns_are_the_stage_1_patterns_without_the_left_boundary(): void {
+		$stage_2 = Aura_Worker_Redact::stage_2_patterns();
+		$this->assertCount( count( Aura_Worker_Redact::URL_PATTERNS ), $stage_2 );
+		foreach ( Aura_Worker_Redact::URL_PATTERNS as $i => list( $kind, $regex ) ) {
+			$this->assertStringStartsWith( Aura_Worker_Redact::RE_HEAD, $regex, $kind );
+			$rest = substr( $regex, strlen( Aura_Worker_Redact::RE_HEAD ) );
+			$this->assertSame( array( $kind, Aura_Worker_Redact::RE_HEAD_UNBOUNDED . $rest ), $stage_2[ $i ] );
+		}
+		// The two heads differ only by the boundary group.
+		$this->assertSame( '~', substr( Aura_Worker_Redact::RE_HEAD, 0, 1 ) );
+		$this->assertStringEndsWith( substr( Aura_Worker_Redact::RE_HEAD_UNBOUNDED, 1 ), Aura_Worker_Redact::RE_HEAD );
+		$this->assertStringNotContainsString( '(?<!', Aura_Worker_Redact::RE_HEAD_UNBOUNDED );
+	}
+
 	/** @return array<string,array{0:string}> */
 	public static function controls(): array {
 		return array(
-			'encoded digit prefix'        => array( 'x%31hooks.zapier.com%2Fx' ),
-			'encoded dot prefix'          => array( 'evil%2Ehooks.zapier.com%252Fx' ),
-			'encoded prefixed host'       => array( 'myhook%2Eeu2.make.com%2Fabc' ),
-			'hex 40d before discord'      => array( '&#x40discord.com/api/webhooks/1/x' ),
-			'userinfo hex 40d'            => array( 'https://user&#x40discord.com/api/webhooks/1/x' ),
 			'encoded suffixed host'       => array( 'hooks.zapier.com%252Ecom.evil.tld%252Fx' ),
 			'encoded userinfo decoy'      => array( 'https%253A%252F%252Fhooks.zapier.com%2540evil.tld%252Fx' ),
 			'non-receiver double encoded' => array( 'https%253A%252F%252Fn8n.example.com%252Fwebhook%252Fabc' ),
@@ -425,7 +512,7 @@ final class RedactEncodedRunTest extends TestCase {
 				return self::split_succeeds( $text ) && null !== Aura_Worker_Redact_Decode::decode_layers( 'hooks.zapier.com%252Fx' );
 			},
 			static function () {
-				foreach ( Aura_Worker_Redact::URL_PATTERNS as $pattern ) {
+				foreach ( Aura_Worker_Redact::stage_2_patterns() as $pattern ) {
 					$found = preg_match( $pattern[1], 'hooks.zapier.com%2Fx' );
 					if ( 1 === $found ) {
 						return false; // a match before any failure: no failure is reached
