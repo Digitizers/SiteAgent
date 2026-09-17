@@ -709,7 +709,7 @@ final class RedactUrlReadingTest extends TestCase {
 		);
 	}
 
-	/** Every UTS-46 example, as the literal character and as an HTML reference / percent escape of its UTF-8. */
+	/** Every UTS-46 example, as the literal character, as an HTML reference of the code point, and as percent escapes of its UTF-8 bytes. */
 	public static function uts46_cases(): array {
 		$hosts = array(
 			'fullwidth h'     => array( "\u{FF48}ooks.zapier.com", 'hooks/catch/1/zsecret9', 'zapier', 'zsecret9' ),
@@ -725,19 +725,38 @@ final class RedactUrlReadingTest extends TestCase {
 		unset( $hosts['digit one dot'] );
 		$cases = array();
 		foreach ( $hosts as $name => $r ) {
+			// An HTML reference names a CODE POINT (`&#xFF48;`); a percent escape
+			// names a BYTE (`%EF%BD%88`). Both decode to the same UTF-8.
 			$refs = '';
+			foreach ( preg_split( '//u', $r[0], -1, PREG_SPLIT_NO_EMPTY ) as $ch ) {
+				$refs .= strlen( $ch ) > 1 ? '&#x' . strtoupper( dechex( self::code_point( $ch ) ) ) . ';' : $ch;
+			}
 			$pcts = '';
 			foreach ( str_split( $r[0] ) as $byte ) {
-				$refs .= ord( $byte ) > 0x7F ? '&#x' . strtoupper( dechex( ord( $byte ) ) ) . ';' : $byte;
 				$pcts .= ord( $byte ) > 0x7F ? '%' . strtoupper( dechex( ord( $byte ) ) ) : $byte;
 			}
 			$cases[ "{$name} / literal" ]        = array( "https://{$r[0]}/{$r[1]}", $r[2], $r[3] );
 			$cases[ "{$name} / bare literal" ]   = array( "{$r[0]}/{$r[1]}", $r[2], $r[3] );
-			$cases[ "{$name} / byte refs" ]      = array( "https://{$refs}/{$r[1]}", $r[2], $r[3] );
+			$cases[ "{$name} / code point refs" ] = array( "https://{$refs}/{$r[1]}", $r[2], $r[3] );
 			$cases[ "{$name} / pct bytes" ]      = array( "https://{$pcts}/{$r[1]}", $r[2], $r[3] );
 			$cases[ "{$name} / backslash path" ] = array( "https://{$r[0]}\\" . strtr( $r[1], '/', '\\' ), $r[2], $r[3] );
 		}
 		return $cases;
+	}
+
+	/** The code point of one UTF-8 character (no mbstring). */
+	private static function code_point( string $ch ): int {
+		$b = array_values( unpack( 'C*', $ch ) );
+		switch ( count( $b ) ) {
+			case 1:
+				return $b[0];
+			case 2:
+				return ( ( $b[0] & 0x1F ) << 6 ) | ( $b[1] & 0x3F );
+			case 3:
+				return ( ( $b[0] & 0x0F ) << 12 ) | ( ( $b[1] & 0x3F ) << 6 ) | ( $b[2] & 0x3F );
+			default:
+				return ( ( $b[0] & 0x07 ) << 18 ) | ( ( $b[1] & 0x3F ) << 12 ) | ( ( $b[2] & 0x3F ) << 6 ) | ( $b[3] & 0x3F );
+		}
 	}
 
 	/** @dataProvider uts46_cases */
