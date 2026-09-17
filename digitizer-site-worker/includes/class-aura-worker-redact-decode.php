@@ -18,6 +18,13 @@
  * A later step in the same pass sees what an earlier one produced; that
  * only ever decodes more, never less.
  *
+ * An intermediate layer can expose a receiver URL that a later layer's own
+ * decoding hides again (e.g. a decoded numeric reference landing directly
+ * against a host with no separator). `decode_layers()` returns every layer
+ * — the raw run first, then each pass whose result differed from the one
+ * before it — so Task 2 (`Aura_Worker_Redact::redact_encoded_runs()`) MUST
+ * check every layer against URL_PATTERNS, not only the last one.
+ *
  * Spec: Digitizers/Aura
  * docs/superpowers/specs/2026-09-17-redaction-decode-then-match-design.md §3.1.
  *
@@ -56,9 +63,11 @@ class Aura_Worker_Redact_Decode {
 
 	/**
 	 * Regex: a JSON `\u` escape — a valid surrogate pair first, else one
-	 * code unit.
+	 * code unit. JSON only defines lowercase `\u`, so the escape marker is
+	 * case-sensitive (`\U0041` does not match); the hex digits themselves
+	 * stay case-insensitive via explicit `[0-9A-Fa-f]`-style classes.
 	 */
-	const RE_JSON_UNICODE = '/\\\\u(?:(d[89ab][0-9a-f]{2})\\\\u(d[c-f][0-9a-f]{2})|([0-9a-f]{4}))/i';
+	const RE_JSON_UNICODE = '/\\\\u(?:([dD][89abAB][0-9A-Fa-f]{2})\\\\u([dD][c-fC-F][0-9A-Fa-f]{2})|([0-9A-Fa-f]{4}))/';
 
 	/** The longest name in LEGACY_NAMES. */
 	const LEGACY_MAX_LENGTH = 6;
@@ -125,6 +134,45 @@ class Aura_Worker_Redact_Decode {
 	private static $legacy = null;
 
 	/**
+	 * Decode $run up to MAX_DECODE_PASSES layers, keeping every layer along
+	 * the way.
+	 *
+	 * Every element is a distinct reading of $run a real consumer of it
+	 * could land on — the raw run itself first (element 0), because that is
+	 * what a reader who does no decoding at all sees, then each pass whose
+	 * result differed from the one before it, up to the fixed point. The
+	 * caller (Task 2) MUST check every element against URL_PATTERNS, not
+	 * only the last one: an intermediate layer can expose a receiver URL
+	 * that a later pass's own decoding goes on to hide again.
+	 *
+	 * @param string $run One run of text (no whitespace, quote or angle bracket).
+	 * @return array<int,string>|null 1–(MAX_DECODE_PASSES+1) layers, `[ $run ]`
+	 *                     when nothing decodes — or null: still changing
+	 *                     past MAX_DECODE_PASSES layers plus the check pass,
+	 *                     an intermediate value longer than MAX_DECODE_GROWTH
+	 *                     × strlen( $run ), or a PCRE failure.
+	 */
+	public static function decode_layers( $run ) {
+		$run     = (string) $run;
+		$limit   = self::MAX_DECODE_GROWTH * strlen( $run );
+		$layers  = array( $run );
+		$current = $run;
+		for ( $pass = 0; $pass < self::MAX_DECODE_PASSES; ++$pass ) {
+			$next = self::decode_pass( $current );
+			if ( null === $next || strlen( $next ) > $limit ) {
+				return null;
+			}
+			if ( $next === $current ) {
+				return $layers; // a fixed point: nothing more to decode
+			}
+			$layers[] = $next;
+			$current  = $next;
+		}
+		// The check pass: a fifth layer is refused, never guessed at.
+		return self::decode_pass( $current ) === $current ? $layers : null;
+	}
+
+	/**
 	 * Decode $run up to MAX_DECODE_PASSES layers.
 	 *
 	 * @param string $run One run of text (no whitespace, quote or angle bracket).
@@ -133,21 +181,8 @@ class Aura_Worker_Redact_Decode {
 	 *                     past MAX_DECODE_GROWTH, or a PCRE failure.
 	 */
 	public static function decode_run( $run ) {
-		$run     = (string) $run;
-		$limit   = self::MAX_DECODE_GROWTH * strlen( $run );
-		$current = $run;
-		for ( $pass = 0; $pass < self::MAX_DECODE_PASSES; ++$pass ) {
-			$next = self::decode_pass( $current );
-			if ( null === $next || strlen( $next ) > $limit ) {
-				return null;
-			}
-			if ( $next === $current ) {
-				return $current; // a fixed point: nothing more to decode
-			}
-			$current = $next;
-		}
-		// The check pass: a fifth layer is refused, never guessed at.
-		return self::decode_pass( $current ) === $current ? $current : null;
+		$layers = self::decode_layers( $run );
+		return null === $layers ? null : $layers[ count( $layers ) - 1 ];
 	}
 
 	/**

@@ -252,4 +252,67 @@ final class RedactDecodeTest extends TestCase {
 		$this->assertSame( 4, Aura_Worker_Redact_Decode::MAX_DECODE_PASSES );
 		$this->assertSame( 3, Aura_Worker_Redact_Decode::MAX_DECODE_GROWTH );
 	}
+
+	/**
+	 * Fix round 1 (#113): an intermediate layer can expose a receiver URL
+	 * that a later pass's own decoding hides again — so decode_layers()
+	 * must hand back every layer, raw run first, for Task 2 to check.
+	 *
+	 * @return array<string,array{0:string,1:array<int,string>}> input, expected layers
+	 */
+	public static function layer_lists(): array {
+		return array(
+			'named refs over two passes, numeric only exposed at the end' => array(
+				'&amp;#65;hooks.zapier.com&amp;#x2f;hooks&amp;#x2f;catch&amp;#x2f;123&amp;#x2f;abcdef',
+				array(
+					'&amp;#65;hooks.zapier.com&amp;#x2f;hooks&amp;#x2f;catch&amp;#x2f;123&amp;#x2f;abcdef',
+					'&#65;hooks.zapier.com&#x2f;hooks&#x2f;catch&#x2f;123&#x2f;abcdef',
+					'Ahooks.zapier.com/hooks/catch/123/abcdef',
+				),
+			),
+			'raw run already plain-text matchable' => array(
+				'&#65;hooks.zapier.com/hooks/catch/123/abcdef',
+				array(
+					'&#65;hooks.zapier.com/hooks/catch/123/abcdef',
+					'Ahooks.zapier.com/hooks/catch/123/abcdef',
+				),
+			),
+			'percent-over-percent then a numeric reference' => array(
+				'%2526%252365%253Bhooks.zapier.com%252Fhooks%252Fcatch%252F123%252Fabcdef',
+				array(
+					'%2526%252365%253Bhooks.zapier.com%252Fhooks%252Fcatch%252F123%252Fabcdef',
+					'%26%2365%3Bhooks.zapier.com%2Fhooks%2Fcatch%2F123%2Fabcdef',
+					'&#65;hooks.zapier.com/hooks/catch/123/abcdef',
+					'Ahooks.zapier.com/hooks/catch/123/abcdef',
+				),
+			),
+			'no-op run'          => array( 'plain', array( 'plain' ) ),
+			'exactly four layers' => array(
+				'%2525252F',
+				array( '%2525252F', '%25252F', '%252F', '%2F', '/' ),
+			),
+		);
+	}
+
+	/** @dataProvider layer_lists */
+	public function test_decode_layers_returns_every_layer_the_raw_run_first( string $in, array $expected ): void {
+		$this->assertSame( $expected, Aura_Worker_Redact_Decode::decode_layers( $in ) );
+		// decode_run() stays the last layer, sharing the same loop.
+		$this->assertSame( end( $expected ), Aura_Worker_Redact_Decode::decode_run( $in ) );
+	}
+
+	public function test_decode_layers_refuses_a_fifth_layer_same_as_decode_run(): void {
+		$this->assertNull( Aura_Worker_Redact_Decode::decode_layers( '%252525252F' ) );
+		$this->assertNull( Aura_Worker_Redact_Decode::decode_run( '%252525252F' ) );
+	}
+
+	/**
+	 * Minor 2 (#113): JSON only defines lowercase `\u`, so RE_JSON_UNICODE
+	 * must not decode `\U`; the hex digits themselves stay case-insensitive.
+	 */
+	public function test_only_lowercase_u_starts_a_json_escape(): void {
+		$this->assertSame( '\\U0041', Aura_Worker_Redact_Decode::decode_run( '\\U0041' ) );
+		$this->assertSame( 'J', Aura_Worker_Redact_Decode::decode_run( '\\u004A' ) );
+		$this->assertSame( 'J', Aura_Worker_Redact_Decode::decode_run( '\\u004a' ) );
+	}
 }
