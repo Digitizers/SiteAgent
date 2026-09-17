@@ -344,13 +344,17 @@ out of every REST response an **agent** reads.
   skips any number after a special scheme, so `https:\host`, `https:/host` and
   `https:host` all count), or two or more slashes not preceded by a literal scheme
   colon (`:`/`%3a`) or another slash (protocol-relative: `//host`, `///host`) — and the
-  port EMPTY as well as digits (`RE_HOST_END_URL`'s `[0-9]*+`: `host:/path`,
-  `host:\path` name the host with no port, as a WHATWG parser reads it; `stage_2_patterns()`
-  keeps `RE_HOST_END`'s `[0-9]+`, so the plain-text, un-encoded form of this is a stage 1
-  miss, filed separately as #121 — Codex r4 on PR #120); (4) both mappings together.
+  port EMPTY as well as digits (`host:/path`, `host:\path` name the host with no port,
+  as a WHATWG parser reads it — Codex r4 on PR #120; as of 2.18.4, `RE_HOST_END` itself
+  accepts an empty port too — `[0-9]*+`, possessive, the first BEHAVIOURAL change to a
+  stage 1 constant since 2.18.1 (`RE_HEAD` was refactored value-identically in 2.18.2)
+  (#121) — so the plain-text, un-encoded form now reaches stage 1
+  directly, with no separate `RE_HOST_END_URL`; `url_patterns()` and
+  `stage_2_patterns()`, both built from `URL_PATTERNS`, inherit it too); (4) both
+  mappings together.
   Views 3–4 judge `url_patterns()`, a DIFFERENT pattern set from views 1–2's
-  `stage_2_patterns()` (required prefix, empty port allowed, vs. no left boundary, digit
-  port required), so they run even when a view's output is the SAME TEXT the layer
+  `stage_2_patterns()` (required prefix vs. no left boundary — both now accept an
+  empty port, #121), so they run even when a view's output is the SAME TEXT the layer
   already is — an unchanged `url_view()` reading still has to be judged against the
   other pattern set (Codex r5 on PR #120: `https://ｈooks.zapier.com:/hooks/…` — a
   mapped host, empty port, no backslash — was missed because the old code treated "same
