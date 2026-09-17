@@ -1020,12 +1020,7 @@ class Aura_Worker_Redact {
 					$layers = array(); // nothing decodes: the raw run is stage 1's own output
 				}
 				if ( null !== $originals ) {
-					$cut = preg_match( self::RE_CUT_AT_BACKSLASH, $run );
-					if ( false === $cut ) {
-						$failed = true;
-						return $run;
-					}
-					if ( 1 === $cut && $originals[ $index ] !== $run ) {
+					if ( isset( $originals[ $index ] ) && $originals[ $index ] !== $run ) {
 						$before = Aura_Worker_Redact_Decode::decode_layers( $originals[ $index ] );
 						if ( null === $before ) {
 							++$hits;
@@ -1072,13 +1067,21 @@ class Aura_Worker_Redact {
 	}
 
 	/**
-	 * The runs of the text before stage 1, one per run of $text — only when
-	 * stage 1 changed the text and left a placeholder cut at a backslash.
+	 * The ORIGINAL (pre-stage-1) run at every index where stage 1's output
+	 * holds a placeholder cut at a backslash (RE_CUT_AT_BACKSLASH) — only
+	 * those, so a field of millions of runs costs its own size, not an
+	 * array per run (#116). Two passes with the run regex both texts are
+	 * split by: the first records the cut indexes and counts the runs of
+	 * $text, the second keeps the original runs at those indexes and counts
+	 * again. The runs pair up one to one — a stage 1 match and its
+	 * placeholder hold no run delimiter — and a count mismatch fails the
+	 * field closed all the same.
 	 *
 	 * @param string $text     Stage 1's output.
 	 * @param string $original The text before stage 1.
-	 * @return string[]|null|false The runs; null when none are needed; false
-	 *                             on a PCRE failure or a count mismatch.
+	 * @return array<int,string>|null|false index => original run; null when
+	 *                                      none are needed; false on a PCRE
+	 *                                      failure or a count mismatch.
 	 */
 	private static function original_runs( $text, $original ) {
 		if ( $original === $text ) {
@@ -1088,12 +1091,45 @@ class Aura_Worker_Redact {
 		if ( 1 !== $cut ) {
 			return false === $cut ? false : null;
 		}
-		$before = preg_match_all( self::RE_RUN, $original, $m_before );
-		$after  = preg_match_all( self::RE_RUN, $text, $m_after );
-		if ( false === $before || false === $after || $before !== $after ) {
+		$cuts   = array();
+		$failed = false;
+		$index  = -1;
+		$after  = preg_replace_callback(
+			self::RE_RUN,
+			static function ( $m ) use ( &$cuts, &$failed, &$index ) {
+				++$index;
+				if ( ! $failed && false !== strpos( $m[0], self::PLACEHOLDER_MARK ) ) {
+					$is_cut = preg_match( self::RE_CUT_AT_BACKSLASH, $m[0] );
+					if ( false === $is_cut ) {
+						$failed = true;
+					} elseif ( 1 === $is_cut ) {
+						$cuts[ $index ] = '';
+					}
+				}
+				return $m[0];
+			},
+			$text
+		);
+		if ( null === $after || $failed ) {
 			return false;
 		}
-		return $m_before[0];
+		$after_count = $index + 1;
+		$index       = -1;
+		$before      = preg_replace_callback(
+			self::RE_RUN,
+			static function ( $m ) use ( &$cuts, &$index ) {
+				++$index;
+				if ( isset( $cuts[ $index ] ) ) {
+					$cuts[ $index ] = $m[0];
+				}
+				return $m[0];
+			},
+			$original
+		);
+		if ( null === $before || $index + 1 !== $after_count ) {
+			return false;
+		}
+		return $cuts;
 	}
 
 	/**
