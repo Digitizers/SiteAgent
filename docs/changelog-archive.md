@@ -16,6 +16,21 @@ the judgement call this file exists to avoid.
 
 Newest first, continuing exactly where `readme.txt`'s Changelog stops.
 
+= 2.10.3 =
+* Fix (security): **"Regenerate Token" revealed a new site token without ever
+  storing it.** The option was registered as a read-only setting, and the
+  callback enforcing that ran on every write — not only on the settings form —
+  so the handler's write was discarded while the one-time reveal still
+  appeared. Two consequences: an admin rotating a leaked token was told it was
+  revoked when the old token stayed valid, and a site disconnected from the
+  dashboard could not be reconnected, because no token the screen displayed
+  ever authenticated. The token is no longer registered as a setting (it is
+  display-only, so nothing submits it), and regeneration now stores the new
+  hash with a single compare-and-swap, out of reach of any option filter — a
+  token is revealed only when that one statement reports it wrote the row, and
+  a site whose row is missing or empty can be given its first token the same
+  way.
+
 = 2.10.2 =
 * Fix: a site moved from one Aura client to another while the old client's
   last push was still in flight could end up holding the old client's ruleset
