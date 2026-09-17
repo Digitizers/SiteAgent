@@ -225,6 +225,16 @@ class Aura_Worker_Redact {
 	const RE_CUT_AT_BACKSLASH = '/aura-redacted:v1:[a-z]++[.,;:!?]*+\\\\/';
 
 	/**
+	 * Regex: RE_CUT_AT_BACKSLASH where the backslash starts a real JSON
+	 * escape (`\uXXXX`, `\\`, `\/`) — the URL goes on for a JSON reader, so
+	 * the original run's RAW layer is checked too, not only its decoded
+	 * ones (fix round 3): a boundary reference before the host
+	 * (`&#65;hooks.zapier.com/…`) is decoded into a glued host in every
+	 * later layer.
+	 */
+	const RE_CUT_AT_JSON_ESCAPE = '/aura-redacted:v1:[a-z]++[.,;:!?]*+\\\\(?:u[0-9A-Fa-f]{4}|[\\\\\\/])/';
+
+	/**
 	 * Known receivers (spec §2.1): full-URL patterns anchored on the
 	 * registrable host, never a substring of a field name. A list of
 	 * `array( kind, regex )`, because two hosts share the `discord` kind.
@@ -995,9 +1005,16 @@ class Aura_Worker_Redact {
 							++$hits;
 							return self::PLACEHOLDER . 'field';
 						}
-						// Stage 1 already judged the original run as it is
-						// (layer 0) and replaced exactly what it matched there.
-						$layers = array_merge( $layers, array_slice( $before, 1 ) );
+						$escape = preg_match( self::RE_CUT_AT_JSON_ESCAPE, $run );
+						if ( false === $escape ) {
+							$failed = true;
+							return $run;
+						}
+						// A lone backslash ends the URL for every reader: stage 1
+						// already judged the original run as it is (layer 0) and
+						// replaced exactly what it matched there. A JSON escape
+						// does not end it, so layer 0 is judged again, whole.
+						$layers = array_merge( $layers, 1 === $escape ? $before : array_slice( $before, 1 ) );
 					}
 				}
 				foreach ( $layers as $layer ) {

@@ -269,6 +269,45 @@ final class RedactEncodedRunTest extends TestCase {
 		$this->assertGreaterThanOrEqual( 2, $n );
 	}
 
+	/**
+	 * A boundary reference before a scheme-less host, and a JSON escape in
+	 * the path (#113, fix round 3). Stage 1 matches from the host on and
+	 * stops at the escape (`&#65;aura-redacted:v1:zapierc…`); only
+	 * the original run's RAW layer has the host at a boundary (every
+	 * decoded layer glues `A` to it), so when the cut starts a real JSON
+	 * escape the raw original is checked too. The escape sits on the
+	 * secret's second letter, so stage 1 matches every receiver's raw run.
+	 *
+	 * @return array<string,array{0:string,1:string,2:string}> run, kind, secret
+	 */
+	public static function boundary_reference_json_cases(): array {
+		$cases = array();
+		foreach ( self::RECEIVERS as $rname => list( $host, $path, $kind, $secret ) ) {
+			$at      = strpos( $path, $secret );
+			$escaped = substr( $path, 0, $at + 1 ) . '\\u00' . bin2hex( $secret[1] ) . substr( $path, $at + 2 );
+			foreach ( array( '&#65;', '&#x41;', 'x&#65;' ) as $reference ) {
+				$cases[ "{$rname} / {$reference}" ] = array( "{$reference}{$host}/{$escaped}", $kind, $secret );
+			}
+		}
+		return $cases;
+	}
+
+	/** @dataProvider boundary_reference_json_cases */
+	public function test_a_boundary_reference_and_a_json_escape_are_redacted( string $run, string $kind, string $secret ): void {
+		$out = $this->text( $run, $n );
+		$this->assertSame( 'aura-redacted:v1:' . $kind, $out, $run );
+		$this->assertStringNotContainsString( substr( $secret, 2 ), $out );
+		$this->assertSame( 2, $n );
+	}
+
+	/** @dataProvider boundary_reference_json_cases */
+	public function test_a_boundary_reference_and_a_json_escape_are_redacted_inside_prose( string $run, string $kind, string $secret ): void {
+		$out = $this->text( "Hook: {$run}, then {$run}. End", $n );
+		$this->assertSame( "Hook: aura-redacted:v1:{$kind}, then aura-redacted:v1:{$kind}. End", $out );
+		$this->assertStringNotContainsString( substr( $secret, 2 ), $out );
+		$this->assertSame( 4, $n );
+	}
+
 	/** @return array<string,array{0:string}> */
 	public static function controls(): array {
 		return array(
