@@ -17,7 +17,7 @@
   </a>
   <img src="https://img.shields.io/badge/WordPress-6.2%E2%80%937.1-21759b?logo=wordpress" alt="WordPress" />
   <img src="https://img.shields.io/badge/PHP-7.4%2B-777bb4?logo=php" alt="PHP" />
-  <img src="https://img.shields.io/badge/Stable-2.18.0-green" alt="Stable" />
+  <img src="https://img.shields.io/badge/Stable-2.18.1-green" alt="Stable" />
 </p>
 
 ---
@@ -238,6 +238,15 @@ These plug straight into **Aura's Fleet MCP Gateway**: read tools run on demand,
 ---
 
 ## Changelog
+
+### 2.18.1
+
+- **Encoded/escaped receiver URLs are now redacted.** A Make, Zapier, Slack, Discord, IFTTT or Telegram hook URL whose `/`, `:` or `@` was percent-encoded or HTML-escaped — including a numeric character reference left without its trailing semicolon — used to reach an agent unredacted; it is now caught the same as the plain form.
+- **The redaction walk runs under a total node budget** (`MAX_WALK_NODES`), so a self-referencing payload can no longer run until the request times out; a snapshot payload that exhausts the budget is withheld whole (`payload: null, payload_redacted: true`) instead.
+- **The gateway's early placeholder/grant check now only fires for an admissible caller** — one the IP/Origin allowlist and token throttle would already admit — so a throttled or disallowed caller with the right token no longer gets a different response shape than one with the wrong token.
+- **A legacy plaintext token is migrated before an MCP-path grant is verified**, matching the redaction path.
+
+Ships Digitizers/SiteAgent#112.
 
 ### 2.18.0
 
