@@ -363,6 +363,65 @@ final class RedactEncodedSlashTest extends TestCase {
 		}
 	}
 
+	// --- Codex round 1 (PR #112): semicolonless `@` references ------------
+
+	/** @return array<string,array{0:string,1:string}> input, expected */
+	public static function unterminated_at_references(): array {
+		$cases = array();
+		$urls  = array(
+			'make'          => array( 'hook.eu2.make.com/secret', 'make' ),
+			'zapier'        => array( 'hooks.zapier.com/hooks/catch/1/SECRET', 'zapier' ),
+			'slack'         => array( 'hooks.slack.com/services/T/B/SECRET', 'slack' ),
+			'discord'       => array( 'discord.com/api/webhooks/1/SECRET', 'discord' ),
+			'canary'        => array( 'canary.discord.com/api/webhooks/1/SECRET', 'discord' ),
+			'telegram'      => array( 'api.telegram.org/bot1:AASECRET/x', 'telegram' ),
+			'ifttt'         => array( 'maker.ifttt.com/use/SECRET', 'ifttt' ),
+		);
+		foreach ( $urls as $name => $url ) {
+			foreach ( array( '&#64', '&#064', '&#0064', '&#64;' ) as $at ) {
+				$cases[ "{$name} {$at}" ] = array( "https://user{$at}{$url[0]}", 'aura-redacted:v1:' . $url[1] );
+			}
+			$cases[ "{$name} bare {$at}" ] = array( "user&#64{$url[0]}", 'user&#64aura-redacted:v1:' . $url[1] );
+			$cases[ "{$name} hex;" ]       = array( "https://user&#x40;{$url[0]}", 'aura-redacted:v1:' . $url[1] );
+		}
+		// Hex without `;` is decoded only when no hex digit follows: a host
+		// starting with a letter past `f`.
+		foreach ( array( 'make', 'zapier', 'slack', 'ifttt' ) as $name ) {
+			$cases[ "{$name} hex" ]        = array( "https://user&#x40{$urls[ $name ][0]}", 'aura-redacted:v1:' . $urls[ $name ][1] );
+			$cases[ "{$name} hex padded" ] = array( "https://user&#x040{$urls[ $name ][0]}", 'aura-redacted:v1:' . $urls[ $name ][1] );
+			$cases[ "{$name} hex bare" ]   = array( "user&#x40{$urls[ $name ][0]}", 'user&#x40aura-redacted:v1:' . $urls[ $name ][1] );
+		}
+		$cases['encoded scheme'] = array( 'https%3A%2F%2Fuser&#64hook.eu2.make.com%2Fsecret', 'aura-redacted:v1:make' );
+		return $cases;
+	}
+
+	/** @dataProvider unterminated_at_references */
+	public function test_an_unterminated_at_reference_ends_the_userinfo( string $in, string $expected ): void {
+		$this->assertSame( $expected, $this->text( $in, $n ), $in );
+		$this->assertSame( 1, $n );
+	}
+
+	/** @return array<string,array{0:string}> */
+	public static function unterminated_at_negatives(): array {
+		return array(
+			// `&#x40d…` is U+040D to HTML5, not `@` + `d…`: no receiver there.
+			'hex before discord'  => array( 'https://user&#x40discord.com/api/webhooks/1/SECRET' ),
+			'hex before canary'   => array( 'https://user&#x40canary.discord.com/api/webhooks/1/SECRET' ),
+			'hex before api'      => array( 'https://user&#x40api.telegram.org/bot1:AASECRET/x' ),
+			'bare hex before api' => array( 'user&#x40api.telegram.org/bot1:AASECRET/x' ),
+			'decimal 640'         => array( 'user&#640hooks.zapier.com/hooks/SECRET' ),
+			'decimal 6400 scheme' => array( 'https://user&#6400hooks.zapier.com/hooks/SECRET' ),
+			'decoy after at'      => array( 'https://hooks.zapier.com&#64evil.tld/hooks/catch/1/' ),
+			'hex decoy after at'  => array( 'https://hooks.zapier.com&#x40evil.tld/hooks/catch/1/' ),
+		);
+	}
+
+	/** @dataProvider unterminated_at_negatives */
+	public function test_unterminated_at_controls_stay_untouched( string $in ): void {
+		$this->assertSame( $in, $this->text( $in, $n ) );
+		$this->assertSame( 0, $n );
+	}
+
 	// --- carriers ---------------------------------------------------------
 
 	public function test_an_encoded_url_inside_elementor_data_is_redacted_and_the_json_round_trips(): void {

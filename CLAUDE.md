@@ -285,7 +285,8 @@ out of every REST response an **agent** reads.
   `%80`–`%FF`, … — never `%2D`, `%2E`, a digit or a letter) counts as a host boundary.
   A numeric reference to `/` may lack its `;` (`&#47`, `&#x2F` — the hex form only when
   no hex digit follows, as HTML5 decodes it), and such an unterminated `&#47`/`&#047`/
-  `&#x2F`/`&#x02F` before a host is a boundary too. The fast reject skips a string only
+  `&#x2F`/`&#x02F` before a host is a boundary too. The same holds for a numeric `@`
+  reference (`&#64`, `&#x40`) ending the userinfo or preceding a host. The fast reject skips a string only
   when it has no `/`, `%2f`, `&sol` or numeric `/` reference (a bare `&#8217;` does not
   defeat it). See Limits for what is not decoded; `SECRET_KEYS` — exact key
   names only (`webhooks`), each with its plugin/setting in a comment, never a

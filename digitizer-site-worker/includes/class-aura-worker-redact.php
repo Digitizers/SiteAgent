@@ -69,8 +69,17 @@ class Aura_Worker_Redact {
 	/** Regex: a colon — literal, percent-encoded (`%3A`) or an HTML character reference (`&#58;`, `&#x3A;`, `&colon;`) (#110). */
 	const RE_COLON = '(?::|%3a|&#0*58;|&#x0*3a;|&colon;)';
 
-	/** Regex: an encoded `@` (`%40`, `&#64;`, `&#x40;`, `&commat;`) (#110). */
-	const RE_ENC_AT = '(?:%40|&#0*64;|&#x0*40;|&commat;)';
+	/**
+	 * Regex: an encoded `@` (`%40`, `&#64;`, `&#x40;`, `&commat;`) (#110). A
+	 * numeric reference may lack its `;` exactly as a slash reference may
+	 * (RE_ENC_SLASH_REF): `&#64` when no digit follows, `&#x40` when no hex
+	 * digit follows — `&#x40discord` is U+040D to HTML5, not `@discord`
+	 * (PR #112 Codex r1).
+	 */
+	const RE_ENC_AT = '(?:%40|&' . self::RE_ENC_AT_REF . ')';
+
+	/** Regex (after `&`): the rest of an HTML reference to `@` — see RE_ENC_AT. */
+	const RE_ENC_AT_REF = '(?:#0*64(?:;|(?![0-9]))|#x0*40(?:;|(?![0-9a-f]))|commat;)';
 
 	/**
 	 * Regex: optional userinfo, up to its first `@` — literal or encoded
@@ -80,7 +89,7 @@ class Aura_Worker_Redact {
 	 * per-character group would cost PCRE's JIT a stack frame per character
 	 * and fail a long string closed.
 	 */
-	const RE_USERINFO = '(?:(?:[^\\s/\\\\@"\'<>%&]++|%(?!2f|40)|&(?!' . self::RE_ENC_SLASH_REF . '|#0*64;|#x0*40;|commat;))*+(?:@|' . self::RE_ENC_AT . '))?';
+	const RE_USERINFO = '(?:(?:[^\\s/\\\\@"\'<>%&]++|%(?!2f|40)|&(?!' . self::RE_ENC_SLASH_REF . '|' . self::RE_ENC_AT_REF . '))*+(?:@|' . self::RE_ENC_AT . '))?';
 
 	/** Regex: `//` (each slash as RE_SLASH), then optional userinfo — shared by the schemed and protocol-relative prefixes. */
 	const RE_DOUBLE_SLASH_USERINFO = self::RE_SLASH . self::RE_SLASH . self::RE_USERINFO;
@@ -97,12 +106,13 @@ class Aura_Worker_Redact {
 	 * the UTF-8 of a curly quote or a no-break space) is no hostname
 	 * character either (fix round 1, I1). A terminated HTML reference ends
 	 * in `;`, which the plain lookbehind accepts; an UNterminated reference
-	 * to `/` (`&#47`, `&#047`, `&#x2F`, `&#x02F` — deeper zero padding is not
-	 * recognised) is a boundary too, the hex form only when no hex digit
+	 * to `/` or `@` (`&#47`, `&#047`, `&#x2F`, `&#x02F`, `&#64`, `&#064`,
+	 * `&#x40`, `&#x040` — deeper zero padding is not recognised) is a
+	 * boundary too (`@`: PR #112 Codex r1), the hex form only when no hex digit
 	 * follows, as HTML5 decodes it (fix round 1, M1). Fixed-width top-level
 	 * alternatives, as PCRE requires in a lookbehind.
 	 */
-	const RE_PCT_BOUNDARY = '(?:(?<=%[01][0-9a-f]|%2[0-9a-cf]|%3[a-f]|%40|%5[b-f]|%60|%7[b-f]|%[89a-f][0-9a-f]|&#47|&#047)|(?<=&#x2f|&#x02f)(?![0-9a-f]))';
+	const RE_PCT_BOUNDARY = '(?:(?<=%[01][0-9a-f]|%2[0-9a-cf]|%3[a-f]|%40|%5[b-f]|%60|%7[b-f]|%[89a-f][0-9a-f]|&#47|&#047|&#64|&#064)|(?<=&#x2f|&#x02f|&#x40|&#x040)(?![0-9a-f]))';
 
 	/**
 	 * Regex: the URL's prefix — full scheme (`https://`), protocol-relative
