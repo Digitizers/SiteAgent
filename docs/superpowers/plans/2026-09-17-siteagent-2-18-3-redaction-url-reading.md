@@ -38,7 +38,7 @@
 - **D5 — the callback consults `$originals` by `isset( $originals[ $index ] )`**, not by re-matching `RE_CUT_AT_BACKSLASH` on the run: `original_runs()` already decided which indexes are cuts, with the same regex on the same runs.
 - **D6 — `receiver_kind()` takes the pattern list as its second argument.** Its fast reject (no `/` and no encoded slash → `''`) is unchanged and serves every view; `map()` never adds a slash and `url_view()` only ever adds one where a backslash stood.
 - **D7 — the memory ceiling is `4 × strlen( $field )`**, asserted on a ~5 MB field with ~2M runs and one cut, after `memory_reset_peak_usage()`. Expected peak: the field, stage 1's copy, `preg_replace_callback()`'s transient output copy and the cut runs, ≈ 3×. The old code peaked at ~19× (100 MB on 5.4 MB). If the measured growth lands above 4×, report the number as a concern — do not raise the ceiling.
-- **D8 — `RE_HEAD_SCHEMED` is `'~(?:https?' . RE_COLON . RE_SLASH . '*+' . RE_USERINFO . '|' . RE_DOUBLE_SLASH_USERINFO . ')'`.** `RE_SLASH` is already a `(?:…)` group, so `*+` applies to the whole slash alternative (literal, JSON-escaped or encoded). `RE_USERINFO` is an optional group, so `https:hooks.zapier.com/x` matches with no userinfo.
+- **D8 — `RE_HEAD_SCHEMED` is `'~(?:https?' . RE_COLON . RE_SLASH . '*+' . RE_USERINFO . '|(?<!:|%3a|/)' . RE_DOUBLE_SLASH_USERINFO . ')'`.** `RE_SLASH` is already a `(?:…)` group, so `*+` applies to the whole slash alternative (literal, JSON-escaped or encoded). `RE_USERINFO` is an optional group, so `https:hooks.zapier.com/x` matches with no userinfo. The protocol-relative `//` carries a lookbehind (Codex r2 on this plan): without it, `file://hooks.zapier.com\x` — `file://hooks.zapier.com/x` after `url_view()` — would match at its `//`, and stage 2 has no left boundary to stop it. `:` and `%3a` cover a plain and a percent-encoded scheme colon; `/` keeps a longer slash run (`////host`, from `\\\\host`) from matching at an inner position. An HTML-encoded colon (`file&#58;//…`) is not covered — a variable-length reference cannot sit in a lookbehind — and such an encoded run is redacted: the lookalike cost stage 2 already accepts (#113).
 - **D9 — the generator is not tested by PHPUnit.** It is a hand-run script (`php bin/generate-idna-map.php`), and `bin/` is outside the lint gate. What IS tested is its output: `RedactIdnaTest` pins the entry counts, the key/target shapes, `LEAD`, and fixed mappings, so a regeneration from a different table or a hand edit fails CI.
 - **D10 — `RedactUrlReadingTest`'s receivers table** reuses `RedactEncodedRunTest`'s nine rows (copied, not shared: test classes do not import from each other in this suite).
 
@@ -839,6 +839,10 @@ final class RedactUrlReadingTest extends TestCase {
 		$this->assertSame( 1, preg_match( $url[2][1], 'https:hooks.zapier.com/hooks/catch/1/x' ) );
 		$this->assertSame( 1, preg_match( $url[2][1], '//hooks.zapier.com/hooks/catch/1/x' ) );
 		$this->assertSame( 0, preg_match( $url[2][1], '/hooks.zapier.com/hooks/catch/1/x' ) );
+		$this->assertSame( 0, preg_match( $url[2][1], 'file://hooks.zapier.com/hooks/catch/1/x' ), 'another scheme\'s // is not protocol-relative' );
+		$this->assertSame( 0, preg_match( $url[2][1], 'file%3A//hooks.zapier.com/hooks/catch/1/x' ) );
+		$this->assertSame( 0, preg_match( $url[2][1], '////hooks.zapier.com/hooks/catch/1/x' ) );
+		$this->assertSame( 1, preg_match( $url[2][1], 'https:////hooks.zapier.com/hooks/catch/1/x' ) );
 	}
 }
 ```
@@ -865,8 +869,10 @@ After `RE_HEAD_UNBOUNDED` (`:178`):
 	 * host boundary, as RE_HEAD_UNBOUNDED. The `:` and the slashes may be
 	 * encoded, as in RE_URL_PREFIX. Used by url_patterns() only (#116).
 	 */
-	const RE_HEAD_SCHEMED = '~(?:https?' . self::RE_COLON . self::RE_SLASH . '*+' . self::RE_USERINFO . '|' . self::RE_DOUBLE_SLASH_USERINFO . ')';
+	const RE_HEAD_SCHEMED = '~(?:https?' . self::RE_COLON . self::RE_SLASH . '*+' . self::RE_USERINFO . '|(?<!:|%3a|/)' . self::RE_DOUBLE_SLASH_USERINFO . ')';
 ```
+
+(The lookbehind on the protocol-relative alternative: its `//` must not be the tail of another scheme's `://` — `file://hooks.zapier.com/x` after `url_view()` — nor of a longer slash run. Two fixed-length alternatives, as PCRE requires; `%3a` is matched case-insensitively by the pattern's `i` flag. Update the docblock's "or exactly `//`" sentence to say so.)
 
 After `$stage_2_patterns`:
 
