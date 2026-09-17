@@ -686,9 +686,11 @@ final class RedactEncodedRunTest extends TestCase {
 			$peak  = memory_get_peak_usage() - $before;
 			$this->assertStringStartsWith( 'aura-redacted:v1:zapier ', $out );
 			$this->assertSame( 2, $count );
+			// The 4x bound is for ONE cut; $cuts (original_runs()) grows with the
+			// number of cut runs, not with the field size on its own.
 			$this->assertLessThan( 4 * $size, $peak, sprintf( 'peak growth %d bytes on a %d-byte field', $peak, $size ) );
 		} finally {
-			ini_set( 'memory_limit', $old ); // phpcs:ignore WordPress.PHP.IniSet.Risky
+			ini_set( 'memory_limit', (string) $old ); // phpcs:ignore WordPress.PHP.IniSet.Risky
 		}
 	}
 

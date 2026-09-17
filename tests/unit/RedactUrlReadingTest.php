@@ -39,6 +39,9 @@ final class RedactUrlReadingTest extends TestCase {
 		return array(
 			'https://'       => static function ( $h, $p ) { return "https://{$h}\\{$p}"; },
 			'http://'        => static function ( $h, $p ) { return "http://{$h}\\{$p}"; },
+			'ftp://'         => static function ( $h, $p ) { return "ftp://{$h}\\{$p}"; },
+			'ws://'          => static function ( $h, $p ) { return "ws://{$h}\\{$p}"; },
+			'wss://'         => static function ( $h, $p ) { return "wss://{$h}\\{$p}"; },
 			'https:\\'       => static function ( $h, $p ) { return "https:\\{$h}\\{$p}"; },
 			'https:/'        => static function ( $h, $p ) { return "https:/{$h}\\{$p}"; },
 			'https: (none)'  => static function ( $h, $p ) { return "https:{$h}\\{$p}"; },
@@ -112,6 +115,7 @@ final class RedactUrlReadingTest extends TestCase {
 			'windows path'              => array( 'C:\\Users\\hooks.zapier.com\\x' ),
 			'file url'                  => array( 'file://hooks.zapier.com\\x' ),
 			'file:///host'              => array( 'file:///hooks.zapier.com\\x' ),
+			'gopher (not special)'      => array( 'gopher://hooks.zapier.com\\x' ),
 			'unc, other host'           => array( '\\\\server\\share\\hooks.zapier.com' ),
 			'one slash: a path'         => array( '/hooks.zapier.com\\x' ),
 			'prose with a backslash'    => array( 'either\\or, see hooks.zapier.com' ),
@@ -304,6 +308,11 @@ final class RedactUrlReadingTest extends TestCase {
 		$this->assertSame( 0, preg_match( $url[2][1], 'file:///hooks.zapier.com/hooks/catch/1/x' ), 'every two-slash start inside file:/// follows : or /' );
 		$this->assertSame( 1, preg_match( $url[2][1], '////hooks.zapier.com/hooks/catch/1/x' ) );
 		$this->assertSame( 1, preg_match( $url[2][1], 'https:////hooks.zapier.com/hooks/catch/1/x' ) );
+		$this->assertSame( 1, preg_match( $url[2][1], 'ftp://hooks.zapier.com/hooks/catch/1/x' ) );
+		// gopher is not a WHATWG special scheme, and the `//` right after
+		// `gopher:` is blocked by the protocol-relative branch's own lookbehind
+		// (a literal `:` precedes it).
+		$this->assertSame( 0, preg_match( $url[2][1], 'gopher://hooks.zapier.com/hooks/catch/1/x' ) );
 	}
 
 	/** @dataProvider url_view_cases */

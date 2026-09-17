@@ -179,18 +179,22 @@ class Aura_Worker_Redact {
 
 	/**
 	 * Regex: the prefix a WHATWG parser needs before it reads `\` as `/` —
-	 * a special scheme (`http:` / `https:`) followed by ANY number of
-	 * slashes, none included (the parser's "special authority ignore
-	 * slashes" state: `https:\host`, `https:/host`, `https:host` and
-	 * `https:///host` all name `host`), or two or more slashes not preceded
-	 * by a scheme colon or another slash (protocol-relative: `//host`, and
-	 * `///host` which a parser with a base also reads as an authority);
-	 * `file:///host` stays out because every two-slash start inside it
-	 * follows `:` or `/`. No left host boundary, as RE_HEAD_UNBOUNDED. The
-	 * `:` and the slashes may be encoded, as in RE_URL_PREFIX. Used by
-	 * url_patterns() only (#116).
+	 * a SPECIAL scheme (`http:`, `https:`, `ws:`, `wss:`, `ftp:` — and
+	 * `file:`, excluded on purpose: owner decision, see CLAUDE.md Limits)
+	 * followed by ANY number of slashes, none included (the parser's
+	 * "special authority ignore slashes" state: `https:\host`,
+	 * `https:/host`, `https:host` and `https:///host` all name `host`), or
+	 * two or more slashes not preceded by a scheme colon or another slash —
+	 * a LITERAL `:`, `%3a` or `/`: an encoded colon or encoded slashes
+	 * before the host are not seen (`file:%2f%2f%2fhost\x` is redacted:
+	 * the encoded-lookalike cost, see CLAUDE.md Limits) (protocol-relative:
+	 * `//host`, and `///host` which a parser with a base also reads as an
+	 * authority); `file:///host` stays out because
+	 * every two-slash start inside it follows `:` or `/`. No left host
+	 * boundary, as RE_HEAD_UNBOUNDED. The `:` and the slashes may be
+	 * encoded, as in RE_URL_PREFIX. Used by url_patterns() only (#116).
 	 */
-	const RE_HEAD_SCHEMED = '~(?:https?' . self::RE_COLON . self::RE_SLASH . '*+' . self::RE_USERINFO . '|(?<!:|%3a|/)' . self::RE_SLASH . self::RE_SLASH . self::RE_SLASH . '*+' . self::RE_USERINFO . ')';
+	const RE_HEAD_SCHEMED = '~(?:(?:https?|wss?|ftp)' . self::RE_COLON . self::RE_SLASH . '*+' . self::RE_USERINFO . '|(?<!:|%3a|/)' . self::RE_SLASH . self::RE_SLASH . self::RE_SLASH . '*+' . self::RE_USERINFO . ')';
 
 	/**
 	 * Regex: a backslash as url_view() reads it — literal, or encoded as
@@ -1162,6 +1166,7 @@ class Aura_Worker_Redact {
 		if ( null === $after || $failed ) {
 			return false;
 		}
+		unset( $after ); // a full copy of $text; freeing it before the second pass keeps the peak near 3× the field
 		$after_count = $index + 1;
 		$index       = -1;
 		$before      = preg_replace_callback(
@@ -1338,10 +1343,12 @@ class Aura_Worker_Redact {
 
 	/**
 	 * Does this field need stage 2 (#116)? When it holds an encoding
-	 * marker, as before; or a byte outside ASCII AND a slash of either
-	 * kind — a UTS-46-mapped host still needs its slash. Prose in Hebrew,
-	 * Arabic or emoji without a slash never splits. A PCRE failure in the
-	 * encoded-slash check counts as yes.
+	 * marker, as before; or a byte outside ASCII AND a literal slash — a
+	 * UTS-46-mapped host still needs its slash. An ENCODED slash never
+	 * reaches this check on its own: has_encoding_marker() already caught
+	 * the `%` or `&` it is written with, so the only new case here is a
+	 * literal `/`. Prose in Hebrew, Arabic or emoji without a slash never
+	 * splits.
 	 *
 	 * @param string $text Text.
 	 * @return bool
@@ -1353,7 +1360,7 @@ class Aura_Worker_Redact {
 		if ( ! self::has_high_byte( $text ) ) {
 			return false;
 		}
-		return false !== strpos( $text, '/' ) || false !== self::encoded_slash_state( $text );
+		return false !== strpos( $text, '/' );
 	}
 
 	/**

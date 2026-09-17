@@ -95,6 +95,14 @@ final class RedactIdnaTest extends TestCase {
 		$this->assertSame( implode( '', array_keys( $lead ) ), Aura_Worker_Redact_Idna::LEAD );
 	}
 
+	public function test_table_content_is_pinned(): void {
+		// test_table_shape() pins every COUNT and SHAPE, but a hand edit that
+		// keeps all of them (swaps two targets, say) still passes it: this pins
+		// the table's actual CONTENT. Regenerate from a new Unicode version? Update
+		// this pin along with the counts in test_table_shape() (see CLAUDE.md).
+		$this->assertSame( '4af4d08b3ce66ef5d0c7d97c6444b5c69b7239a4e336ecd6f4c00f65970ac3dc', hash( 'sha256', serialize( Aura_Worker_Redact_Idna::MAP ) ) );
+	}
+
 	public function test_hebrew_and_arabic_lead_bytes_are_not_in_lead(): void {
 		foreach ( array( "\xD6", "\xD7", "\xD8", "\xD9", "\xDA", "\xDB" ) as $byte ) {
 			$this->assertFalse( strpos( Aura_Worker_Redact_Idna::LEAD, $byte ), bin2hex( $byte ) );

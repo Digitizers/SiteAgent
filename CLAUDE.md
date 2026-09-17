@@ -75,7 +75,7 @@ To create an installable ZIP: `cd` to the repo root and run `zip -r digitizer-si
 | `Aura_Worker_Unbind` | `includes/class-aura-worker-unbind.php` | The site-unbind marker (`aura_worker_unbound`) + Phase B cleanup: `read`/`is_set`/`is_set_strict`, `write_under_claim`, `delete_under_claim`, `refusal`, `status_fragment`, `leftovers`, `cleanup`, `maybe_finish` |
 | `Aura_Worker_Redact` | `includes/class-aura-worker-redact.php` | Agent read redaction (2.18.0, #419): detectors (`redact`, `redact_text`), audience (`is_audience`), the `rest_pre_echo_response` read seam (`filter_echo`), the `rest_request_before_callbacks` placeholder guard and unredacted-grant check (`before_callbacks`, `grant_shape`), counters, `status_fragment` |
 | `Aura_Worker_Redact_Decode` | `includes/class-aura-worker-redact-decode.php` | Redaction stage 2 (2.18.2, #113), pure: `decode_layers()` (the raw run, then every pass whose result changed, up to `MAX_DECODE_PASSES` layers of HTML5 character references, `%XX` and JSON escapes — `\\`, `\/`, `\uXXXX`; null past the check pass or the `MAX_DECODE_GROWTH` bound), `decode_run()` (its last layer), `decode_pass()`, `html5_code_point()`, `utf8()` |
-| `Aura_Worker_Redact_Idna` | `includes/class-aura-worker-redact-idna.php` | Redaction stage 2 view 2 (2.18.3, #116), pure, GENERATED — `map()` applies Unicode 18.0.0's UTS-46 hostname mappings and deletions with one `strtr()`; regenerate with `php bin/generate-idna-map.php` (pinned URL + SHA-256), then run the tests |
+| `Aura_Worker_Redact_Idna` | `includes/class-aura-worker-redact-idna.php` | Redaction stage 2 view 2 (2.18.3, #116), pure, GENERATED — `map()` applies Unicode 18.0.0's UTS-46 hostname mappings and deletions with one `strtr()`; regenerate with `php bin/generate-idna-map.php` (pinned URL + SHA-256), then run the tests; to move to a new Unicode version, bump `IDNA_VERSION`, `IDNA_URL` and `IDNA_SHA256` in the script, regenerate, then update the three counts AND the MAP content pin in `RedactIdnaTest` |
 
 ### Initialization Flow
 
@@ -333,11 +333,12 @@ out of every REST response an **agent** reads.
   joiner, BOM and variation selectors — 1526 entries) against the same patterns; (3)
   the URL parser's reading (`url_view()`: every backslash — literal, `%5C`, `&#92;` /
   `&#x5C;` (leading zeros, `;` optional) or `&bsol;` — read as `/`) against
-  `url_patterns()` — the same patterns with the prefix REQUIRED: `https?:` + zero or
-  more slashes (a WHATWG parser skips any number after a special scheme, so
-  `https:\host`, `https:/host` and `https:host` all count), or two or more slashes not
-  preceded by a literal scheme colon (`:`/`%3a`) or another slash (protocol-relative:
-  `//host`, `///host`); (4) both mappings together. A run whose layers hold nothing to
+  `url_patterns()` — the same patterns with the prefix REQUIRED: a special scheme
+  (`http`, `https`, `ws`, `wss`, `ftp`) + `:` + zero or more slashes (a WHATWG parser
+  skips any number after a special scheme, so `https:\host`, `https:/host` and
+  `https:host` all count), or two or more slashes not preceded by a literal scheme
+  colon (`:`/`%3a`) or another slash (protocol-relative: `//host`, `///host`); (4)
+  both mappings together. A run whose layers hold nothing to
   decode gets views 2–4 of its raw layer but not view 1 (stage 1 judged that with its
   host boundary). Checking every layer and view matters because a later pass can hide
   again what an earlier one exposed. On the first view of the first layer that
@@ -440,7 +441,7 @@ out of every REST response an **agent** reads.
   - stage 2's patterns drop the left host boundary (owner decision, 2.18.2, #113): an
     encoded run whose decoded or raw form merely LOOKS like a receiver host
     (`myhooks.zapier.com%2Fx`) is redacted too, even though its plain-text twin (no `%`,
-    `&` or `\`) is not — stage 1 is unchanged;
+    `&`, `\` and no byte ≥ 0x80) is not — stage 1 is unchanged;
   - a URL inside a run still ends at a terminator exactly as it does in plain text —
     whitespace, `"`, `'`, `<`, `>`, an HTML-encoded quote or angle bracket with its
     `;` (`&quot;`, `&#34;`, `&apos;`, … — RE_ENTITY, stage 1's own stop, unchanged),
@@ -449,17 +450,21 @@ out of every REST response an **agent** reads.
     stage 2 then re-reads the run the way a URL parser does whenever the URL carries
     a scheme or `//`, see the views above), and a literal `)`, `]` or `}` — so text
     after any of these, inside the same run, is not redacted (2.18.2, #113);
-  - a backslash after a BARE host — no `https:`, `http:` or `//` — is not a path
-    separator: `hooks.zapier.com\abc` and `hooks.zapier.com\nNext` are kept, as are
-    Windows paths, UNC paths whose host is not a receiver and `file:` URLs (owner
-    decision, 2.18.3, #116);
+  - a backslash after a BARE host — no `http:`, `https:`, `ws:`, `wss:`, `ftp:`
+    (WHATWG's special schemes; `file:` deliberately excluded) or `//` — is not a
+    path separator: `hooks.zapier.com\abc` and `hooks.zapier.com\nNext` are kept,
+    as are Windows paths, UNC paths whose host is not a receiver and `file:` URLs
+    — each only where the separator INTO the receiver host is that backslash;
+    `file://hooks.zapier.com/x` and `C:\Users\x\hooks.zapier.com/y` still have
+    their receiver redacted by stage 1 (owner decision, 2.18.3, #116);
   - the protocol-relative lookbehind (`url_patterns()`, view 3) sees a literal `:`,
     `%3a` or `/` only, so an ENCODED scheme colon or encoded slashes before a
     receiver host (`file&#58;//hooks.zapier.com\x`, `file%253A//hooks.zapier.com\x`,
     `file:%2f%2f%2fhooks.zapier.com\x`) are redacted — over-redaction of an encoded
     lookalike, the same accepted cost as the missing left boundary (#113), never a
     leak; a literal, un-encoded `file://hooks.zapier.com\x` stays out, since the
-    lookbehind is satisfied by the literal `:` right there (2.18.3, #116);
+    NEGATIVE lookbehind `(?<!:|%3a|/)` sees the literal `:` and refuses the
+    match (2.18.3, #116);
   - UTS-46 is applied as a character map only (2.18.3, #116): NFC normalisation is
     not (a base letter plus a combining mark stays two code points — a different
     host, nothing leaks), `deviation` code points (`ß`, `ς`, U+200C, U+200D) are
