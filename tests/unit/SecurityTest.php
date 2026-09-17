@@ -151,6 +151,44 @@ final class SecurityTest extends TestCase {
 		$this->assertSame( 429, $result->get_error_data()['status'] );
 	}
 
+	// --- caller_admissible_readonly (#110) --------------------------------------
+
+	public function test_admissible_readonly_admits_a_default_caller(): void {
+		$this->assertTrue( Aura_Worker_Security::caller_admissible_readonly( $this->request_with_token( 'x' ) ) );
+	}
+
+	public function test_admissible_readonly_refuses_a_throttled_caller_and_writes_nothing(): void {
+		$key = 'aura_worker_tokfail_' . md5( $_SERVER['REMOTE_ADDR'] );
+		set_transient( $key, Aura_Worker_Security::MAX_TOKEN_FAILURES - 1, 900 );
+		$this->assertTrue( Aura_Worker_Security::caller_admissible_readonly( $this->request_with_token( 'wrong' ) ) );
+		$this->assertSame( Aura_Worker_Security::MAX_TOKEN_FAILURES - 1, (int) get_transient( $key ), 'no failure recorded' );
+
+		set_transient( $key, Aura_Worker_Security::MAX_TOKEN_FAILURES, 900 );
+		$this->assertFalse( Aura_Worker_Security::caller_admissible_readonly( $this->request_with_token( 'wrong' ) ) );
+		$this->assertSame( Aura_Worker_Security::MAX_TOKEN_FAILURES, (int) get_transient( $key ) );
+	}
+
+	public function test_admissible_readonly_applies_both_allowlists(): void {
+		update_option( 'aura_worker_allowed_ips', '198.51.100.7' );
+		$this->assertFalse( Aura_Worker_Security::caller_admissible_readonly( $this->request_with_token( 'x' ) ) );
+		update_option( 'aura_worker_allowed_ips', $_SERVER['REMOTE_ADDR'] );
+		$this->assertTrue( Aura_Worker_Security::caller_admissible_readonly( $this->request_with_token( 'x' ) ) );
+
+		update_option( 'aura_worker_allowed_domains', 'my-aura.app' );
+		$req = $this->request_with_token( 'x' );
+		$req->set_header( 'Origin', 'https://evil.example' );
+		$this->assertFalse( Aura_Worker_Security::caller_admissible_readonly( $req ) );
+		$req->set_header( 'Origin', 'https://my-aura.app' );
+		$this->assertTrue( Aura_Worker_Security::caller_admissible_readonly( $req ) );
+	}
+
+	public function test_admissible_readonly_never_migrates_a_legacy_token(): void {
+		update_option( 'aura_worker_site_token', 'legacy-plaintext-token' );
+		Aura_Worker_Security::caller_admissible_readonly( $this->request_with_token( 'legacy-plaintext-token' ) );
+		$this->assertSame( 'legacy-plaintext-token', get_option( 'aura_worker_site_token' ) );
+		$this->assertNull( Aura_Worker_Security::authenticated_token_hash() );
+	}
+
 	public function test_legacy_raw_token_migrates_to_hash_on_success(): void {
 		$raw = 'legacy-plaintext-token';
 		update_option( 'aura_worker_site_token', $raw ); // stored raw (pre-hash era).

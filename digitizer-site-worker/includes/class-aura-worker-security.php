@@ -398,6 +398,33 @@ class Aura_Worker_Security {
 	}
 
 	/**
+	 * Would validate_request() get past its admission layers for this caller?
+	 * The IP allowlist, the Origin/Referer allowlist and the token-failure
+	 * throttle — read only: no transient written, no failure recorded, no
+	 * legacy-token migration, no captured auth, no current user.
+	 *
+	 * For a filter that runs BEFORE the permission callback and would act on
+	 * a token holder (Aura_Worker_Redact on the gateway execute row): with
+	 * token_matches() it must not act for a caller the permission callback
+	 * would still refuse (SiteAgent #110). What validate_request() and the
+	 * route check after these layers — the run-as administrator, the unbind
+	 * marker, the route's capability — is left out: the grant check answers
+	 * an unbound site itself (403 aura_site_unbound), and the run-as user is
+	 * the connecting administrator, who holds every capability a route asks.
+	 *
+	 * @since 2.18.1
+	 *
+	 * @param WP_REST_Request $request The incoming request.
+	 * @return bool
+	 */
+	public static function caller_admissible_readonly( $request ) {
+		$security = new self();
+		return true === $security->check_ip_whitelist()
+			&& true === $security->check_domain_whitelist( $request )
+			&& true === $security->check_token_throttle();
+	}
+
+	/**
 	 * Validate an incoming REST API request.
 	 *
 	 * @param WP_REST_Request $request The incoming request.

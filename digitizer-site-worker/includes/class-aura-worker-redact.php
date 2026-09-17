@@ -321,10 +321,11 @@ class Aura_Worker_Redact {
 		// The gateway row is in the audience whoever calls it, and this filter
 		// runs before its permission callback checks X-Aura-Token. So nothing
 		// here — no 409, no counter, no nonce — acts for a caller that does not
-		// hold the site token: the permission callback answers it (final
-		// review, #419). A pure comparison: no throttle, no captured auth, no
-		// current user.
-		if ( self::is_gateway_execute_route( (string) $request->get_route() ) && ! self::carries_site_token( $request ) ) {
+		// hold the site token (final review, #419), nor for a token holder the
+		// permission callback would still refuse — throttled, or outside the
+		// IP or Origin allowlist (#110): the permission callback answers them.
+		// Read-only checks: no throttle write, no captured auth, no current user.
+		if ( self::is_gateway_execute_route( (string) $request->get_route() ) && ! self::admissible_token_holder( $request ) ) {
 			return $response;
 		}
 		$refused = self::refuse_placeholder_write( $request );
@@ -336,17 +337,20 @@ class Aura_Worker_Redact {
 	}
 
 	/**
-	 * Does the request carry the site token? Aura_Worker_Security's own
-	 * comparison, without any of check_aura_token()'s side effects.
+	 * Does the request carry the site token, from a caller the gateway's
+	 * permission callback would admit (IP and Origin allowlists, token
+	 * throttle)? Aura_Worker_Security's own checks, without any of
+	 * validate_request()'s side effects (#110).
 	 *
 	 * @param WP_REST_Request $request Request.
 	 * @return bool
 	 */
-	private static function carries_site_token( $request ) {
+	private static function admissible_token_holder( $request ) {
 		if ( ! method_exists( $request, 'get_header' ) || ! class_exists( 'Aura_Worker_Security' ) ) {
 			return false;
 		}
-		return Aura_Worker_Security::token_matches( (string) $request->get_header( 'X-Aura-Token' ) );
+		return Aura_Worker_Security::token_matches( (string) $request->get_header( 'X-Aura-Token' ) )
+			&& Aura_Worker_Security::caller_admissible_readonly( $request );
 	}
 
 	/**
