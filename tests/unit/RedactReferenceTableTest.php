@@ -9,7 +9,10 @@
  * Table-driven: {character} × {context} × {form} × {receiver}. The
  * expectation is derived from the character after the reference, so a
  * host or path that starts with a hex letter (`discord`, `canary`,
- * `api.telegram`, `abc…`) is a control for the semicolonless hex form.
+ * `api.telegram`, `abc…`) is a control for the semicolonless hex form —
+ * except where the reference stands before the host: there the raw run
+ * still holds the host, and stage 2 needs no left host boundary (#113, fix
+ * round 4), so the whole run is replaced.
  *
  * Named references: HTML5 decodes only its legacy set without `;`
  * (`amp`, `lt`, `gt`, `quot`, `nbsp`, …). `sol`, `colon` and `commat` are
@@ -104,7 +107,10 @@ final class RedactReferenceTableTest extends TestCase {
 
 					foreach ( $contexts as $cname => list( $in, $next ) ) {
 						if ( ! self::decodes( $ref, $is_hex, $next ) ) {
-							$expected = $in; // HTML5 reads another character here: no receiver URL
+							// HTML5 reads another character here: no receiver URL at the
+							// host end or the port. Before the host, the encoded run's
+							// raw layer holds the host, unbounded (#113, fix round 4).
+							$expected = in_array( $cname, array( 'scheme', 'userinfo', 'boundary' ), true ) ? $placeholder : $in;
 						} elseif ( 'boundary' === $cname ) {
 							$expected = "x{$ref}{$placeholder}";
 						} else {
@@ -136,19 +142,44 @@ final class RedactReferenceTableTest extends TestCase {
 			// A longer number is another character.
 			'decimal 470'       => array( 'https://hooks.zapier.com&#470hooks/SECRET' ),
 			'decimal 580 port'  => array( 'https://hooks.zapier.com&#580/hooks/SECRET' ),
-			'decimal 640'       => array( 'https://user&#640hooks.zapier.com/hooks/SECRET' ),
 			'hex 3aa token'     => array( 'https://api.telegram.org/bot1&#x3AAAsecret/sendMessage' ),
 			// Not a receiver, in any form.
 			'n8n all forms'     => array( 'https&#58&#47&#x2Fn8n.example.com&#47webhook&#X2F;abc' ),
-			'prefixed host'     => array( 'x&#47myhooks.zapier.com/hooks/SECRET' ),
+		);
+	}
+
+	/**
+	 * Kept only by the left host boundary; stage 2 needs none in an encoded
+	 * run (#113, fix round 4).
+	 *
+	 * @return array<string,array{0:string}>
+	 */
+	public static function left_boundary_flips(): array {
+		return array(
+			'prefixed host'      => array( 'x&#47myhooks.zapier.com/hooks/SECRET' ),
 			'dot is no boundary' => array( 'x&#46hooks.zapier.com/hooks/SECRET' ),
 		);
+	}
+
+	/** @dataProvider left_boundary_flips */
+	public function test_encoded_runs_kept_only_by_the_left_boundary_are_redacted( string $in ): void {
+		$n = 0;
+		$this->assertSame( 'aura-redacted:v1:zapier', Aura_Worker_Redact::redact_text( $in, $n ) );
+		$this->assertSame( 1, $n );
 	}
 
 	public function test_a_semicolonless_named_colon_is_not_a_scheme(): void {
 		// `https&colon//…` is text, then a protocol-relative URL: only that is replaced.
 		$n = 0;
 		$this->assertSame( 'https&colon//aura-redacted:v1:zapier', Aura_Worker_Redact::redact_text( 'https&colon//hooks.zapier.com/hooks/SECRET', $n ) );
+		$this->assertSame( 1, $n );
+	}
+
+	public function test_a_non_ascii_reference_before_a_host_is_a_boundary(): void {
+		// #113: `&#640` is U+0280, not a hostname character, so the host
+		// after it is at a boundary, as in plain text (was a control).
+		$n = 0;
+		$this->assertSame( 'aura-redacted:v1:zapier', Aura_Worker_Redact::redact_text( 'https://user&#640hooks.zapier.com/hooks/SECRET', $n ) );
 		$this->assertSame( 1, $n );
 	}
 

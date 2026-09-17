@@ -46,6 +46,7 @@ digitizer-site-worker/                                      # Repo root (develop
         ├── class-aura-worker-magic-link.php # Short-lived one-time admin login links
         ├── class-aura-worker-mcp.php        # MCP server + tool registration
         ├── class-aura-worker-redact.php     # Agent read redaction + placeholder write guard (2.18.0)
+        ├── class-aura-worker-redact-decode.php # Redaction stage 2: decode a run before matching (2.18.2)
         ├── class-aura-worker-tools.php      # MCP tool base + registry
         └── tools/                           # Individual MCP tools (site-context, update-plugin-safely, ...)
 ```
@@ -72,6 +73,7 @@ To create an installable ZIP: `cd` to the repo root and run `zip -r digitizer-si
 | `Aura_Worker_Tools` | `includes/class-aura-worker-tools.php` | MCP tool base class (`Aura_Tool_Base`) + registry; individual tools live in `includes/tools/` |
 | `Aura_Worker_Unbind` | `includes/class-aura-worker-unbind.php` | The site-unbind marker (`aura_worker_unbound`) + Phase B cleanup: `read`/`is_set`/`is_set_strict`, `write_under_claim`, `delete_under_claim`, `refusal`, `status_fragment`, `leftovers`, `cleanup`, `maybe_finish` |
 | `Aura_Worker_Redact` | `includes/class-aura-worker-redact.php` | Agent read redaction (2.18.0, #419): detectors (`redact`, `redact_text`), audience (`is_audience`), the `rest_pre_echo_response` read seam (`filter_echo`), the `rest_request_before_callbacks` placeholder guard and unredacted-grant check (`before_callbacks`, `grant_shape`), counters, `status_fragment` |
+| `Aura_Worker_Redact_Decode` | `includes/class-aura-worker-redact-decode.php` | Redaction stage 2 (2.18.2, #113), pure: `decode_layers()` (the raw run, then every pass whose result changed, up to `MAX_DECODE_PASSES` layers of HTML5 character references, `%XX` and JSON escapes — `\\`, `\/`, `\uXXXX`; null past the check pass or the `MAX_DECODE_GROWTH` bound), `decode_run()` (its last layer), `decode_pass()`, `html5_code_point()`, `utf8()` |
 
 ### Initialization Flow
 
@@ -292,7 +294,7 @@ out of every REST response an **agent** reads.
   Named references need their `;` (`&sol;`, `&colon;`, `&commat;` are not in HTML5's
   legacy no-semicolon set). The fast reject skips a string only
   when it has no `/`, `%2f`, `&sol` or numeric `/` reference (a bare `&#8217;` does not
-  defeat it). See Limits for what is not decoded; `SECRET_KEYS` — exact key
+  defeat it) — that is stage 1's reject only: stage 2 (below) still runs. `SECRET_KEYS` — exact key
   names only (`webhooks`), each with its plugin/setting in a comment, never a
   substring match. Carriers decoded: `_elementor_data`/`_elementor_page_settings`
   strings (and a snapshot capture's `{ existed, value }` entry under those keys), the
@@ -300,6 +302,58 @@ out of every REST response an **agent** reads.
   base64 `payload` (`unserialize( …, allowed_classes => false )`; unreadable → `payload:
   null, payload_redacted: true`). At most two JSON decodes per path; the payload decode
   is not counted. A response with no match is returned as the same value.
+- **Stage 2 — decode, then match** (2.18.2, #113). `redact_text()` runs the patterns above
+  (stage 1, now the private `redact_urls()`, byte-for-byte unchanged), then
+  `redact_encoded_runs()`. A field with no `%`, `&` or `\` is returned as it is (field
+  fast path). Otherwise the field is split into runs (`RE_RUN`: a maximal stretch of
+  characters other than whitespace, `"`, `'`, `<`, `>`), and a run with none of those
+  three characters is kept as it is (run fast path) — the SAME test as the field's,
+  so a run already holding `aura-redacted:` is skipped only when it holds none of
+  `%`, `&` or `\` either: a literal marker never shields an encoded URL elsewhere in
+  the same run. A run that holds one is decoded with
+  `Aura_Worker_Redact_Decode::decode_layers()` (pure, no WordPress), which returns
+  every reading of the run a real consumer could land on — the raw run first, then
+  each pass whose result differed from the one before it, up to `MAX_DECODE_PASSES`
+  (4) layers. An unchanged run (nothing decodes) is kept — re-checking the raw text
+  stage 1 already judged would only repeat that match. Otherwise EVERY layer, the raw
+  one included, is checked against `stage_2_patterns()`: the same `URL_PATTERNS`
+  entries stage 1 uses, but with the LEFT host boundary dropped (owner decision, fix
+  round 4) — decoding a reference or an escape glued right before a host
+  (`&#65;hooks.slack.com/…`) glues a letter to the host in every decoded layer, so a
+  receiver host counts wherever it stands in a decoded or raw-encoded run; stage 1's
+  own (bounded) patterns are unchanged. Cost: an encoded run whose decoded or raw form
+  merely LOOKS like a receiver host (`myhooks.zapier.com%2Fx`) is redacted too, even
+  though its plain-text twin is not. Checking every layer matters because a later pass
+  can hide again what an earlier one exposed. On the first layer that matches, the
+  WHOLE (stage 1 output) run becomes `aura-redacted:v1:<kind>` plus the run's trailing
+  sentence punctuation (`trailing_punctuation()`). One decode pass runs, in this
+  order: HTML character references as HTML5 reads them in text — numeric (`&#N` /
+  `&#xH`, `;` optional, the longest digit run, any zero padding; 0, a surrogate or a
+  value above 0x10FFFF → U+FFFD; 0x80–0x9F through the Windows-1252 table; UTF-8 built
+  without mbstring), then named: `&name;` through `html_entity_decode( …, ENT_QUOTES |
+  ENT_HTML5, 'UTF-8' )`, else the longest of HTML5's 106 legacy names without `;`
+  (`LEGACY_NAMES`: `&amphooks`, `&notit;` → `¬it;`; `&sol` stays); percent
+  `%XX` only (`rawurldecode()`, `+` stays, an invalid escape stays); then, in one
+  left-to-right scan, JSON `\\` (an escaped backslash — JSON-in-JSON unwraps one level
+  per pass, so `\\u0073` is `s` after two passes), `\/`, and `\uXXXX` (lowercase `u`
+  only; a surrogate pair is one code point, a lone surrogate stays). Up to
+  `MAX_DECODE_PASSES` (4) passes, stopping at the first that changes nothing; a fifth,
+  check-only pass that would still change the run, or an intermediate value longer
+  than `MAX_DECODE_GROWTH` (3) × the run, makes `decode_layers()` return null — that
+  RUN (only) becomes `aura-redacted:v1:field`. A PCRE failure — in the run split, in a
+  stage 2 pattern, or in either cut check below — fails the WHOLE field closed, as in
+  stage 1. Stage 1 ends a URL at a bare backslash (`RE_TAIL`), so its placeholder can
+  stand right before a JSON escape that continues the URL for a JSON reader
+  (`…make\u0061bc…`); judged alone, that run holds no receiver. So when a stage 1
+  run's OUTPUT matches `RE_CUT_AT_BACKSLASH` (a placeholder, then only handed-back
+  punctuation, then a bare `\`), the layers of the ORIGINAL (pre-stage-1) run it came
+  from are checked too: its decoded layers always, and — when the backslash that
+  follows actually starts a real JSON escape (`RE_CUT_AT_JSON_ESCAPE`: `\uXXXX`, `\\`
+  or `\/`) — its raw layer as well, because a boundary reference glued before the host
+  is decoded into a glued host in every later layer, so only the raw layer still shows
+  a host boundary. The runs of the pre- and post-stage-1 text pair up one to one by
+  count; a mismatch, like any other PCRE failure here, fails the field closed. The
+  write guard (`holds_placeholder()`) does not decode.
 - **Placeholder** `aura-redacted:v1:<kind>` (`make|integromat|zapier|slack|discord|
   ifttt|telegram|field`) — one-way, no hash.
 - **Write guard** (`rest_request_before_callbacks`, priority 6, after the rules guard):
@@ -359,12 +413,33 @@ out of every REST response an **agent** reads.
     `payload_redacted`) when a step cannot complete;
   - re-serializing a rewritten snapshot payload loses PHP references, and an integer
     too large for PHP's int comes back from a decoded JSON carrier as a float;
-  - not decoded before matching (#110): double encoding (`%252F`, `&amp;#x2F;`),
-    encoded hostname or path LETTERS, DIGITS and DOTS — percent (`hook%2Eeu2…`) or HTML
-    (`&#104;ooks…`, `&period;`, `&#46;`) — JSON `\u002F` escapes in a string that is
-    never JSON-decoded; only the structural `/`, `:` and `@` are accepted encoded.
-    Closing that class fully needs a decode-then-match design (decode a copy, map
-    offsets back), not more alternatives in the patterns;
+  - more than `MAX_DECODE_PASSES` (4) layers of encoding turn that run into
+    `aura-redacted:v1:field`, whatever it holds (2.18.2, #113);
+  - stage 2 replaces a run whole, with no map from decoded offsets back to the
+    original: adjacent text in the same run (a `?redirect=` prefix, a parenthesis, or a
+    closing tag written encoded) is replaced with the URL, and a run that ends in a
+    reference's `;` (`…&#x31;`) keeps that `;` after the placeholder (2.18.2, #113);
+  - stage 2's patterns drop the left host boundary (owner decision, 2.18.2, #113): an
+    encoded run whose decoded or raw form merely LOOKS like a receiver host
+    (`myhooks.zapier.com%2Fx`) is redacted too, even though its plain-text twin (no `%`,
+    `&` or `\`) is not — stage 1 is unchanged;
+  - a URL inside a run still ends at a terminator exactly as it does in plain text —
+    whitespace, `"`, `'`, `<`, `>`, an HTML-encoded quote or angle bracket with its
+    `;` (`&quot;`, `&#34;`, `&apos;`, … — RE_ENTITY, stage 1's own stop, unchanged),
+    a bare backslash that does not start a JSON escape (so `\"`, `\n`, `\t` end it,
+    but `\uXXXX`, `\\` and `\/` do not — the plain-text/JSON reading only; a WHATWG
+    URL parser instead treats a bare `\` as `/` in an http(s) URL, so
+    `hooks.zapier.com\abc` is not matched here — a known limit, see below), and a
+    literal `)`, `]` or `}` — so text after any of these, inside the same run, is not
+    redacted (2.18.2, #113);
+  - WHATWG URL-parser readings this design does not follow (2.18.2, #113 except
+    where noted): a bare `\` or `%5C` used as a path separator
+    (`hooks.zapier.com\abc` / `hooks.zapier.com%5Cabc`) is not matched — see the
+    terminator note above; and hostname characters a URL parser normalises away under
+    UTS-46 (fullwidth Latin letters, the ideographic full stop U+3002, a zero-width
+    space, or a soft hyphen U+00AD / its reference `&shy;`) are not normalised by
+    either stage, so they can still split a host that would otherwise match (the soft
+    hyphen case is pre-existing, #110);
   - an HTML-encoded quote or angle bracket without `;` (`&#34`) does not end the URL
     tail — it over-redacts, never leaks;
   - once a snapshot payload exhausts the node budget, it is withheld whole
