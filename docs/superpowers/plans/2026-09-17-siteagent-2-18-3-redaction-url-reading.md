@@ -38,7 +38,7 @@
 - **D5 — the callback consults `$originals` by `isset( $originals[ $index ] )`**, not by re-matching `RE_CUT_AT_BACKSLASH` on the run: `original_runs()` already decided which indexes are cuts, with the same regex on the same runs.
 - **D6 — `receiver_kind()` takes the pattern list as its second argument.** Its fast reject (no `/` and no encoded slash → `''`) is unchanged and serves every view; `map()` never adds a slash and `url_view()` only ever adds one where a backslash stood.
 - **D7 — the memory ceiling is `4 × strlen( $field )`**, asserted on a ~5 MB field with ~2M runs and one cut, after `memory_reset_peak_usage()`. Expected peak: the field, stage 1's copy, `preg_replace_callback()`'s transient output copy and the cut runs, ≈ 3×. The old code peaked at ~19× (100 MB on 5.4 MB). If the measured growth lands above 4×, report the number as a concern — do not raise the ceiling.
-- **D8 — `RE_HEAD_SCHEMED` is `'~(?:https?' . RE_COLON . RE_SLASH . '*+' . RE_USERINFO . '|(?<!:|%3a|/)' . RE_DOUBLE_SLASH_USERINFO . ')'`.** `RE_SLASH` is already a `(?:…)` group, so `*+` applies to the whole slash alternative (literal, JSON-escaped or encoded). `RE_USERINFO` is an optional group, so `https:hooks.zapier.com/x` matches with no userinfo. The protocol-relative `//` carries a lookbehind (Codex r2 on this plan): without it, `file://hooks.zapier.com\x` — `file://hooks.zapier.com/x` after `url_view()` — would match at its `//`, and stage 2 has no left boundary to stop it. `:` and `%3a` cover a plain and a percent-encoded scheme colon; `/` keeps a longer slash run (`////host`, from `\\\\host`) from matching at an inner position. An HTML-encoded colon (`file&#58;//…`) is not covered — a variable-length reference cannot sit in a lookbehind — and such an encoded run is redacted: the lookalike cost stage 2 already accepts (#113).
+- **D8 — `RE_HEAD_SCHEMED` is `'~(?:https?' . RE_COLON . RE_SLASH . '*+' . RE_USERINFO . '|(?<!:|%3a|/)' . RE_DOUBLE_SLASH_USERINFO . ')'`.** `RE_SLASH` is already a `(?:…)` group, so `*+` applies to the whole slash alternative (literal, JSON-escaped or encoded). `RE_USERINFO` is an optional group, so `https:hooks.zapier.com/x` matches with no userinfo. The protocol-relative `//` carries a lookbehind (Codex r2 on this plan): without it, `file://hooks.zapier.com\x` — `file://hooks.zapier.com/x` after `url_view()` — would match at its `//`, and stage 2 has no left boundary to stop it. `:` and `%3a` cover a plain and a percent-encoded scheme colon; `/` keeps a longer slash run (`////host`, from `\\\\host`) from matching at an inner position. An ENCODED scheme colon is not covered — an HTML reference (`file&#58;//…`) is variable-length and cannot sit in a lookbehind, a JSON escape (`file\u003A//…`) becomes `file/u003A//…` under `url_view()`, and a doubly percent-encoded one (`file%253A//…`) is still `%253A` in the raw layer — so an encoded `file:` URL that names a receiver host in a run with a backslash IS redacted, through the raw layer's view 3. That is over-redaction of an encoded lookalike, never a leak: the same cost stage 2 already accepts for its missing left boundary (#113, owner decision), pinned by `test_an_encoded_scheme_colon_before_a_receiver_host_is_the_lookalike_cost()`. Chasing each encoding in a lookbehind is the per-encoding patching #113 replaced (Codex r3 on this plan).
 - **D9 — the generator is not tested by PHPUnit.** It is a hand-run script (`php bin/generate-idna-map.php`), and `bin/` is outside the lint gate. What IS tested is its output: `RedactIdnaTest` pins the entry counts, the key/target shapes, `LEAD`, and fixed mappings, so a regeneration from a different table or a hand edit fails CI.
 - **D10 — `RedactUrlReadingTest`'s receivers table** reuses `RedactEncodedRunTest`'s nine rows (copied, not shared: test classes do not import from each other in this suite).
 
@@ -791,6 +791,16 @@ final class RedactUrlReadingTest extends TestCase {
 		$this->assertSame( 'aura-redacted:v1:zapier', $this->text( "\u{FF4D}\u{FF59}hooks.zapier.com/x" ) );
 		// Its plain ASCII twin never enters stage 2 and is kept by stage 1's boundary.
 		$this->assertSame( 'myhooks.zapier.com/x', $this->text( 'myhooks.zapier.com/x' ) );
+	}
+
+	public function test_an_encoded_scheme_colon_before_a_receiver_host_is_the_lookalike_cost(): void {
+		// D8: the plain file: URL is kept (RE_HEAD_SCHEMED's lookbehind sees its
+		// colon); an ENCODED colon is not a colon in the raw layer's URL view, so
+		// the run is redacted — stage 2's accepted lookalike cost, not a leak.
+		$this->assertSame( 'file://hooks.zapier.com\\x', $this->text( 'file://hooks.zapier.com\\x' ) );
+		foreach ( array( 'file&#58;//hooks.zapier.com\\x', 'file\\u003A//hooks.zapier.com\\x', 'file%253A//hooks.zapier.com\\x' ) as $in ) {
+			$this->assertSame( 'aura-redacted:v1:zapier', $this->text( $in ), $in );
+		}
 	}
 
 	public function test_the_write_guard_is_unchanged(): void {
