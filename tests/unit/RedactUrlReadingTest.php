@@ -56,6 +56,10 @@ final class RedactUrlReadingTest extends TestCase {
 			'json \\\\'      => static function ( $h, $p ) { return "https://{$h}" . str_replace( '\\', '\\\\', "\\{$p}" ); },
 			'///'            => static function ( $h, $p ) { return "///{$h}\\{$p}"; },
 			'json \\/\\/\\/' => static function ( $h, $p ) { return '\\/\\/\\/' . $h . str_replace( '\\', '\\\\', "\\{$p}" ); },
+			'userinfo'              => static function ( $h, $p ) { return "https://user:pw@{$h}\\{$p}"; },
+			'userinfo, two @'       => static function ( $h, $p ) { return "https://a@b@{$h}\\{$p}"; },
+			'userinfo, three @, //' => static function ( $h, $p ) { return "//a@b@c@{$h}\\{$p}"; },
+			'userinfo, encoded @'   => static function ( $h, $p ) { return "https://a%40b@{$h}\\{$p}"; },
 		);
 	}
 
@@ -122,6 +126,7 @@ final class RedactUrlReadingTest extends TestCase {
 			'lookalike host'            => array( 'https://hooks.zapier.com.evil\\x' ),
 			'other host, receiver in path' => array( 'https://example.com\\hooks.zapier.com\\x' ),
 			'other host, mapped chars'  => array( "https://\u{FF45}xample.com/x" ),
+			'userinfo with a slash before the host' => array( 'https://a@b/hooks.zapier.com\\x' ),
 		);
 	}
 
@@ -313,6 +318,9 @@ final class RedactUrlReadingTest extends TestCase {
 		// `gopher:` is blocked by the protocol-relative branch's own lookbehind
 		// (a literal `:` precedes it).
 		$this->assertSame( 0, preg_match( $url[2][1], 'gopher://hooks.zapier.com/hooks/catch/1/x' ) );
+		// #116, Codex r1 on PR #120: userinfo reads to its LAST `@`, as a parser does.
+		$this->assertSame( 1, preg_match( $url[2][1], 'https://a@b@hooks.zapier.com/hooks/catch/1/x' ) );
+		$this->assertSame( 1, preg_match( $url[2][1], '//a@b@hooks.zapier.com/x' ) );
 	}
 
 	/** @dataProvider url_view_cases */

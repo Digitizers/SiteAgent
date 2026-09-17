@@ -125,6 +125,16 @@ class Aura_Worker_Redact {
 	 */
 	const RE_USERINFO = '(?:(?:[^\\s/\\\\@"\'<>%&]++|%(?!2f|40)|&(?!' . self::RE_ENC_SLASH_REF . '|' . self::RE_ENC_AT_REF . '))*+(?:@|' . self::RE_ENC_AT . '))?';
 
+	/**
+	 * Regex: userinfo as a WHATWG parser reads it — the LAST `@` before the
+	 * host is the delimiter, and any earlier `@` is part of the userinfo
+	 * (`a@b@host`). One or more RE_USERINFO groups, each ending in its own
+	 * `@` (or an encoded one), possessive: linear, and the host always
+	 * follows the final `@`. Used by RE_HEAD_SCHEMED only (#116, Codex r1
+	 * on PR #120); stage 1 and stage_2_patterns() keep RE_USERINFO.
+	 */
+	const RE_USERINFO_ANY_AT = '(?:(?:[^\\s/\\\\@"\'<>%&]++|%(?!2f|40)|&(?!' . self::RE_ENC_SLASH_REF . '|' . self::RE_ENC_AT_REF . '))*+(?:@|' . self::RE_ENC_AT . '))*+';
+
 	/** Regex: `//` (each slash as RE_SLASH), then optional userinfo — shared by the schemed and protocol-relative prefixes. */
 	const RE_DOUBLE_SLASH_USERINFO = self::RE_SLASH . self::RE_SLASH . self::RE_USERINFO;
 
@@ -192,9 +202,12 @@ class Aura_Worker_Redact {
 	 * authority); `file:///host` stays out because
 	 * every two-slash start inside it follows `:` or `/`. No left host
 	 * boundary, as RE_HEAD_UNBOUNDED. The `:` and the slashes may be
-	 * encoded, as in RE_URL_PREFIX. Used by url_patterns() only (#116).
+	 * encoded, as in RE_URL_PREFIX. Userinfo is RE_USERINFO_ANY_AT, not
+	 * RE_USERINFO: a WHATWG parser reads the LAST `@` before the host as
+	 * the delimiter, so `a@b@host` has to be read that way too (#116,
+	 * Codex r1 on PR #120). Used by url_patterns() only (#116).
 	 */
-	const RE_HEAD_SCHEMED = '~(?:(?:https?|wss?|ftp)' . self::RE_COLON . self::RE_SLASH . '*+' . self::RE_USERINFO . '|(?<!:|%3a|/)' . self::RE_SLASH . self::RE_SLASH . self::RE_SLASH . '*+' . self::RE_USERINFO . ')';
+	const RE_HEAD_SCHEMED = '~(?:(?:https?|wss?|ftp)' . self::RE_COLON . self::RE_SLASH . '*+' . self::RE_USERINFO_ANY_AT . '|(?<!:|%3a|/)' . self::RE_SLASH . self::RE_SLASH . self::RE_SLASH . '*+' . self::RE_USERINFO_ANY_AT . ')';
 
 	/**
 	 * Regex: a backslash as url_view() reads it — literal, or encoded as
