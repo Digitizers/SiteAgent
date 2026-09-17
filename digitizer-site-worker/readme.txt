@@ -256,7 +256,7 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 = 2.18.3 =
 * Security: redaction now reads a URL the way a browser's URL parser does. A backslash used as the path separator under http, https, ws, wss, ftp or a protocol-relative prefix (`https://hooks.zapier.com\hooks\catch\1/…`, also percent- or HTML-encoded) is redacted whole, including the part after the first backslash that earlier releases left in place.
 * Security: hostname characters a URL parser normalises away (fullwidth and mathematical letters, the ideographic full stop, zero-width and soft-hyphen characters — Unicode 18.0.0's IDNA mapping table) are mapped before matching, so `ｈooks.zapier.com` and `hooks&#x3002;zapier.com` are redacted like `hooks.zapier.com`.
-* A URL parser's userinfo (`a@b@host`, an encoded slash or backslash inside it) and an empty port (`host:/`) are read as the parser reads them.
+* A URL parser's userinfo (`a@b@host`, an encoded slash or backslash inside it) and an empty port (`host:/`) are read as the parser reads them in the backslash and encoded forms above; a plain `https://host:/path` with nothing encoded is still matched by the older rule that wants a port digit (tracked as #121).
 * Redacting a very large field with millions of words now takes about three times the field's size in memory instead of eighteen.
 * Kept as they are: a backslash after a bare host with no scheme, Windows and UNC paths, `file:` URLs.
 
