@@ -37,11 +37,112 @@ class Aura_Worker_Redact {
 	/** The placeholder, before its kind. */
 	const PLACEHOLDER = 'aura-redacted:v1:';
 
-	/** Regex: a slash, JSON-escaped any number of times (or not at all). */
-	const RE_SLASH = '(?:\\\\)*/';
+	/**
+	 * Regex: a slash written as an escape rather than a literal `/` (#110):
+	 * percent-encoded (`%2F`, `%2f` — a URL passed as a query parameter) or
+	 * an HTML character reference (`&#47;`, `&#x2F;`, `&sol;`, leading zeros
+	 * allowed). A numeric reference may lack its `;`, as HTML5 decodes it
+	 * then too — the decimal form when no digit follows, the hex form when
+	 * no hex digit follows (fix round 1). The pattern is case-insensitive.
+	 * Only ONE level of encoding:
+	 * a double-encoded slash (`%252F`, `&amp;#x2F;`) is out of scope, as is a
+	 * percent-encoded hostname character (`hook%2Eeu2…`), which no URL
+	 * encoder produces.
+	 */
+	const RE_ENC_SLASH = '(?:%2f|&' . self::RE_ENC_SLASH_REF . ')';
 
-	/** Regex: `//`, JSON-escaped any number of times, then optional userinfo — shared by the schemed and protocol-relative prefixes. */
-	const RE_DOUBLE_SLASH_USERINFO = '(?:\\\\)*/(?:\\\\)*/(?:[^\s/\\\\@"\'<>]+@)?';
+	/*
+	 * HTML5 numeric character references — ONE rule for every structural
+	 * character the receiver patterns accept encoded (`/`, `:`, `@`; PR #112
+	 * Codex r1/r2). `&#<decimal>` / `&#x<hex>` (`x` in either case: the
+	 * patterns are case-insensitive), any number of leading zeros, ended by
+	 * `;` — or, as HTML5 also decodes it, by nothing: a decimal reference
+	 * when no digit follows, a hex one when no hex digit follows
+	 * (`&#x40discord` is U+040D, not `@discord`). Each character's
+	 * RE_ENC_*_REF is built from these fragments and nothing else.
+	 *
+	 * Named references are recognised only with `;` (`&sol;`, `&colon;`,
+	 * `&commat;`): HTML5 decodes a name without `;` only for its legacy set
+	 * (`amp`, `lt`, `gt`, `quot`, `nbsp`, `copy`, …), and none of these
+	 * three is in it.
+	 */
+
+	/** Regex: a semicolonless decimal reference ends here — no digit follows. */
+	const RE_REF_DEC_OPEN_END = '(?![0-9])';
+
+	/** Regex: a semicolonless hex reference ends here — no hex digit follows. */
+	const RE_REF_HEX_OPEN_END = '(?![0-9a-f])';
+
+	/** Regex: the end of a decimal reference — `;`, or RE_REF_DEC_OPEN_END. */
+	const RE_REF_DEC_END = '(?:;|' . self::RE_REF_DEC_OPEN_END . ')';
+
+	/** Regex: the end of a hex reference — `;`, or RE_REF_HEX_OPEN_END. */
+	const RE_REF_HEX_END = '(?:;|' . self::RE_REF_HEX_OPEN_END . ')';
+
+	/** Regex (after `&`): a reference to `/` — see RE_ENC_SLASH. */
+	const RE_ENC_SLASH_REF = '(?:#0*47' . self::RE_REF_DEC_END . '|#x0*2f' . self::RE_REF_HEX_END . '|sol;)';
+
+	/** Regex (after `&`): a reference to `:` — see RE_COLON. */
+	const RE_ENC_COLON_REF = '(?:#0*58' . self::RE_REF_DEC_END . '|#x0*3a' . self::RE_REF_HEX_END . '|colon;)';
+
+	/**
+	 * Regex: an UNterminated reference to `/`, `:` or `@` — a host boundary
+	 * when a host follows (`x&#47hooks…` is `x/hooks…`). `\K` drops the
+	 * reference from the match, so it stays in the text; unlike a
+	 * lookbehind it allows any zero padding. A terminated reference needs
+	 * none of this: its `;` is a boundary already.
+	 */
+	const RE_REF_BOUNDARY = '&#(?:0*(?:47|58|64)' . self::RE_REF_DEC_OPEN_END . '|x0*(?:2f|3a|40)' . self::RE_REF_HEX_OPEN_END . ')\\K';
+
+	/**
+	 * Regex: one piece of a URL segment that never spans a slash, literal or
+	 * encoded — a possessive run of plain characters, or a single `%` / `&`
+	 * that does not start an encoded slash. Repeated possessively: no
+	 * backtracking, and one PCRE group iteration per run, not per character
+	 * (fix round 1, M2).
+	 */
+	const RE_SEGMENT_PIECE = '(?:[^\\s/\\\\"\'<>%&]++|%(?!2f)|&(?!' . self::RE_ENC_SLASH_REF . '))';
+
+	/** Regex: a slash — literal and JSON-escaped any number of times (or not at all), or encoded (RE_ENC_SLASH). */
+	const RE_SLASH = '(?:(?:\\\\)*/|' . self::RE_ENC_SLASH . ')';
+
+	/** Regex: a colon — literal, percent-encoded (`%3A`) or an HTML character reference (RE_ENC_COLON_REF: `&#58`, `&#x3A`, `&colon;`) (#110). */
+	const RE_COLON = '(?::|%3a|&' . self::RE_ENC_COLON_REF . ')';
+
+	/** Regex: an encoded `@` (`%40`, or RE_ENC_AT_REF: `&#64`, `&#x40`, `&commat;`) (#110, PR #112 Codex r1). */
+	const RE_ENC_AT = '(?:%40|&' . self::RE_ENC_AT_REF . ')';
+
+	/** Regex (after `&`): the rest of an HTML reference to `@` — see RE_ENC_AT. */
+	const RE_ENC_AT_REF = '(?:#0*64' . self::RE_REF_DEC_END . '|#x0*40' . self::RE_REF_HEX_END . '|commat;)';
+
+	/**
+	 * Regex: optional userinfo, up to its first `@` — literal or encoded
+	 * (RE_ENC_AT). It never spans a slash, literal or encoded (#110). Runs
+	 * of plain characters are taken whole and possessively, and a `%` or `&`
+	 * only when it starts neither an encoded slash nor an encoded `@`: a
+	 * per-character group would cost PCRE's JIT a stack frame per character
+	 * and fail a long string closed.
+	 */
+	const RE_USERINFO = '(?:(?:[^\\s/\\\\@"\'<>%&]++|%(?!2f|40)|&(?!' . self::RE_ENC_SLASH_REF . '|' . self::RE_ENC_AT_REF . '))*+(?:@|' . self::RE_ENC_AT . '))?';
+
+	/** Regex: `//` (each slash as RE_SLASH), then optional userinfo — shared by the schemed and protocol-relative prefixes. */
+	const RE_DOUBLE_SLASH_USERINFO = self::RE_SLASH . self::RE_SLASH . self::RE_USERINFO;
+
+	/**
+	 * Regex: a host boundary made by a percent escape (#110). The character
+	 * before the host is then the escape's last hex digit, which the plain
+	 * lookbehind would take for a hostname character — so `%2Fhook…` and
+	 * `%40hook…` would never start a match. Each escape here decodes to a
+	 * character that is NOT a hostname character (everything but `-`, `.`,
+	 * digits and letters: `%2D`, `%2E`, `%30`–`%39`, `%41`–`%5A`, `%61`–`%7A`
+	 * are left out), so `evil%2Ehook.eu2.make.com` still is no boundary, as
+	 * `evil.hook.eu2.make.com` is not. A non-ASCII byte (`%80`–`%FF`, e.g.
+	 * the UTF-8 of a curly quote or a no-break space) is no hostname
+	 * character either (fix round 1, I1). HTML references are
+	 * RE_REF_BOUNDARY's. Fixed-width top-level alternatives, as PCRE
+	 * requires in a lookbehind.
+	 */
+	const RE_PCT_BOUNDARY = '(?<=%[01][0-9a-f]|%2[0-9a-cf]|%3[a-f]|%40|%5[b-f]|%60|%7[b-f]|%[89a-f][0-9a-f])';
 
 	/**
 	 * Regex: the URL's prefix — full scheme (`https://`), protocol-relative
@@ -52,18 +153,22 @@ class Aura_Worker_Redact {
 	 * hostname can contain, so `myhooks.zapier.com` and
 	 * `evilhooks.zapier.com` never match at the `hooks.zapier.com`
 	 * substring; only a genuine boundary (start of string, whitespace,
-	 * quote, punctuation, …) does.
+	 * quote, punctuation, …) does — or a percent escape of one
+	 * (RE_PCT_BOUNDARY, #110), or an unterminated reference to one
+	 * (RE_REF_BOUNDARY, PR #112 Codex r2). The scheme's `:` and both slashes may be
+	 * encoded (`https%3A%2F%2F`, `https:&#x2F;&#x2F;`).
 	 */
-	const RE_HEAD = '~(?<![A-Za-z0-9.-])(?:https?:' . self::RE_DOUBLE_SLASH_USERINFO . '|' . self::RE_DOUBLE_SLASH_USERINFO . ')?';
+	const RE_HEAD = '~(?:(?<![A-Za-z0-9.-])|' . self::RE_PCT_BOUNDARY . '|' . self::RE_REF_BOUNDARY . ')(?:https?' . self::RE_COLON . self::RE_DOUBLE_SLASH_USERINFO . '|' . self::RE_DOUBLE_SLASH_USERINFO . ')?';
 
 	/**
 	 * Regex: an optional trailing FQDN dot, an optional port, then the slash
 	 * that ends the host (fix round 1, Codex r1 P3: `hooks.zapier.com./...`
 	 * is the same host as `hooks.zapier.com/...`; the dot never lets a
 	 * lookalike host — `hooks.zapier.com.evil.tld` — through, since nothing
-	 * follows the single dot but the required port/slash).
+	 * follows the single dot but the required port/slash). The port's colon
+	 * and the slash may be encoded (#110): `hook.eu2.make.com%2Fabc`.
 	 */
-	const RE_HOST_END = '\.?(?::[0-9]+)?(?:\\\\)*/';
+	const RE_HOST_END = '\.?(?:' . self::RE_COLON . '[0-9]+)?' . self::RE_SLASH;
 
 	/**
 	 * Regex (after `&`): the name of an HTML-encoded quote or angle bracket —
@@ -80,6 +185,9 @@ class Aura_Worker_Redact {
 	 * there — while a bare `&` (a query-string separator, or `&amp;`) stays
 	 * in the URL (Codex r2 P2 on SiteAgent#109). Trailing sentence
 	 * punctuation is handed back by redact_text() (TRAILING_PUNCTUATION).
+	 * An encoded slash (`%2F`, `&#x2F;`, `&sol;` — RE_ENC_SLASH) is already
+	 * part of the tail: none of its characters stops it, and an `&` that
+	 * starts one is not RE_ENTITY (#110).
 	 * Possessive: no backtracking.
 	 */
 	const RE_TAIL = '(?:[^\s"\'<>\\\\)\]}&]++|(?:\\\\)++/|&(?!' . self::RE_ENTITY . '))*+~i';
@@ -88,8 +196,18 @@ class Aura_Worker_Redact {
 	 * Punctuation that ends a sentence rather than a URL: stripped from the
 	 * end of a match and kept in the text (`…/abc.` → `…:make.`). Webhook
 	 * secrets are `[A-Za-z0-9_-]`, so a secret is always replaced whole.
+	 * The `;` that closes an encoded slash (`&#x2F;`, `&#x002F;`, `&#47;`,
+	 * `&sol;`) is part of the URL, not punctuation (#110): see
+	 * ENC_SLASH_END.
 	 */
 	const TRAILING_PUNCTUATION = '/[.,;:!?]+$/';
+
+	/**
+	 * A match that ends in an encoded slash's reference, then (captured) any
+	 * sentence punctuation after it — only that is handed back (fix round 1,
+	 * M3: leading zeros included).
+	 */
+	const ENC_SLASH_END = '/(?:&#0*47|&#x0*2f|&sol);([.,;:!?]*)$/i';
 
 	/**
 	 * Known receivers (spec §2.1): full-URL patterns anchored on the
@@ -110,12 +228,12 @@ class Aura_Worker_Redact {
 		array( 'discord', self::RE_HEAD . '(?:(?:ptb|canary)\.)?discord\.com' . self::RE_HOST_END . 'api' . self::RE_SLASH . '(?:v[0-9]+' . self::RE_SLASH . ')?webhooks' . self::RE_SLASH . self::RE_TAIL ),
 		array( 'discord', self::RE_HEAD . '(?:(?:ptb|canary)\.)?discordapp\.com' . self::RE_HOST_END . 'api' . self::RE_SLASH . '(?:v[0-9]+' . self::RE_SLASH . ')?webhooks' . self::RE_SLASH . self::RE_TAIL ),
 		// IFTTT Webhooks: `/use/<key>`, `/trigger/<event>/with/key/<key>` and `/trigger/<event>/json/with/key/<key>`.
-		array( 'ifttt', self::RE_HEAD . 'maker\.ifttt\.com' . self::RE_HOST_END . '(?:use' . self::RE_SLASH . '|trigger' . self::RE_SLASH . '[^\s/\\\\"\'<>]+' . self::RE_SLASH . '(?:json' . self::RE_SLASH . ')?with' . self::RE_SLASH . 'key' . self::RE_SLASH . ')' . self::RE_TAIL ),
+		array( 'ifttt', self::RE_HEAD . 'maker\.ifttt\.com' . self::RE_HOST_END . '(?:use' . self::RE_SLASH . '|trigger' . self::RE_SLASH . self::RE_SEGMENT_PIECE . '++' . self::RE_SLASH . '(?:json' . self::RE_SLASH . ')?with' . self::RE_SLASH . 'key' . self::RE_SLASH . ')' . self::RE_TAIL ),
 		// Telegram: Bot API `/bot<token>/<method>` and file downloads `/file/bot<token>/<path>`.
 		// The token itself ends at `/`, `?`, `#` or the end of the URL — the
 		// slash is only where a path follows (fix round 1, Codex r1 P3):
 		// `.../bot123:AAbb` and `.../bot123:AAbb?x=1` are bare tokens too.
-		array( 'telegram', self::RE_HEAD . 'api\.telegram\.org' . self::RE_HOST_END . '(?:file' . self::RE_SLASH . ')?bot[0-9]+:[a-z0-9_-]+' . '(?:' . self::RE_SLASH . ')?' . self::RE_TAIL ),
+		array( 'telegram', self::RE_HEAD . 'api\.telegram\.org' . self::RE_HOST_END . '(?:file' . self::RE_SLASH . ')?bot[0-9]+' . self::RE_COLON . '[a-z0-9_-]+' . '(?:' . self::RE_SLASH . ')?' . self::RE_TAIL ),
 	);
 
 	/**
@@ -150,6 +268,20 @@ class Aura_Worker_Redact {
 	 * field placeholder: fail closed, never a fatal recursion (final review).
 	 */
 	const MAX_WALK_DEPTH = 512;
+
+	/**
+	 * Containers walk() and walk_with_carrier() may enter in ONE redaction —
+	 * one served response, every carrier inside it included (#110).
+	 * MAX_WALK_DEPTH bounds a path, not the total: a value that refers back
+	 * to itself two or more times (a snapshot payload of
+	 * `a:2:{i:0;R:1;i:1;R:1;}`) would otherwise be walked in 2^depth steps.
+	 * 200000 is far above any real response — a 100-post `wp/v2` page with
+	 * Elementor data, or a large page's `_elementor_data`, is in the low tens
+	 * of thousands of containers — and still walks in well under a second.
+	 * Past it, each further container is the field placeholder: fail closed,
+	 * as at the depth bound.
+	 */
+	const MAX_WALK_NODES = 200000;
 
 	/** Hourly counter: responses with at least one replacement (spec §4). */
 	const REDACTED_COUNTER = 'aura_worker_redacted_h';
@@ -193,6 +325,24 @@ class Aura_Worker_Redact {
 	 * @var int
 	 */
 	private static $walk_level = 0;
+
+	/**
+	 * How many containers the current redaction has entered (MAX_WALK_NODES).
+	 * Reset by redact(), the only entry point of a walk.
+	 *
+	 * @var int
+	 */
+	private static $walk_nodes = 0;
+
+	/**
+	 * Did a snapshot payload exhaust the node budget in this redaction? Every
+	 * later payload in the same response is then withheld at once, so a
+	 * response of many such payloads costs one budget, not one each (fix
+	 * round 1, M4). Reset by redact().
+	 *
+	 * @var bool
+	 */
+	private static $payload_budget_spent = false;
 
 	/**
 	 * Hook the read seam and the counters. Called from Aura_Worker::init(),
@@ -256,10 +406,11 @@ class Aura_Worker_Redact {
 		// The gateway row is in the audience whoever calls it, and this filter
 		// runs before its permission callback checks X-Aura-Token. So nothing
 		// here — no 409, no counter, no nonce — acts for a caller that does not
-		// hold the site token: the permission callback answers it (final
-		// review, #419). A pure comparison: no throttle, no captured auth, no
-		// current user.
-		if ( self::is_gateway_execute_route( (string) $request->get_route() ) && ! self::carries_site_token( $request ) ) {
+		// hold the site token (final review, #419), nor for a token holder the
+		// permission callback would still refuse — throttled, or outside the
+		// IP or Origin allowlist (#110): the permission callback answers them.
+		// Read-only checks: no throttle write, no captured auth, no current user.
+		if ( self::is_gateway_execute_route( (string) $request->get_route() ) && ! self::admissible_token_holder( $request ) ) {
 			return $response;
 		}
 		$refused = self::refuse_placeholder_write( $request );
@@ -271,17 +422,20 @@ class Aura_Worker_Redact {
 	}
 
 	/**
-	 * Does the request carry the site token? Aura_Worker_Security's own
-	 * comparison, without any of check_aura_token()'s side effects.
+	 * Does the request carry the site token, from a caller the gateway's
+	 * permission callback would admit (IP and Origin allowlists, token
+	 * throttle)? Aura_Worker_Security's own checks, without any of
+	 * validate_request()'s side effects (#110).
 	 *
 	 * @param WP_REST_Request $request Request.
 	 * @return bool
 	 */
-	private static function carries_site_token( $request ) {
+	private static function admissible_token_holder( $request ) {
 		if ( ! method_exists( $request, 'get_header' ) || ! class_exists( 'Aura_Worker_Security' ) ) {
 			return false;
 		}
-		return Aura_Worker_Security::token_matches( (string) $request->get_header( 'X-Aura-Token' ) );
+		return Aura_Worker_Security::token_matches( (string) $request->get_header( 'X-Aura-Token' ) )
+			&& Aura_Worker_Security::caller_admissible_readonly( $request );
 	}
 
 	/**
@@ -329,13 +483,14 @@ class Aura_Worker_Redact {
 	}
 
 	/**
-	 * The form body core has not parsed yet. For a method other than POST,
-	 * core fills get_body_params() from the raw body only in
+	 * The form body core may not have parsed yet. For a method other than
+	 * POST, core fills get_body_params() from the raw body only in
 	 * parse_body_params(), which it reaches lazily (get_parameter_order(),
-	 * i.e. the first get_param() or the route's `args` check) — after this
-	 * filter on a route without `args`. The handler's get_param() would
-	 * still see the value, so the raw body is parsed here the way core
-	 * would parse it, as one more view of the body source (never merged).
+	 * i.e. the first get_param() or the route's `args` check) — possibly
+	 * after this filter. The handler's get_param() would still see the
+	 * value, so every such form body is parsed here the way core would parse
+	 * it, whether or not core already did (harmless: one more view of the
+	 * body source, never merged).
 	 *
 	 * @param WP_REST_Request $request Request.
 	 * @param string          $method  Upper-case method.
@@ -643,8 +798,10 @@ class Aura_Worker_Redact {
 
 	/** Test seam: forget every exemption. */
 	public static function reset_for_tests() {
-		self::$exempt     = array();
-		self::$walk_level = 0;
+		self::$exempt               = array();
+		self::$walk_level           = 0;
+		self::$walk_nodes           = 0;
+		self::$payload_budget_spent = false;
 	}
 
 	/**
@@ -688,6 +845,10 @@ class Aura_Worker_Redact {
 	 */
 	public static function redact( $data, &$count = 0 ) {
 		$count = 0;
+		// One node budget for the whole response: every carrier below is
+		// walked from inside this call, never from a fresh one.
+		self::$walk_nodes           = 0;
+		self::$payload_budget_spent = false;
 		return self::walk( $data, 0, false, $count );
 	}
 
@@ -701,13 +862,14 @@ class Aura_Worker_Redact {
 	 */
 	public static function redact_text( $text, &$count ) {
 		$text = (string) $text;
-		if ( false === strpos( $text, '/' ) ) {
+		if ( false === strpos( $text, '/' ) && ! self::may_hold_encoded_slash( $text ) ) {
 			// Every receiver's RE_HOST_END requires a slash right after the
 			// host — schemed, protocol-relative or bare (owner decision, fix
 			// round 1: `http` is no longer a reliable fast-reject signal now
 			// that a scheme is optional) — and a JSON-escaped slash (`\/`)
-			// still contains a literal `/`. No slash, no URL anywhere in the
-			// string: the common case never runs a regex.
+			// still contains a literal `/`. An encoded slash does not (#110),
+			// so its markers are looked for too. No slash of either kind, no
+			// URL anywhere in the string: the common case never runs a regex.
 			return $text;
 		}
 		foreach ( self::URL_PATTERNS as $pattern ) {
@@ -716,7 +878,7 @@ class Aura_Worker_Redact {
 			$out         = preg_replace_callback(
 				$pattern[1],
 				static function ( $m ) use ( $placeholder ) {
-					return 1 === preg_match( self::TRAILING_PUNCTUATION, $m[0], $tail ) ? $placeholder . $tail[0] : $placeholder;
+					return $placeholder . self::trailing_punctuation( $m[0] );
 				},
 				$text,
 				-1,
@@ -734,6 +896,38 @@ class Aura_Worker_Redact {
 			}
 		}
 		return $text;
+	}
+
+	/**
+	 * The sentence punctuation at the end of a matched URL, handed back to
+	 * the text. After an encoded slash's reference only what follows its
+	 * `;` counts (ENC_SLASH_END).
+	 *
+	 * @param string $url The matched URL.
+	 * @return string
+	 */
+	private static function trailing_punctuation( $url ) {
+		if ( 1 === preg_match( self::ENC_SLASH_END, $url, $m ) ) {
+			return $m[1];
+		}
+		return 1 === preg_match( self::TRAILING_PUNCTUATION, $url, $m ) ? $m[0] : '';
+	}
+
+	/**
+	 * Could $text hold an encoded slash (RE_ENC_SLASH)? A cheap superset
+	 * check for redact_text()'s fast reject, case-insensitive: `%2f`,
+	 * `&sol`, or a numeric reference to `/` (`&#0*47`, `&#x0*2f`). A bare
+	 * `&#` is not enough — wptexturize'd text is full of `&#8217;` (fix
+	 * round 1, M7).
+	 *
+	 * @param string $text Text.
+	 * @return bool
+	 */
+	private static function may_hold_encoded_slash( $text ) {
+		if ( false !== stripos( $text, '%2f' ) || false !== stripos( $text, '&sol' ) ) {
+			return true;
+		}
+		return false !== strpos( $text, '&#' ) && 1 === preg_match( '/&#(?:0*47|x0*2f)/i', $text );
 	}
 
 	/**
@@ -827,7 +1021,8 @@ class Aura_Worker_Redact {
 		if ( ! is_array( $node ) && ! is_object( $node ) ) {
 			return $node; // int, float, bool, null
 		}
-		if ( self::$walk_level >= self::MAX_WALK_DEPTH ) {
+		if ( ! self::enter_container() ) {
+			self::refuse_in_payload_past_budget( $in_payload );
 			++$count;
 			return self::PLACEHOLDER . 'field';
 		}
@@ -837,6 +1032,37 @@ class Aura_Worker_Redact {
 		} finally {
 			--self::$walk_level;
 		}
+	}
+
+	/**
+	 * Inside a snapshot payload, an exhausted node budget withholds the whole
+	 * payload (`payload: null, payload_redacted: true`) rather than leaving a
+	 * placeholder inside it (fix round 1, M4). The depth bound alone still
+	 * yields the placeholder.
+	 *
+	 * @param bool $in_payload Inside a payload.
+	 * @return void
+	 * @throws UnexpectedValueException Inside a payload, past the node budget.
+	 */
+	private static function refuse_in_payload_past_budget( $in_payload ) {
+		if ( $in_payload && self::$walk_nodes >= self::MAX_WALK_NODES ) {
+			throw new UnexpectedValueException( 'the node budget ran out inside a snapshot payload' );
+		}
+	}
+
+	/**
+	 * May the walk enter one more container? No past the nesting bound
+	 * (MAX_WALK_DEPTH, this path) or the node budget (MAX_WALK_NODES, this
+	 * redaction); each container entered spends one node.
+	 *
+	 * @return bool
+	 */
+	private static function enter_container() {
+		if ( self::$walk_level >= self::MAX_WALK_DEPTH || self::$walk_nodes >= self::MAX_WALK_NODES ) {
+			return false;
+		}
+		++self::$walk_nodes;
+		return true;
 	}
 
 	/**
@@ -1034,13 +1260,15 @@ class Aura_Worker_Redact {
 	 * @param bool   $in_payload Inside a payload.
 	 * @param int    $count      In/out.
 	 * @return mixed
+	 * @throws UnexpectedValueException Inside a payload only (see walk()).
 	 */
 	private static function walk_with_carrier( $container, $carrier, $depth, $in_payload, &$count ) {
 		$is_object = $container instanceof stdClass;
 		if ( ! $is_object && ! is_array( $container ) ) {
 			return self::walk( $container, $depth, $in_payload, $count );
 		}
-		if ( self::$walk_level >= self::MAX_WALK_DEPTH ) {
+		if ( ! self::enter_container() ) {
+			self::refuse_in_payload_past_budget( $in_payload );
 			++$count;
 			return self::PLACEHOLDER . 'field'; // as walk(): a carrier container can nest in itself too
 		}
@@ -1156,12 +1384,16 @@ class Aura_Worker_Redact {
 	 * @return array
 	 */
 	private static function redact_snapshot_answer( array $answer, $depth, $in_payload, &$count ) {
-		$before = $count;
+		$before       = $count;
+		$nodes_before = self::$walk_nodes;
 		try {
 			if ( $in_payload ) {
 				throw new UnexpectedValueException( 'a payload inside a payload' ); // R2
 			}
-			$bytes = base64_decode( $answer['payload'], true );
+			if ( self::$payload_budget_spent ) {
+				throw new UnexpectedValueException( 'an earlier payload exhausted the node budget' );
+			}
+			$bytes = base64_decode( $answer['payload'], true ); // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_decode -- the snapshot payload's own encoding (Aura_Tool_Snapshot_Get)
 			if ( ! is_string( $bytes ) ) {
 				throw new UnexpectedValueException( 'payload is not base64' );
 			}
@@ -1173,13 +1405,21 @@ class Aura_Worker_Redact {
 		} catch ( UnexpectedValueException $e ) {
 			// Nothing here can be proven free of a key-held secret: fail
 			// closed, keep the record (R12: one replacement).
+			if ( self::$walk_nodes >= self::MAX_WALK_NODES ) {
+				// The payload spent the budget and is withheld whole: give its
+				// nodes back so the rest of the response (the record) is still
+				// walked, and withhold any later payload unwalked (M4).
+				self::$walk_nodes           = min( self::$walk_nodes, $nodes_before );
+				self::$payload_budget_spent = true;
+			}
 			$count                      = $before + 1;
 			$answer['payload']          = null;
 			$answer['payload_redacted'] = true;
 			return $answer;
 		}
 		if ( $count !== $before ) {
-			$answer['payload'] = base64_encode( serialize( $walked ) );
+			// Written back in the payload's own format: base64 of PHP serialize(), as the snapshot engine stores it.
+			$answer['payload'] = base64_encode( serialize( $walked ) ); // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_encode,WordPress.PHP.DiscouragedPHPFunctions.serialize_serialize -- the payload format; no WordPress alternative
 		}
 		return $answer;
 	}
@@ -1190,7 +1430,7 @@ class Aura_Worker_Redact {
 	 */
 	private static function read_serialized( $bytes ) {
 		try {
-			return @unserialize( $bytes, array( 'allowed_classes' => false ) ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- malformed bytes are an answer (false → fail closed), not a warning to surface.
+			return @unserialize( $bytes, array( 'allowed_classes' => false ) ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.PHP.DiscouragedPHPFunctions.serialize_unserialize -- allowed_classes=false instantiates nothing (maybe_unserialize() cannot say so); malformed bytes are an answer (false → fail closed), not a warning to surface.
 		} catch ( Throwable $e ) {
 			return false;
 		}
@@ -1210,7 +1450,7 @@ class Aura_Worker_Redact {
 	 * @return bool
 	 */
 	private static function opaque_may_hold_secret( $object ) {
-		$bytes   = serialize( $object );
+		$bytes   = serialize( $object ); // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.serialize_serialize -- scanned as bytes, never stored or unserialized
 		$scratch = 0;
 		if ( self::redact_text( $bytes, $scratch ) !== $bytes ) {
 			return true;

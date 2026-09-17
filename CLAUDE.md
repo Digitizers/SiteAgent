@@ -276,7 +276,23 @@ out of every REST response an **agent** reads.
 - **Detectors.** `URL_PATTERNS` (Make, Integromat, Zapier, Slack — `hooks.slack.com` and
   GovSlack's `hooks.slack-gov.com` — Discord, IFTTT, Telegram — full URLs matched with
   or without a scheme, including protocol-relative and bare hosts, anchored on the host with a strict boundary so a lookalike host
-  (`myhooks.zapier.com`) never matches, `\/` accepted); `SECRET_KEYS` — exact key
+  (`myhooks.zapier.com`) never matches, `\/` accepted). A structural slash may also be
+  percent-encoded or HTML-escaped (`%2F`/`%2f`, `&#47;`, `&#x2F;`, `&sol;` —
+  `RE_ENC_SLASH`, 2.18.1, #110), and so may the scheme or port colon (`%3A`, `&#58;`,
+  `&#x3A;`, `&colon;`) and the userinfo `@` (`%40`, …): a URL passed as a query
+  parameter (`?redirect=https%3A%2F%2Fhook.eu2.make.com%2F…`) is replaced whole. A
+  percent escape of a non-hostname character (`%2F`, `%40`, `%3D`, a non-ASCII byte
+  `%80`–`%FF`, … — never `%2D`, `%2E`, a digit or a letter) counts as a host boundary.
+  Every encoded structural character (`/`, `:`, `@`) follows ONE rule for HTML numeric
+  references (`RE_REF_DEC_END` / `RE_REF_HEX_END`, PR #112 Codex r2): `&#N` / `&#xH`
+  (`x` either case, any zero padding) ended by `;` or — as HTML5 decodes it — by
+  nothing, the decimal form only when no digit follows and the hex form only when no
+  hex digit follows (`&#x40discord` is U+040D, not `@discord`). An unterminated one
+  before a host is a host boundary (`RE_REF_BOUNDARY`, a `\K` so any padding works).
+  Named references need their `;` (`&sol;`, `&colon;`, `&commat;` are not in HTML5's
+  legacy no-semicolon set). The fast reject skips a string only
+  when it has no `/`, `%2f`, `&sol` or numeric `/` reference (a bare `&#8217;` does not
+  defeat it). See Limits for what is not decoded; `SECRET_KEYS` — exact key
   names only (`webhooks`), each with its plugin/setting in a comment, never a
   substring match. Carriers decoded: `_elementor_data`/`_elementor_page_settings`
   strings (and a snapshot capture's `{ existed, value }` entry under those keys), the
@@ -289,19 +305,29 @@ out of every REST response an **agent** reads.
 - **Write guard** (`rest_request_before_callbacks`, priority 6, after the rules guard):
   an audience request with a method other than GET/HEAD/OPTIONS whose query, body,
   JSON or URL params (each walked separately, carriers decoded) — or, for a non-POST
-  form body core has not parsed yet (`lazy_form_body()`: form-encoded or no content
-  type, no route `args`), that raw body parsed the way core would — contain
+  form body (`lazy_form_body()`: form-encoded or no content type), that raw body parsed
+  the way core would — contain
   `aura-redacted:` → `409 aura_redacted_placeholder`. Not a security boundary. On the
   gateway route the guard and the grant check act only for a request carrying the
   valid site token (`Aura_Worker_Security::token_matches()`, a side-effect-free
-  comparison): the filter runs before the route's permission callback, so an
-  anonymous caller gets that callback's answer — no 409, no counter, no nonce spent.
+  comparison) from a caller `validate_request()` would admit
+  (`Aura_Worker_Security::caller_admissible_readonly()`, 2.18.1, #110: IP allowlist,
+  Origin/Referer allowlist, token throttle — read only, no transient write, no
+  migration): the filter runs before the route's permission callback, so an anonymous,
+  throttled or allowlist-refused caller gets that callback's answer — no 409, no
+  counter, no nonce spent. The run-as administrator and the route's capability are not
+  re-checked there: a token holder with a low-privilege Application Password passes
+  this gate although the route's capability check refuses it (accepted, low harm — it
+  already holds the site token).
 - **Unredacted grant.** `X-Aura-Unredacted-Grant`, verified by
   `Aura_Worker_Grant::verify()` on two shapes only: a single-object JSON-RPC
   `tools/call` POST to `/mcp/<server>` (tool `unredacted-read:mcp/<server>#<name>`,
   params = `arguments`) and `/aura/mcp/tools/execute` (tool
   `unredacted-read:aura/mcp#<tool>`, params = `params`). Verified → that request object
-  alone is exempt. Recognised shape but invalid → `403 aura_unredacted_grant_invalid`
+  alone is exempt. Every grant check (and the MCP-path approval grant check in
+  `Aura_Worker_Call_Context::grant_valid_for()`, 2.18.1, #110) first migrates a legacy
+  plaintext stored token (`Aura_Worker_Security::migrate_legacy_stored_token()`), since
+  `verify()` binds to sha256(raw token). Recognised shape but invalid → `403 aura_unredacted_grant_invalid`
   (an unbound site answers `403 aura_site_unbound`). No usable gateway key, or another
   shape → header ignored. The write guard runs first, so a refused write spends no nonce.
 - **Reporting.** `do_action( 'aura_worker_redacted', $count, $route )` /
@@ -314,6 +340,12 @@ out of every REST response an **agent** reads.
   `json_encode()` emits (their storage, or their properties under `STD_PROP_LIST`);
   no other `Traversable` is iterated. Nesting past `MAX_WALK_DEPTH` (512) — a
   self-referencing object included — becomes the field placeholder (fail closed).
+  A total node budget, `MAX_WALK_NODES` (200000 containers, 2.18.1, #110), bounds a
+  value that refers back to itself more than once (a payload of
+  `a:2:{i:0;R:1;i:1;R:1;}`): one budget per `redact()` call — one served response,
+  every carrier in it included — and every container past it is the field placeholder,
+  except inside a snapshot payload, which is then withheld whole (`payload_redacted`) and
+  gives its nodes back so the rest of the response is still walked.
 - **Limits** (known, accepted):
   - raw-read tools (`db_query`, `execute_php`, `run_wp_cli`, `read_file`, and
     `meta_key`/`meta_value` rows) get only the URL detector — the key names are not
@@ -322,8 +354,22 @@ out of every REST response an **agent** reads.
     `aura-redacted:` (case-insensitive);
   - `/aura/mcp/tools/preview` returns unredacted data (it is not in the audience) and
     must never be forwarded to an agent;
-  - redaction takes about 8× the carrier's size in memory at peak, and fails closed
-    (placeholder or `payload_redacted`) when a step cannot complete.
+  - redaction takes a multiple of the carrier's size in memory at peak (decoded tree,
+    walked copy, re-encoded string), and fails closed (placeholder or
+    `payload_redacted`) when a step cannot complete;
+  - re-serializing a rewritten snapshot payload loses PHP references, and an integer
+    too large for PHP's int comes back from a decoded JSON carrier as a float;
+  - not decoded before matching (#110): double encoding (`%252F`, `&amp;#x2F;`),
+    encoded hostname or path LETTERS, DIGITS and DOTS — percent (`hook%2Eeu2…`) or HTML
+    (`&#104;ooks…`, `&period;`, `&#46;`) — JSON `\u002F` escapes in a string that is
+    never JSON-decoded; only the structural `/`, `:` and `@` are accepted encoded.
+    Closing that class fully needs a decode-then-match design (decode a copy, map
+    offsets back), not more alternatives in the patterns;
+  - an HTML-encoded quote or angle bracket without `;` (`&#34`) does not end the URL
+    tail — it over-redacts, never leaks;
+  - once a snapshot payload exhausts the node budget, it is withheld whole
+    (`payload: null, payload_redacted: true`) and so is every later payload in that
+    response; the rest of the response is still walked.
 
 ---
 

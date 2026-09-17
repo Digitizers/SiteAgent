@@ -378,6 +378,91 @@ final class RedactGrantTest extends TestCase {
 		$this->assertNull( $this->before( $req ) );
 	}
 
+	// --- the gateway row: only for a caller the full auth would admit (#110) --
+
+	/** A gateway call carrying the site token and a placeholder in its JSON body. */
+	private function execute_write_with_placeholder(): WP_REST_Request {
+		$req = new WP_REST_Request( 'POST', '/aura/mcp/tools/execute' );
+		$req->set_header( 'X-Aura-Token', SA_RAW_SITE_TOKEN );
+		$req->set_header( 'Content-Type', 'application/json' );
+		$req->set_body( (string) wp_json_encode( array( 'tool' => 'update_post', 'params' => array( 'content' => 'aura-redacted:v1:make' ) ) ) );
+		return $req;
+	}
+
+	/** @return array<string,array{0:callable}> */
+	public static function inadmissible_callers(): array {
+		return array(
+			'throttled'        => array(
+				static function (): void {
+					set_transient( 'aura_worker_tokfail_' . md5( $_SERVER['REMOTE_ADDR'] ), Aura_Worker_Security::MAX_TOKEN_FAILURES, 900 );
+				},
+			),
+			'ip not allowed'   => array(
+				static function (): void {
+					update_option( 'aura_worker_allowed_ips', "203.0.113.9\n198.51.100.7" );
+				},
+			),
+			'origin not allowed' => array(
+				static function ( WP_REST_Request $req ): void {
+					update_option( 'aura_worker_allowed_domains', 'my-aura.app' );
+					$req->set_header( 'Origin', 'https://evil.example' );
+				},
+			),
+		);
+	}
+
+	/**
+	 * The gateway row acts before its permission callback. With the right
+	 * token, a caller that validate_request() would still refuse (throttle,
+	 * IP or Origin allowlist) gets nothing from this filter — no 409, no
+	 * grant check, no nonce spent — and the permission callback answers it.
+	 *
+	 * @dataProvider inadmissible_callers
+	 */
+	public function test_an_inadmissible_token_holder_spends_no_grant_nonce( callable $make_inadmissible ): void {
+		$GLOBALS['_logged_in']         = false;
+		$GLOBALS['_rest_app_password'] = null;
+		$tool  = 'unredacted-read:aura/mcp#snapshot_get';
+		$grant = $this->grant( $tool, array( 'id' => 'snap_1' ) );
+		$req   = $this->execute_call( 'snapshot_get', array( 'id' => 'snap_1' ) );
+		$req->set_header( 'X-Aura-Unredacted-Grant', $grant );
+		$make_inadmissible( $req );
+		$throttle = get_transient( 'aura_worker_tokfail_' . md5( $_SERVER['REMOTE_ADDR'] ) );
+
+		$this->assertNull( $this->before( $req ), 'left to the permission callback' );
+		$this->assertNotSame( $this->export_body(), $this->echoed( $req, $this->export_body() ), 'nothing was exempted' );
+		$this->assertSame( true, Aura_Worker_Grant::verify( $grant, $tool, array( 'id' => 'snap_1' ) ), 'the nonce is still unspent' );
+		$this->assertSame( $throttle, get_transient( 'aura_worker_tokfail_' . md5( $_SERVER['REMOTE_ADDR'] ) ), 'the throttle is only read' );
+
+		$req->set_header( 'X-Aura-Unredacted-Grant', 'garbage' );
+		$this->assertNull( $this->before( $req ), 'a garbage grant is not refused either' );
+
+		$write = $this->execute_write_with_placeholder();
+		$make_inadmissible( $write );
+		$this->assertNull( $this->before( $write ), 'no placeholder 409 for this caller' );
+	}
+
+	public function test_an_admissible_token_holder_behind_matching_allowlists_is_unchanged(): void {
+		update_option( 'aura_worker_allowed_ips', $_SERVER['REMOTE_ADDR'] );
+		update_option( 'aura_worker_allowed_domains', 'my-aura.app' );
+		set_transient( 'aura_worker_tokfail_' . md5( $_SERVER['REMOTE_ADDR'] ), Aura_Worker_Security::MAX_TOKEN_FAILURES - 1, 900 );
+		$req = $this->execute_call( 'snapshot_get', array( 'id' => 'snap_1' ) );
+		$req->set_header( 'Origin', 'https://my-aura.app' );
+		$req->set_header( 'X-Aura-Unredacted-Grant', $this->grant( 'unredacted-read:aura/mcp#snapshot_get', array( 'id' => 'snap_1' ) ) );
+		$body = array( 'success' => true, 'result' => $this->export_body() );
+
+		$this->assertNull( $this->before( $req ) );
+		$this->assertSame( $body, $this->echoed( $req, $body ), 'exempted' );
+
+		$req->set_header( 'X-Aura-Unredacted-Grant', 'garbage' );
+		$this->assertRefused( $this->before( $req ) );
+
+		$write = $this->execute_write_with_placeholder();
+		$refused = $this->before( $write );
+		$this->assertInstanceOf( WP_Error::class, $refused );
+		$this->assertSame( 'aura_redacted_placeholder', $refused->get_error_code() );
+	}
+
 	// --- legacy plaintext stored token (PR #111 Codex round 1) --------------
 
 	private function store_legacy_plaintext_token(): void {
