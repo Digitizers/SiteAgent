@@ -37,11 +37,46 @@ class Aura_Worker_Redact {
 	/** The placeholder, before its kind. */
 	const PLACEHOLDER = 'aura-redacted:v1:';
 
-	/** Regex: a slash, JSON-escaped any number of times (or not at all). */
-	const RE_SLASH = '(?:\\\\)*/';
+	/**
+	 * Regex: a slash written as an escape rather than a literal `/` (#110):
+	 * percent-encoded (`%2F`, `%2f` — a URL passed as a query parameter) or
+	 * an HTML character reference (`&#47;`, `&#x2F;`, `&sol;`, leading zeros
+	 * allowed). The pattern is case-insensitive. Only ONE level of encoding:
+	 * a double-encoded slash (`%252F`, `&amp;#x2F;`) is out of scope, as is a
+	 * percent-encoded hostname character (`hook%2Eeu2…`), which no URL
+	 * encoder produces.
+	 */
+	const RE_ENC_SLASH = '(?:%2f|&#0*47;|&#x0*2f;|&sol;)';
 
-	/** Regex: `//`, JSON-escaped any number of times, then optional userinfo — shared by the schemed and protocol-relative prefixes. */
-	const RE_DOUBLE_SLASH_USERINFO = '(?:\\\\)*/(?:\\\\)*/(?:[^\s/\\\\@"\'<>]+@)?';
+	/** Regex: a slash — literal and JSON-escaped any number of times (or not at all), or encoded (RE_ENC_SLASH). */
+	const RE_SLASH = '(?:(?:\\\\)*/|' . self::RE_ENC_SLASH . ')';
+
+	/** Regex: a colon — literal, percent-encoded (`%3A`) or an HTML character reference (`&#58;`, `&#x3A;`, `&colon;`) (#110). */
+	const RE_COLON = '(?::|%3a|&#0*58;|&#x0*3a;|&colon;)';
+
+	/**
+	 * Regex: the end of a URL's userinfo — `@`, or `@` encoded (`%40`,
+	 * `&#64;`, `&#x40;`, `&commat;`). The userinfo before it never spans a
+	 * slash, literal or encoded (#110).
+	 */
+	const RE_USERINFO = '(?:(?:(?!' . self::RE_ENC_SLASH . ')[^\\s/\\\\@"\'<>])+(?:@|%40|&#0*64;|&#x0*40;|&commat;))?';
+
+	/** Regex: `//` (each slash as RE_SLASH), then optional userinfo — shared by the schemed and protocol-relative prefixes. */
+	const RE_DOUBLE_SLASH_USERINFO = self::RE_SLASH . self::RE_SLASH . self::RE_USERINFO;
+
+	/**
+	 * Regex: a host boundary made by a percent escape (#110). The character
+	 * before the host is then the escape's last hex digit, which the plain
+	 * lookbehind would take for a hostname character — so `%2Fhook…` and
+	 * `%40hook…` would never start a match. Each escape here decodes to a
+	 * character that is NOT a hostname character (everything but `-`, `.`,
+	 * digits and letters: `%2D`, `%2E`, `%30`–`%39`, `%41`–`%5A`, `%61`–`%7A`
+	 * are left out), so `evil%2Ehook.eu2.make.com` still is no boundary, as
+	 * `evil.hook.eu2.make.com` is not. An HTML reference already ends in
+	 * `;`, which the plain lookbehind accepts. Fixed-width top-level
+	 * alternatives, as PCRE requires in a lookbehind.
+	 */
+	const RE_PCT_BOUNDARY = '(?<=%[01][0-9a-f]|%2[0-9a-cf]|%3[a-f]|%40|%5[b-f]|%60|%7[b-f])';
 
 	/**
 	 * Regex: the URL's prefix — full scheme (`https://`), protocol-relative
@@ -52,18 +87,21 @@ class Aura_Worker_Redact {
 	 * hostname can contain, so `myhooks.zapier.com` and
 	 * `evilhooks.zapier.com` never match at the `hooks.zapier.com`
 	 * substring; only a genuine boundary (start of string, whitespace,
-	 * quote, punctuation, …) does.
+	 * quote, punctuation, …) does — or a percent escape of one
+	 * (RE_PCT_BOUNDARY, #110). The scheme's `:` and both slashes may be
+	 * encoded (`https%3A%2F%2F`, `https:&#x2F;&#x2F;`).
 	 */
-	const RE_HEAD = '~(?<![A-Za-z0-9.-])(?:https?:' . self::RE_DOUBLE_SLASH_USERINFO . '|' . self::RE_DOUBLE_SLASH_USERINFO . ')?';
+	const RE_HEAD = '~(?:(?<![A-Za-z0-9.-])|' . self::RE_PCT_BOUNDARY . ')(?:https?' . self::RE_COLON . self::RE_DOUBLE_SLASH_USERINFO . '|' . self::RE_DOUBLE_SLASH_USERINFO . ')?';
 
 	/**
 	 * Regex: an optional trailing FQDN dot, an optional port, then the slash
 	 * that ends the host (fix round 1, Codex r1 P3: `hooks.zapier.com./...`
 	 * is the same host as `hooks.zapier.com/...`; the dot never lets a
 	 * lookalike host — `hooks.zapier.com.evil.tld` — through, since nothing
-	 * follows the single dot but the required port/slash).
+	 * follows the single dot but the required port/slash). The port's colon
+	 * and the slash may be encoded (#110): `hook.eu2.make.com%2Fabc`.
 	 */
-	const RE_HOST_END = '\.?(?::[0-9]+)?(?:\\\\)*/';
+	const RE_HOST_END = '\.?(?:' . self::RE_COLON . '[0-9]+)?' . self::RE_SLASH;
 
 	/**
 	 * Regex (after `&`): the name of an HTML-encoded quote or angle bracket —
@@ -80,6 +118,9 @@ class Aura_Worker_Redact {
 	 * there — while a bare `&` (a query-string separator, or `&amp;`) stays
 	 * in the URL (Codex r2 P2 on SiteAgent#109). Trailing sentence
 	 * punctuation is handed back by redact_text() (TRAILING_PUNCTUATION).
+	 * An encoded slash (`%2F`, `&#x2F;`, `&sol;` — RE_ENC_SLASH) is already
+	 * part of the tail: none of its characters stops it, and an `&` that
+	 * starts one is not RE_ENTITY (#110).
 	 * Possessive: no backtracking.
 	 */
 	const RE_TAIL = '(?:[^\s"\'<>\\\\)\]}&]++|(?:\\\\)++/|&(?!' . self::RE_ENTITY . '))*+~i';
@@ -88,8 +129,10 @@ class Aura_Worker_Redact {
 	 * Punctuation that ends a sentence rather than a URL: stripped from the
 	 * end of a match and kept in the text (`…/abc.` → `…:make.`). Webhook
 	 * secrets are `[A-Za-z0-9_-]`, so a secret is always replaced whole.
+	 * The `;` that closes an encoded slash (`&#x2F;`, `&#47;`, `&sol;`) is
+	 * part of the URL, not punctuation (#110).
 	 */
-	const TRAILING_PUNCTUATION = '/[.,;:!?]+$/';
+	const TRAILING_PUNCTUATION = '/(?<!&sol|&#47|&#x2f)[.,;:!?]+$/i';
 
 	/**
 	 * Known receivers (spec §2.1): full-URL patterns anchored on the
@@ -115,7 +158,7 @@ class Aura_Worker_Redact {
 		// The token itself ends at `/`, `?`, `#` or the end of the URL — the
 		// slash is only where a path follows (fix round 1, Codex r1 P3):
 		// `.../bot123:AAbb` and `.../bot123:AAbb?x=1` are bare tokens too.
-		array( 'telegram', self::RE_HEAD . 'api\.telegram\.org' . self::RE_HOST_END . '(?:file' . self::RE_SLASH . ')?bot[0-9]+:[a-z0-9_-]+' . '(?:' . self::RE_SLASH . ')?' . self::RE_TAIL ),
+		array( 'telegram', self::RE_HEAD . 'api\.telegram\.org' . self::RE_HOST_END . '(?:file' . self::RE_SLASH . ')?bot[0-9]+' . self::RE_COLON . '[a-z0-9_-]+' . '(?:' . self::RE_SLASH . ')?' . self::RE_TAIL ),
 	);
 
 	/**
@@ -701,13 +744,14 @@ class Aura_Worker_Redact {
 	 */
 	public static function redact_text( $text, &$count ) {
 		$text = (string) $text;
-		if ( false === strpos( $text, '/' ) ) {
+		if ( false === strpos( $text, '/' ) && ! self::may_hold_encoded_slash( $text ) ) {
 			// Every receiver's RE_HOST_END requires a slash right after the
 			// host — schemed, protocol-relative or bare (owner decision, fix
 			// round 1: `http` is no longer a reliable fast-reject signal now
 			// that a scheme is optional) — and a JSON-escaped slash (`\/`)
-			// still contains a literal `/`. No slash, no URL anywhere in the
-			// string: the common case never runs a regex.
+			// still contains a literal `/`. An encoded slash does not (#110),
+			// so its markers are looked for too. No slash of either kind, no
+			// URL anywhere in the string: the common case never runs a regex.
 			return $text;
 		}
 		foreach ( self::URL_PATTERNS as $pattern ) {
@@ -734,6 +778,18 @@ class Aura_Worker_Redact {
 			}
 		}
 		return $text;
+	}
+
+	/**
+	 * Could $text hold an encoded slash (RE_ENC_SLASH)? A cheap superset
+	 * check for redact_text()'s fast reject: `%2f`, `&#` or `&sol;`, in any
+	 * case.
+	 *
+	 * @param string $text Text.
+	 * @return bool
+	 */
+	private static function may_hold_encoded_slash( $text ) {
+		return false !== strpos( $text, '&#' ) || false !== stripos( $text, '%2f' ) || false !== stripos( $text, '&sol;' );
 	}
 
 	/**
