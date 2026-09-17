@@ -398,13 +398,14 @@ class Aura_Worker_Redact {
 	}
 
 	/**
-	 * The form body core has not parsed yet. For a method other than POST,
-	 * core fills get_body_params() from the raw body only in
+	 * The form body core may not have parsed yet. For a method other than
+	 * POST, core fills get_body_params() from the raw body only in
 	 * parse_body_params(), which it reaches lazily (get_parameter_order(),
-	 * i.e. the first get_param() or the route's `args` check) — after this
-	 * filter on a route without `args`. The handler's get_param() would
-	 * still see the value, so the raw body is parsed here the way core
-	 * would parse it, as one more view of the body source (never merged).
+	 * i.e. the first get_param() or the route's `args` check) — possibly
+	 * after this filter. The handler's get_param() would still see the
+	 * value, so every such form body is parsed here the way core would parse
+	 * it, whether or not core already did (harmless: one more view of the
+	 * body source, never merged).
 	 *
 	 * @param WP_REST_Request $request Request.
 	 * @param string          $method  Upper-case method.

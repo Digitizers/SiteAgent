@@ -2722,6 +2722,13 @@ class Aura_Worker_Rules {
 	 * itself through rest_get_authenticated_app_password(); checked too, as
 	 * defence in depth.
 	 *
+	 * Caveat (SiteAgent #110): "cookie flag ⇒ nonce verified" holds at the
+	 * seams core authenticates — its own routes and any route whose
+	 * permission callback relies on the current user. SiteAgent's token
+	 * routes (the gateway's `/aura/mcp/tools/execute`) authenticate by
+	 * X-Aura-Token and never consult this flag, so a cookie session there
+	 * proves nothing about who is calling.
+	 *
 	 * @return bool
 	 */
 	private static function is_cookie_authenticated() {
@@ -2769,7 +2776,10 @@ class Aura_Worker_Rules {
 	 *  - A Gutenberg save: that is REST too (/wp/v2), but core authenticated it
 	 *    from a cookie session with a verified nonce (see
 	 *    is_cookie_authenticated()). That is an editor at the keyboard, and the
-	 *    spec promises wp-admin is unaffected.
+	 *    spec promises wp-admin is unaffected. (Cookie flag ⇒ nonce holds at
+	 *    the core-authenticated seams this method serves; SiteAgent's token
+	 *    routes, such as the gateway's tools/execute, do not consult the
+	 *    cookie flag at all — see is_cookie_authenticated(), #110.)
 	 *  - SiteAgent's own routes: execute_tool() already decided; refusing again
 	 *    would double-enforce the same call on its way to the same post.
 	 *
