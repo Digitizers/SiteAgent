@@ -4,7 +4,7 @@ Tags: ai, automation, maintenance, updates, wordpress management
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.18.1
+Stable tag: 2.18.2
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -253,6 +253,12 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 
 == Changelog ==
 
+= 2.18.2 =
+* Security: redaction now decodes HTML references (including the double encoding WordPress itself produces on save and render), percent escapes and JSON escapes before looking for webhook URLs, so encoded or double-encoded Make, Zapier, Slack, Discord, IFTTT or Telegram hook URLs are now redacted.
+* The whole encoded word is replaced, not just the part that decoded into a match.
+* An encoded word whose host only looks like a webhook host is redacted too.
+* More than four encoding layers are replaced as a field.
+
 = 2.18.1 =
 * Security: receiver URLs are now redacted even when their `/`, `:` or `@` are percent-encoded or HTML-escaped, including numeric character references left without a trailing semicolon. Before this, an encoded Make, Zapier, Slack, Discord, IFTTT or Telegram hook URL could reach an agent unredacted.
 * The redaction walk now runs under a total node budget, so a self-referencing payload no longer runs until the request times out; a snapshot payload that exhausts the budget is withheld as `payload: null, payload_redacted: true` instead.
@@ -475,25 +481,10 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
   it says what the site actually holds: a working credential, one that was never
   delivered, none at all, or a site that cannot issue one (token-only).
 
-= 2.10.3 =
-* Fix (security): **"Regenerate Token" revealed a new site token without ever
-  storing it.** The option was registered as a read-only setting, and the
-  callback enforcing that ran on every write — not only on the settings form —
-  so the handler's write was discarded while the one-time reveal still
-  appeared. Two consequences: an admin rotating a leaked token was told it was
-  revoked when the old token stayed valid, and a site disconnected from the
-  dashboard could not be reconnected, because no token the screen displayed
-  ever authenticated. The token is no longer registered as a setting (it is
-  display-only, so nothing submits it), and regeneration now stores the new
-  hash with a single compare-and-swap, out of reach of any option filter — a
-  token is revealed only when that one statement reports it wrote the row, and
-  a site whose row is missing or empty can be given its first token the same
-  way.
-
-= 2.10.2 and earlier =
+= 2.10.3 and earlier =
 
 * WordPress.org truncates a Changelog over 5,000 words, and this plugin's history is longer than that.
-  The entries for 2.10.2 and every release before it were moved out of this file verbatim and are kept in full at:
+  The entries for 2.10.3 and every release before it were moved out of this file verbatim and are kept in full at:
   https://github.com/Digitizers/SiteAgent/blob/main/docs/changelog-archive.md
 
 == Upgrade Notice ==

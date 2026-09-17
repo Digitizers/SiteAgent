@@ -17,7 +17,7 @@
   </a>
   <img src="https://img.shields.io/badge/WordPress-6.2%E2%80%937.1-21759b?logo=wordpress" alt="WordPress" />
   <img src="https://img.shields.io/badge/PHP-7.4%2B-777bb4?logo=php" alt="PHP" />
-  <img src="https://img.shields.io/badge/Stable-2.18.1-green" alt="Stable" />
+  <img src="https://img.shields.io/badge/Stable-2.18.2-green" alt="Stable" />
 </p>
 
 ---
@@ -238,6 +238,15 @@ These plug straight into **Aura's Fleet MCP Gateway**: read tools run on demand,
 ---
 
 ## Changelog
+
+### 2.18.2
+
+- **Redaction now decodes before it matches.** HTML numeric and named references (including the double encoding WordPress itself produces on save and render), `%XX` percent escapes, and JSON `\/`, `\\` and `\uXXXX` escapes are decoded before the scan looks for webhook URLs, so an encoded or double-encoded Make, Zapier, Slack, Discord, IFTTT or Telegram URL is now redacted the same as a plain one.
+- **The whole encoded word is replaced**, not just the part that decoded into a match.
+- **An encoded word whose host only looks like a webhook host is redacted too** — a reference glued directly onto a host is caught even without a boundary in front of it.
+- **More than four encoding layers are replaced as a field** rather than decoded further.
+
+Ships Digitizers/SiteAgent#117.
 
 ### 2.18.1
 
