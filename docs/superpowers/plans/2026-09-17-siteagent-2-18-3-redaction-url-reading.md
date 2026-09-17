@@ -8,7 +8,7 @@
 
 **Tech Stack:** PHP 7.4+ (CI matrix 7.4 / 8.1 / 8.2), WordPress 6.2+, PHPUnit (`vendor/bin/phpunit`, `--filter <name>`; PHPUnit 10.5 locally, 9 on the 7.4 job), PHPCS (`composer lint` — the gate covers `digitizer-site-worker/` only; `bin/` is outside it). The harness stubs WordPress (`tests/bootstrap.php`); nothing from WordPress is loaded. No `intl`, no `mbstring`.
 
-**Spec:** `Digitizers/Aura` — `docs/superpowers/specs/2026-09-17-redaction-url-reading-design.md` (PR #569). This plan covers the whole spec except §7 steps 2–5: the version bump, the release and the spec amendment are separate PRs.
+**Spec:** `Digitizers/Aura` — `docs/superpowers/specs/2026-09-17-redaction-url-reading-design.md` (merged @ `1968be7c`, PR #569). This plan covers the whole spec except §7 steps 2–5: the version bump, the release and the spec amendment are separate PRs.
 
 **Baseline:** `main` at `34712be` (2.18.2). On PHP 8.5 / PHPUnit 10.5, `vendor/bin/phpunit` reports `Tests: 4879, Assertions: 29938, Deprecations: 10, PHPUnit Deprecations: 1`. Record your own numbers before Task 1; the deprecation counts must not change.
 
