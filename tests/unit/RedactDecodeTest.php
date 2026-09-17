@@ -258,7 +258,7 @@ final class RedactDecodeTest extends TestCase {
 	/**
 	 * Fix round 1 (#113): an intermediate layer can expose a receiver URL
 	 * that a later pass's own decoding hides again — so decode_layers()
-	 * must hand back every layer, raw run first, for Task 2 to check.
+	 * must hand back every layer, raw run first, for the caller to check.
 	 *
 	 * @return array<string,array{0:string,1:array<int,string>}> input, expected layers
 	 */

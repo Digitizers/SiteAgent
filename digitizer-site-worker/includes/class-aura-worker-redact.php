@@ -1036,10 +1036,14 @@ class Aura_Worker_Redact {
 							$failed = true;
 							return $run;
 						}
-						// A lone backslash ends the URL for every reader: stage 1
-						// already judged the original run as it is (layer 0) and
-						// replaced exactly what it matched there. A JSON escape
-						// does not end it, so layer 0 is judged again, whole.
+						// Stage 2 follows the plain-text/JSON reading, the same as
+						// stage 1's RE_TAIL: a bare backslash that does not start a
+						// JSON escape ends the match, so stage 1 already judged the
+						// original run as it is (layer 0) and replaced exactly what
+						// it matched there. A JSON escape does not end it, so layer 0
+						// is judged again, whole. (A WHATWG URL parser instead treats
+						// a bare `\` as `/` in an http(s) URL — that reading is a
+						// known limit, not followed here; see CLAUDE.md Limits.)
 						$layers = array_merge( $layers, 1 === $escape ? $before : array_slice( $before, 1 ) );
 					}
 				}

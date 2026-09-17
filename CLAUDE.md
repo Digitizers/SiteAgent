@@ -424,13 +424,22 @@ out of every REST response an **agent** reads.
     (`myhooks.zapier.com%2Fx`) is redacted too, even though its plain-text twin (no `%`,
     `&` or `\`) is not — stage 1 is unchanged;
   - a URL inside a run still ends at a terminator exactly as it does in plain text —
-    whitespace, `"`, `'`, `<`, `>`, a bare backslash that does not start a JSON escape
-    (so `\"`, `\n`, `\t` end it, but `\uXXXX`, `\\` and `\/` do not), and a literal `)`,
-    `]` or `}` — so text after that terminator, inside the same run, is not redacted
-    (2.18.2, #113);
-  - a soft hyphen (U+00AD, or its reference `&shy;`) inside a host is not normalised
-    away by either stage, so it can still split a host that would otherwise match
-    (pre-existing, #110);
+    whitespace, `"`, `'`, `<`, `>`, an HTML-encoded quote or angle bracket with its
+    `;` (`&quot;`, `&#34;`, `&apos;`, … — RE_ENTITY, stage 1's own stop, unchanged),
+    a bare backslash that does not start a JSON escape (so `\"`, `\n`, `\t` end it,
+    but `\uXXXX`, `\\` and `\/` do not — the plain-text/JSON reading only; a WHATWG
+    URL parser instead treats a bare `\` as `/` in an http(s) URL, so
+    `hooks.zapier.com\abc` is not matched here — a known limit, see below), and a
+    literal `)`, `]` or `}` — so text after any of these, inside the same run, is not
+    redacted (2.18.2, #113);
+  - WHATWG URL-parser readings this design does not follow (2.18.2, #113 except
+    where noted): a bare `\` or `%5C` used as a path separator
+    (`hooks.zapier.com\abc` / `hooks.zapier.com%5Cabc`) is not matched — see the
+    terminator note above; and hostname characters a URL parser normalises away under
+    UTS-46 (fullwidth Latin letters, the ideographic full stop U+3002, a zero-width
+    space, or a soft hyphen U+00AD / its reference `&shy;`) are not normalised by
+    either stage, so they can still split a host that would otherwise match (the soft
+    hyphen case is pre-existing, #110);
   - an HTML-encoded quote or angle bracket without `;` (`&#34`) does not end the URL
     tail — it over-redacts, never leaks;
   - once a snapshot payload exhausts the node budget, it is withheld whole
