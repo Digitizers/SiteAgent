@@ -63,6 +63,13 @@ final class RedactUrlReadingTest extends TestCase {
 			'userinfo, encoded slash'       => static function ( $h, $p ) { return "https://a%2Fb@{$h}\\{$p}"; },
 			'userinfo, encoded slash ref'   => static function ( $h, $p ) { return "https://a&sol;b@{$h}\\{$p}"; },
 			'userinfo, encoded slash + two @' => static function ( $h, $p ) { return "https://a%2Fb@c@{$h}\\{$p}"; },
+			// #116, Codex r3 on PR #120: an ENCODED backslash inside userinfo is
+			// userinfo text for a parser, not an authority delimiter, so the
+			// LITERAL backslash right after the host (view 3a) still finds the
+			// receiver even though the global (literal+encoded) reading turns
+			// `a%5C@host` into `a/@host` and would miss it (view 3b alone).
+			'userinfo, encoded backslash'   => static function ( $h, $p ) { return "https://a%5C@{$h}\\{$p}"; },
+			'userinfo, encoded backslash ref' => static function ( $h, $p ) { return "https://a&#92;@{$h}\\{$p}"; },
 		);
 	}
 
@@ -131,6 +138,21 @@ final class RedactUrlReadingTest extends TestCase {
 			'other host, mapped chars'  => array( "https://\u{FF45}xample.com/x" ),
 			'userinfo with a slash before the host' => array( 'https://a@b/hooks.zapier.com\\x' ),
 			'userinfo ended by a literal slash, encoded @ after' => array( 'https://a/b%40hooks.zapier.com\\x' ),
+			// #116, Codex r3: a LITERAL backslash in userinfo is a real authority
+			// delimiter for a parser (host becomes `a`, not `hooks.zapier.com`) —
+			// the control case for the encoded-backslash-in-userinfo fix: views
+			// 3a and 3b agree here (userinfo cannot cross a `/` either way).
+			'literal backslash in userinfo ends the authority' => array( 'https://a\\@hooks.zapier.com\\x' ),
+			// Known limit (#116, Codex r3): a parser resolves this to host
+			// `hooks.zapier.com` (userinfo `a%5C` ends at the LAST `@`, and the
+			// path backslashes are its "special authority ignore slashes"
+			// state), but no single reading matches it. View 3a (literal-only)
+			// leaves BOTH the userinfo and the path `%5C`s alone, so there is no
+			// `/` after the host to end it. View 3b (literal+encoded) turns the
+			// userinfo `%5C` into `/` too, so userinfo ends at that `/`
+			// (`a/@host…`), same as the plain-text reading — host `a`, not the
+			// receiver. Neither view reaches the parser's actual answer.
+			'encoded backslash in userinfo AND path (limit)' => array( 'https://a%5C@hooks.zapier.com%5Chooks%5Ccatch%5C1%5CS' ),
 		);
 	}
 
@@ -361,6 +383,32 @@ final class RedactUrlReadingTest extends TestCase {
 			'entity-escaped: &amp;#92;' => array( '&amp;#92;', '&amp;#92;' ),
 			'tab stays'                => array( "a\tb", "a\tb" ),
 			'a forward slash: %2F'     => array( '%2F', '%2F' ),
+		);
+	}
+
+	/**
+	 * #116, Codex r3 on PR #120: url_view_literal() (view 3a/4a) turns ONLY a
+	 * literal backslash into `/` — every encoded form (`%5C`, `&#92;`, …) is
+	 * left exactly as it is, unlike url_view() (view 3b/4b), which reads
+	 * both. That split is what lets `a%5C@host` still resolve to `host`
+	 * (view 3a sees plain userinfo up to a real `@`) instead of being read
+	 * as `a/@host` (view 3b, host `a`).
+	 *
+	 * @dataProvider url_view_literal_cases
+	 */
+	public function test_url_view_literal_turns_only_literal_backslashes( string $in, string $expect ): void {
+		$method = new ReflectionMethod( Aura_Worker_Redact::class, 'url_view_literal' );
+		if ( PHP_VERSION_ID < 80100 ) {
+			$method->setAccessible( true ); // required before 8.1 for a private method; a deprecated no-op from 8.5
+		}
+		$this->assertSame( $expect, $method->invoke( null, $in ), $in );
+	}
+
+	public static function url_view_literal_cases(): array {
+		return array(
+			'literal backslash' => array( 'a\\b', 'a/b' ),
+			'%5C stays'          => array( '%5C', '%5C' ),
+			'&#92; stays'        => array( '&#92;', '&#92;' ),
 		);
 	}
 }
