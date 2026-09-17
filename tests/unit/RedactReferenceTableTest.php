@@ -136,7 +136,6 @@ final class RedactReferenceTableTest extends TestCase {
 			// A longer number is another character.
 			'decimal 470'       => array( 'https://hooks.zapier.com&#470hooks/SECRET' ),
 			'decimal 580 port'  => array( 'https://hooks.zapier.com&#580/hooks/SECRET' ),
-			'decimal 640'       => array( 'https://user&#640hooks.zapier.com/hooks/SECRET' ),
 			'hex 3aa token'     => array( 'https://api.telegram.org/bot1&#x3AAAsecret/sendMessage' ),
 			// Not a receiver, in any form.
 			'n8n all forms'     => array( 'https&#58&#47&#x2Fn8n.example.com&#47webhook&#X2F;abc' ),
@@ -149,6 +148,14 @@ final class RedactReferenceTableTest extends TestCase {
 		// `https&colon//…` is text, then a protocol-relative URL: only that is replaced.
 		$n = 0;
 		$this->assertSame( 'https&colon//aura-redacted:v1:zapier', Aura_Worker_Redact::redact_text( 'https&colon//hooks.zapier.com/hooks/SECRET', $n ) );
+		$this->assertSame( 1, $n );
+	}
+
+	public function test_a_non_ascii_reference_before_a_host_is_a_boundary(): void {
+		// #113: `&#640` is U+0280, not a hostname character, so the host
+		// after it is at a boundary, as in plain text (was a control).
+		$n = 0;
+		$this->assertSame( 'aura-redacted:v1:zapier', Aura_Worker_Redact::redact_text( 'https://user&#640hooks.zapier.com/hooks/SECRET', $n ) );
 		$this->assertSame( 1, $n );
 	}
 

@@ -6,7 +6,8 @@
  * looks like, and `hooks.zapier.com&#x2F;hooks…` is what an HTML-escaped
  * attribute looks like: both used to leave the secret path verbatim.
  *
- * Double encoding (`%252F`, `&amp;#x2F;`) is out of scope.
+ * Double encoding (`%252F`, `&amp;#x2F;`) is stage 2's (#113): see
+ * RedactEncodedRunTest, and closed_limits() below.
  *
  * @package Aura_Worker\Tests
  */
@@ -193,7 +194,6 @@ final class RedactEncodedSlashTest extends TestCase {
 			'encoded discord non-hook'   => array( rawurlencode( 'https://discord.com/api/v10/channels/1/messages' ) ),
 			'html slack non-hook'        => array( 'https:&#x2F;&#x2F;hooks.slack.com&#x2F;other&#x2F;T000' ),
 			'host then an other entity'  => array( 'hooks.zapier.com&amp;hooks&#x2F;catch' ),
-			'double encoded (out of scope)' => array( 'https%253A%252F%252Fhook.eu2.make.com%252Fabc123secret' ),
 		);
 	}
 
@@ -292,7 +292,6 @@ final class RedactEncodedSlashTest extends TestCase {
 			'decimal 475 is no slash' => array( 'hooks.zapier.com&#475hooks' ),
 			'hex 2fa is no slash'     => array( 'hooks.zapier.com&#x2Fahooks' ),
 			'hex 2fd before discord'  => array( 'x&#x2Fdiscord.com/api/webhooks/1/SECRET' ),
-			'decimal 470 before host' => array( 'x&#470hooks.zapier.com/SECRET' ),
 		);
 	}
 
@@ -409,8 +408,6 @@ final class RedactEncodedSlashTest extends TestCase {
 			'hex before canary'   => array( 'https://user&#x40canary.discord.com/api/webhooks/1/SECRET' ),
 			'hex before api'      => array( 'https://user&#x40api.telegram.org/bot1:AASECRET/x' ),
 			'bare hex before api' => array( 'user&#x40api.telegram.org/bot1:AASECRET/x' ),
-			'decimal 640'         => array( 'user&#640hooks.zapier.com/hooks/SECRET' ),
-			'decimal 6400 scheme' => array( 'https://user&#6400hooks.zapier.com/hooks/SECRET' ),
 			'decoy after at'      => array( 'https://hooks.zapier.com&#64evil.tld/hooks/catch/1/' ),
 			'hex decoy after at'  => array( 'https://hooks.zapier.com&#x40evil.tld/hooks/catch/1/' ),
 		);
@@ -420,6 +417,31 @@ final class RedactEncodedSlashTest extends TestCase {
 	public function test_unterminated_at_controls_stay_untouched( string $in ): void {
 		$this->assertSame( $in, $this->text( $in, $n ) );
 		$this->assertSame( 0, $n );
+	}
+
+	// --- #113: controls that only recorded a limit stage 2 closes ---------
+
+	/**
+	 * Each reference decodes to a non-ASCII character (U+01D6, U+0280,
+	 * U+1900) — not a hostname character, so the host after it is at a
+	 * boundary, exactly as in plain text; the double-encoded URL decodes to
+	 * a plain receiver URL. Stage 2 replaces the whole run.
+	 *
+	 * @return array<string,array{0:string,1:string}> input, expected
+	 */
+	public static function closed_limits(): array {
+		return array(
+			'double encoded'          => array( 'https%253A%252F%252Fhook.eu2.make.com%252Fabc123secret', 'aura-redacted:v1:make' ),
+			'decimal 470 before host' => array( 'x&#470hooks.zapier.com/SECRET', 'aura-redacted:v1:zapier' ),
+			'decimal 640'             => array( 'user&#640hooks.zapier.com/hooks/SECRET', 'aura-redacted:v1:zapier' ),
+			'decimal 6400 scheme'     => array( 'https://user&#6400hooks.zapier.com/hooks/SECRET', 'aura-redacted:v1:zapier' ),
+		);
+	}
+
+	/** @dataProvider closed_limits */
+	public function test_controls_that_recorded_a_decode_limit_are_now_redacted( string $in, string $expected ): void {
+		$this->assertSame( $expected, $this->text( $in, $n ) );
+		$this->assertSame( 1, $n );
 	}
 
 	// --- carriers ---------------------------------------------------------

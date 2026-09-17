@@ -210,6 +210,12 @@ class Aura_Worker_Redact {
 	const ENC_SLASH_END = '/(?:&#0*47|&#x0*2f|&sol);([.,;:!?]*)$/i';
 
 	/**
+	 * Regex: one run for stage 2 (#113) — a maximal stretch of characters
+	 * other than whitespace, `"`, `'`, `<` and `>`. Possessive.
+	 */
+	const RE_RUN = '/[^\s"\'<>]++/';
+
+	/**
 	 * Known receivers (spec §2.1): full-URL patterns anchored on the
 	 * registrable host, never a substring of a field name. A list of
 	 * `array( kind, regex )`, because two hosts share the `discord` kind.
@@ -853,15 +859,29 @@ class Aura_Worker_Redact {
 	}
 
 	/**
-	 * The URL detector over one string (spec §2.1). Replaces exactly the
-	 * matched URL, so surrounding text and JSON stay valid.
+	 * The URL detector over one string (spec §2.1). Stage 1 (redact_urls())
+	 * replaces exactly the matched URL, so surrounding text and JSON stay
+	 * valid; stage 2 (redact_encoded_runs(), #113) then replaces every run
+	 * whose DECODED form holds a receiver URL.
 	 *
 	 * @param string $text  Text.
 	 * @param int    $count In/out: replacements so far.
 	 * @return string
 	 */
 	public static function redact_text( $text, &$count ) {
-		$text = (string) $text;
+		$text = self::redact_urls( (string) $text, $count );
+		return self::redact_encoded_runs( $text, $count );
+	}
+
+	/**
+	 * Stage 1 (2.18.0/2.18.1, unchanged): the receiver patterns over the
+	 * text as it is.
+	 *
+	 * @param string $text  Text.
+	 * @param int    $count In/out: replacements so far.
+	 * @return string
+	 */
+	private static function redact_urls( $text, &$count ) {
 		if ( false === strpos( $text, '/' ) && ! self::may_hold_encoded_slash( $text ) ) {
 			// Every receiver's RE_HOST_END requires a slash right after the
 			// host — schemed, protocol-relative or bare (owner decision, fix
@@ -896,6 +916,102 @@ class Aura_Worker_Redact {
 			}
 		}
 		return $text;
+	}
+
+	/**
+	 * Stage 2 (#113): decode, then match. Each run — a maximal stretch of
+	 * characters other than whitespace, `"`, `'`, `<` and `>` (RE_RUN) —
+	 * that holds a `%`, `&` or `\` is decoded layer by layer
+	 * (Aura_Worker_Redact_Decode::decode_layers()). When ANY layer — the raw
+	 * run included — holds a receiver URL by the stage 1 patterns, the WHOLE
+	 * original run is replaced with the placeholder of the first layer that
+	 * matches, its trailing sentence punctuation handed back. Every layer is
+	 * checked because a later pass can hide again what an earlier one
+	 * exposed (a decoded reference glued to the host). A run that cannot be
+	 * decoded within the bounds becomes the field placeholder. A run holding
+	 * `aura-redacted:` is decoded like any other: a literal marker must not
+	 * shield an encoded URL next to it.
+	 *
+	 * @param string $text  Stage 1's output.
+	 * @param int    $count In/out: replacements so far.
+	 * @return string
+	 */
+	private static function redact_encoded_runs( $text, &$count ) {
+		if ( ! self::has_encoding_marker( $text ) ) {
+			return $text; // field fast path: nothing is encoded
+		}
+		$failed = false;
+		$hits   = 0;
+		$out    = preg_replace_callback(
+			self::RE_RUN,
+			static function ( $m ) use ( &$failed, &$hits ) {
+				$run = $m[0];
+				if ( $failed || ! self::has_encoding_marker( $run ) ) {
+					return $run; // run fast path
+				}
+				$layers = Aura_Worker_Redact_Decode::decode_layers( $run );
+				if ( null === $layers ) {
+					++$hits; // too deep, too large, or PCRE gave up: fail closed
+					return self::PLACEHOLDER . 'field';
+				}
+				if ( count( $layers ) < 2 ) {
+					return $run; // nothing decodes
+				}
+				foreach ( $layers as $layer ) {
+					$kind = self::receiver_kind( $layer );
+					if ( false === $kind ) {
+						$failed = true;
+						return $run;
+					}
+					if ( '' !== $kind ) {
+						++$hits;
+						return self::PLACEHOLDER . $kind . self::trailing_punctuation( $run );
+					}
+				}
+				return $run;
+			},
+			$text
+		);
+		if ( null === $out || $failed ) {
+			// PCRE gave up on the split or on a pattern: none of the field goes out (R9).
+			++$count;
+			return self::PLACEHOLDER . 'field';
+		}
+		$count += $hits;
+		return $out;
+	}
+
+	/**
+	 * The kind of the first stage 1 pattern that matches $decoded, as a
+	 * check only — nothing is replaced.
+	 *
+	 * @param string $decoded One layer of a run.
+	 * @return string|false The kind; '' when no pattern matches; false when PCRE failed.
+	 */
+	private static function receiver_kind( $decoded ) {
+		if ( false === strpos( $decoded, '/' ) && ! self::may_hold_encoded_slash( $decoded ) ) {
+			return ''; // stage 1's own fast reject: no slash, no receiver URL
+		}
+		foreach ( self::URL_PATTERNS as $pattern ) {
+			$found = preg_match( $pattern[1], $decoded );
+			if ( false === $found ) {
+				return false;
+			}
+			if ( 1 === $found ) {
+				return $pattern[0];
+			}
+		}
+		return '';
+	}
+
+	/**
+	 * Does $text hold a character an encoding starts with — `%`, `&` or `\`?
+	 *
+	 * @param string $text Text.
+	 * @return bool
+	 */
+	private static function has_encoding_marker( $text ) {
+		return false !== strpbrk( $text, '%&\\' );
 	}
 
 	/**

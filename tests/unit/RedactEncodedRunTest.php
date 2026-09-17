@@ -1,0 +1,379 @@
+<?php
+/**
+ * SiteAgent #113: stage 2 of redact_text() — decode each run, then match.
+ * A run (a maximal stretch without whitespace, `"`, `'`, `<`, `>`) whose
+ * decoded form holds a receiver URL is replaced whole; an encoded form is
+ * redacted exactly when its decoded form would be.
+ *
+ * @package Aura_Worker\Tests
+ */
+
+use PHPUnit\Framework\TestCase;
+
+final class RedactEncodedRunTest extends TestCase {
+
+	/** name => [ host, path after the host's slash, kind, secret ] — one per URL_PATTERNS entry */
+	private const RECEIVERS = array(
+		'make'       => array( 'hook.eu2.make.com', 'abc123secret', 'make', 'abc123secret' ),
+		'celonis'    => array( 'hook.eu1.make.celonis.com', 'cel123secret', 'make', 'cel123secret' ),
+		'integromat' => array( 'hook.integromat.com', 'isecret1', 'integromat', 'isecret1' ),
+		'zapier'     => array( 'hooks.zapier.com', 'hooks/catch/1/zsecret9', 'zapier', 'zsecret9' ),
+		'slack'      => array( 'hooks.slack.com', 'services/T000/B000/SLACKSECRET', 'slack', 'SLACKSECRET' ),
+		'discord'    => array( 'discord.com', 'api/webhooks/123/dsecret-tok', 'discord', 'dsecret-tok' ),
+		'discordapp' => array( 'discordapp.com', 'api/v10/webhooks/123/dsecret-tok', 'discord', 'dsecret-tok' ),
+		'ifttt'      => array( 'maker.ifttt.com', 'trigger/ev/with/key/ksecret_1', 'ifttt', 'ksecret_1' ),
+		'telegram'   => array( 'api.telegram.org', 'bot123456:AAsecret_x/sendMessage', 'telegram', 'AAsecret_x' ),
+	);
+
+	protected function setUp(): void {
+		sa_reset_state();
+	}
+
+	private function text( string $in, ?int &$count = null ): string {
+		$count = 0;
+		return Aura_Worker_Redact::redact_text( $in, $count );
+	}
+
+	/**
+	 * Every encoding stage 1 does not know, as a function of host and path.
+	 *
+	 * @return array<string,callable>
+	 */
+	private static function encodings(): array {
+		return array(
+			'pct double'            => static function ( $h, $p ) {
+				return rawurlencode( rawurlencode( "https://{$h}/{$p}" ) );
+			},
+			'pct triple'            => static function ( $h, $p ) {
+				return rawurlencode( rawurlencode( rawurlencode( "https://{$h}/{$p}" ) ) );
+			},
+			'pct 252F'              => static function ( $h, $p ) {
+				return str_replace( '/', '%252F', "https://{$h}/{$p}" );
+			},
+			'kses at'               => static function ( $h, $p ) {
+				return "https://user&amp;#64{$h}/{$p}";
+			},
+			'wptexturize at'        => static function ( $h, $p ) {
+				return "https://user&#038;#64{$h}/{$p}";
+			},
+			'html double slash'     => static function ( $h, $p ) {
+				return str_replace( '/', '&amp;#x2F;', "https://{$h}/{$p}" );
+			},
+			'html then pct'         => static function ( $h, $p ) {
+				return rawurlencode( str_replace( '/', '&#47;', "https://{$h}/{$p}" ) );
+			},
+			'pct host letter'       => static function ( $h, $p ) {
+				return 'https://%' . strtoupper( bin2hex( $h[0] ) ) . substr( $h, 1 ) . "/{$p}";
+			},
+			'html host letter'      => static function ( $h, $p ) {
+				return 'https://&#' . ord( $h[0] ) . ';' . substr( $h, 1 ) . "/{$p}";
+			},
+			'html host letter no ;' => static function ( $h, $p ) {
+				return 'https://&#' . ord( $h[0] ) . substr( $h, 1 ) . "/{$p}";
+			},
+			'pct host dot'          => static function ( $h, $p ) {
+				return 'https://' . preg_replace( '/\./', '%2E', $h, 1 ) . "/{$p}";
+			},
+			'html host dot no ;'    => static function ( $h, $p ) {
+				return 'https://' . preg_replace( '/\./', '&#46', $h, 1 ) . "/{$p}";
+			},
+			'named host dot'        => static function ( $h, $p ) {
+				return 'https://' . str_replace( '.', '&period;', $h ) . "/{$p}";
+			},
+			'pct path letter'       => static function ( $h, $p ) {
+				return "https://{$h}/%" . strtoupper( bin2hex( $p[0] ) ) . substr( $p, 1 );
+			},
+			'html path letter'      => static function ( $h, $p ) {
+				return "https://{$h}/" . preg_replace( '/e/', '&#x65;', $p, 1 );
+			},
+			'json u002f'            => static function ( $h, $p ) {
+				return str_replace( '/', '\\u002f', "https://{$h}/{$p}" );
+			},
+			'json host letter'      => static function ( $h, $p ) {
+				return '\\u00' . bin2hex( $h[0] ) . substr( $h, 1 ) . "\\/{$p}";
+			},
+			'bare pct host letter'  => static function ( $h, $p ) {
+				return '%' . bin2hex( $h[0] ) . substr( $h, 1 ) . "%2F{$p}";
+			},
+			'deep zero host letter' => static function ( $h, $p ) {
+				return 'https://&#0000000000000000' . ord( $h[0] ) . substr( $h, 1 ) . "&#x0000000002F;{$p}";
+			},
+			'zero boundary'         => static function ( $h, $p ) {
+				return "x&#0{$h}/{$p}";
+			},
+			'legacy amp boundary'   => static function ( $h, $p ) {
+				return "&amp{$h}/{$p}";
+			},
+			'four layers'           => static function ( $h, $p ) {
+				return "{$h}%2525252F{$p}";
+			},
+		);
+	}
+
+	/** @return array<string,array{0:string,1:string,2:string}> encoded, kind, secret */
+	public static function table(): array {
+		$cases = array();
+		foreach ( self::RECEIVERS as $rname => list( $host, $path, $kind, $secret ) ) {
+			foreach ( self::encodings() as $ename => $encode ) {
+				$cases[ "{$rname} / {$ename}" ] = array( $encode( $host, $path ), $kind, $secret );
+			}
+		}
+		return $cases;
+	}
+
+	/** @dataProvider table */
+	public function test_an_encoded_receiver_run_is_replaced_whole( string $encoded, string $kind, string $secret ): void {
+		$out = $this->text( $encoded, $n );
+		$this->assertSame( 'aura-redacted:v1:' . $kind, $out, $encoded );
+		$this->assertStringNotContainsString( $secret, $out );
+		$this->assertSame( 1, $n );
+	}
+
+	/** @dataProvider table */
+	public function test_an_encoded_receiver_run_is_replaced_inside_text( string $encoded, string $kind, string $secret ): void {
+		$out = Aura_Worker_Redact::redact( array( 'content' => array( 'raw' => "<p>see {$encoded} now</p>" ) ), $n );
+		$this->assertSame( "<p>see aura-redacted:v1:{$kind} now</p>", $out['content']['raw'] );
+		$this->assertSame( 1, $n );
+	}
+
+	/** @return array<string,array{0:string,1:string}> input, expected */
+	public static function spec_cases(): array {
+		return array(
+			'kses content.raw'          => array( 'https://user&amp;#64hook.eu2.make.com/SECRET', 'aura-redacted:v1:make' ),
+			'wptexturize rendered'      => array( '<p>https://user&#038;#64hook.eu2.make.com/SECRET</p>', '<p>aura-redacted:v1:make</p>' ),
+			'kses in an href'           => array( '<a href="https://user&amp;#64hook.eu2.make.com/SECRET">x</a>', '<a href="aura-redacted:v1:make">x</a>' ),
+			'zero reference boundary'   => array( '&#0hooks.zapier.com/x', 'aura-redacted:v1:zapier' ),
+			'legacy amp, no ;'          => array( '&amphooks.zapier.com/x', 'aura-redacted:v1:zapier' ),
+			'legacy amp then numeric'   => array( '&amp#104;ooks.zapier.com/x', 'aura-redacted:v1:zapier' ),
+			'exactly four layers'       => array( 'hooks.zapier.com%2525252Fx', 'aura-redacted:v1:zapier' ),
+			'pct 252F'                  => array( 'hooks.zapier.com%252Fx', 'aura-redacted:v1:zapier' ),
+			'encoded host dot'          => array( 'hook%2Eeu2.make.com/SECRET', 'aura-redacted:v1:make' ),
+			'encoded host letter'       => array( '&#104;ooks.zapier.com/SECRET', 'aura-redacted:v1:zapier' ),
+			'json u002f never decoded'  => array( 'hooks.zapier.com\\u002fSECRET', 'aura-redacted:v1:zapier' ),
+			'non-ascii boundary'        => array( 'caf%C3%A9hooks.zapier.com%252Fx', 'aura-redacted:v1:zapier' ),
+			'decimal 470 boundary'      => array( 'x&#470hooks.zapier.com/SECRET', 'aura-redacted:v1:zapier' ),
+			'literal marker beside'     => array( 'aura-redacted:v1:make%252F%252Fhooks.zapier.com%252Fx', 'aura-redacted:v1:zapier' ),
+			'literal marker html'       => array( 'aura-redacted:&amp;#47;hooks.zapier.com&amp;#47;x', 'aura-redacted:v1:zapier' ),
+			'query parameter'           => array( 'https://example.com/login?redirect=https%253A%252F%252Fhooks.zapier.com%252Fx', 'aura-redacted:v1:zapier' ),
+			'adjacent text in run'      => array( '(hooks.zapier.com%252Fx),', 'aura-redacted:v1:zapier,' ),
+			'trailing punctuation'      => array( 'go hooks.zapier.com%252Fx.', 'go aura-redacted:v1:zapier.' ),
+			'closing reference ;'       => array( 'hooks.zapier.com%252Fx&#x31;', 'aura-redacted:v1:zapier;' ),
+			'stage 1 then stage 2'      => array( 'a https://hooks.zapier.com/hooks/x b 100%25 c', 'a aura-redacted:v1:zapier b 100%25 c' ),
+			'five layers, only the run' => array( 'keep this %252525252F and this', 'keep this aura-redacted:v1:field and this' ),
+		);
+	}
+
+	/** @dataProvider spec_cases */
+	public function test_spec_cases( string $in, string $expected ): void {
+		$out = $this->text( $in, $n );
+		$this->assertSame( $expected, $out );
+		$this->assertSame( 1, $n );
+	}
+
+	public function test_a_stage_1_placeholder_does_not_shield_the_rest_of_its_run(): void {
+		// Stage 1's tail stops at `)`, so it replaces only the plain URL; the
+		// run still holds an encoded one.
+		$out = $this->text( 'https://hooks.zapier.com/a)hooks.slack.com%252Fservices%252FT%252FB%252FX', $n );
+		$this->assertSame( 'aura-redacted:v1:slack', $out );
+		$this->assertSame( 2, $n );
+	}
+
+	public function test_each_replaced_run_is_counted(): void {
+		$out = $this->text( 'a hooks.zapier.com%252Fx b discord.com%252Fapi%252Fwebhooks%252F1%252Fy c %252525252F', $n );
+		$this->assertSame( 'a aura-redacted:v1:zapier b aura-redacted:v1:discord c aura-redacted:v1:field', $out );
+		$this->assertSame( 3, $n );
+	}
+
+	/**
+	 * Runs whose receiver URL shows only in an INTERMEDIATE layer: a later
+	 * pass decodes the reference in front of the host and glues it to the
+	 * host (`A` + `hooks.zapier.com`), so the fixed point holds no receiver
+	 * at a boundary. Every layer is checked, so they are still redacted.
+	 * The single-encoded run is already caught by stage 1, which replaces
+	 * only the plain URL after the reference; stage 2 then sees no receiver
+	 * in what is left, so the reference stays in front of the placeholder.
+	 *
+	 * @return array<string,array{0:string,1:string}> run, expected output
+	 */
+	public static function intermediate_layer_cases(): array {
+		return array(
+			'html double, glued letter'   => array( '&amp;#65;hooks.zapier.com&amp;#x2f;hooks&amp;#x2f;catch&amp;#x2f;123&amp;#x2f;abcdef', 'aura-redacted:v1:zapier' ),
+			'html single, glued letter'   => array( '&#65;hooks.zapier.com/hooks/catch/123/abcdef', '&#65;aura-redacted:v1:zapier' ),
+			'pct triple, glued reference' => array( '%2526%252365%253Bhooks.zapier.com%252Fhooks%252Fcatch%252F123%252Fabcdef', 'aura-redacted:v1:zapier' ),
+		);
+	}
+
+	/** @dataProvider intermediate_layer_cases */
+	public function test_a_receiver_in_an_intermediate_layer_is_redacted( string $run, string $expected ): void {
+		// Which stage replaces what differs per row, so only the final output
+		// is asserted, not the count.
+		$out = $this->text( $run, $n );
+		$this->assertSame( $expected, $out );
+		$this->assertStringNotContainsString( 'abcdef', $out );
+		$this->assertGreaterThanOrEqual( 1, $n );
+	}
+
+	/** @dataProvider intermediate_layer_cases */
+	public function test_a_receiver_in_an_intermediate_layer_is_redacted_inside_prose( string $run, string $expected ): void {
+		$out = $this->text( "Before the hook {$run} and after it.", $n );
+		$this->assertSame( "Before the hook {$expected} and after it.", $out );
+		$this->assertStringNotContainsString( 'abcdef', $out );
+		$this->assertGreaterThanOrEqual( 1, $n );
+	}
+
+	/** @return array<string,array{0:string}> */
+	public static function controls(): array {
+		return array(
+			'encoded digit prefix'        => array( 'x%31hooks.zapier.com%2Fx' ),
+			'encoded dot prefix'          => array( 'evil%2Ehooks.zapier.com%252Fx' ),
+			'encoded prefixed host'       => array( 'myhook%2Eeu2.make.com%2Fabc' ),
+			'hex 40d before discord'      => array( '&#x40discord.com/api/webhooks/1/x' ),
+			'userinfo hex 40d'            => array( 'https://user&#x40discord.com/api/webhooks/1/x' ),
+			'encoded suffixed host'       => array( 'hooks.zapier.com%252Ecom.evil.tld%252Fx' ),
+			'encoded userinfo decoy'      => array( 'https%253A%252F%252Fhooks.zapier.com%2540evil.tld%252Fx' ),
+			'non-receiver double encoded' => array( 'https%253A%252F%252Fn8n.example.com%252Fwebhook%252Fabc' ),
+			'non-receiver kses'           => array( 'https:&amp;#x2F;&amp;#x2F;www.make.com&amp;#x2F;en' ),
+			'slack non-hook path'         => array( 'hooks.slack.com%252Fhelp%252Farticles' ),
+			'non-legacy sol, no ;'        => array( 'hooks.zapier.com&solx' ),
+			'plus is no space'            => array( 'q=a+hooks.zapier.com%2Bx' ),
+			'wptexturize prose'           => array( '<p>It&#8217;s &#8220;done&#8221; &#8212; see&nbsp;page&#8230; 100% &amp; more</p>' ),
+			'json prose'                  => array( '{"a":"caf\\u00e9 \\ud83d\\ude00 \\/x"}' ),
+			'four layers, no receiver'    => array( 'a%2525252Fb' ),
+			'placeholder only'            => array( 'x aura-redacted:v1:make y' ),
+		);
+	}
+
+	/** @dataProvider controls */
+	public function test_controls_stay_untouched( string $in ): void {
+		$this->assertSame( $in, $this->text( $in, $n ) );
+		$this->assertSame( 0, $n );
+	}
+
+	public function test_a_pcre_failure_fails_the_field_closed(): void {
+		$jit   = ini_get( 'pcre.jit' );
+		$limit = ini_get( 'pcre.backtrack_limit' );
+		ini_set( 'pcre.jit', '0' ); // phpcs:ignore WordPress.PHP.IniSet.Risky
+		ini_set( 'pcre.backtrack_limit', '1' ); // phpcs:ignore WordPress.PHP.IniSet.Risky
+		try {
+			// No `/` and no encoded slash: stage 1 never runs a regex, stage 2 does.
+			$this->assertSame( 'aura-redacted:v1:field', $this->text( 'keep hooks.zapier.com%252Fx keep', $n ) );
+			$this->assertSame( 1, $n );
+			$this->assertSame( 'plain words only', $this->text( 'plain words only', $n ), 'the field fast path runs no regex' );
+			$this->assertSame( 0, $n );
+		} finally {
+			ini_set( 'pcre.backtrack_limit', (string) $limit ); // phpcs:ignore WordPress.PHP.IniSet.Risky
+			ini_set( 'pcre.jit', (string) $jit ); // phpcs:ignore WordPress.PHP.IniSet.Risky
+		}
+	}
+
+	// --- carriers ---------------------------------------------------------
+
+	public function test_a_double_encoded_url_inside_elementor_data_is_redacted(): void {
+		$tree = array(
+			array(
+				'id'         => 'w1',
+				'elType'     => 'widget',
+				'widgetType' => 'text-editor',
+				'settings'   => array(
+					'editor' => '<p><a href="https://user&amp;#64hook.eu2.make.com/abc123secret">x</a></p>',
+					'link'   => array( 'url' => 'https://example.com/go?to=' . rawurlencode( rawurlencode( 'https://hooks.zapier.com/hooks/catch/1/zsecret9' ) ) ),
+				),
+				'elements'   => array(),
+			),
+		);
+		$post = array( 'id' => 7, 'meta' => array( '_elementor_data' => wp_json_encode( $tree ) ) );
+
+		$out = Aura_Worker_Redact::redact( $post, $n );
+
+		$this->assertSame( 2, $n );
+		$json = $out['meta']['_elementor_data'];
+		$this->assertStringNotContainsString( 'abc123secret', $json );
+		$this->assertStringNotContainsString( 'zsecret9', $json );
+		$decoded = json_decode( $json, true );
+		$this->assertSame( '<p><a href="aura-redacted:v1:make">x</a></p>', $decoded[0]['settings']['editor'] );
+		$this->assertSame( 'aura-redacted:v1:zapier', $decoded[0]['settings']['link']['url'] );
+	}
+
+	public function test_a_double_encoded_url_in_an_mcp_text_carrier_is_redacted(): void {
+		$inner  = wp_json_encode( array( 'href' => 'hooks.slack.com%252Fservices%252FT0%252FB0%252FSLACKSECRET' ) );
+		$result = array( 'result' => array( 'content' => array( array( 'type' => 'text', 'text' => $inner ) ) ) );
+
+		$out = Aura_Worker_Redact::redact( $result, $n );
+
+		$this->assertSame( 1, $n );
+		$this->assertSame( array( 'href' => 'aura-redacted:v1:slack' ), json_decode( $out['result']['content'][0]['text'], true ) );
+	}
+
+	public function test_an_mcp_text_that_is_not_json_is_redacted_as_text(): void {
+		$result = array( 'result' => array( 'content' => array( array( 'type' => 'text', 'text' => 'Saved: https://user&#038;#64hook.eu2.make.com/abc123secret.' ) ) ) );
+
+		$out = Aura_Worker_Redact::redact( $result, $n );
+
+		$this->assertSame( 1, $n );
+		$this->assertSame( 'Saved: aura-redacted:v1:make.', $out['result']['content'][0]['text'] );
+	}
+
+	public function test_a_double_encoded_url_in_a_snapshot_payload_string_is_redacted(): void {
+		$captured = array(
+			7 => array(
+				'existed' => true,
+				'fields'  => array(
+					'post_title'   => 'Contact',
+					'post_content' => '<p>https://user&#038;#64hook.eu2.make.com/abc123secret</p>',
+				),
+				'meta'    => array(),
+			),
+		);
+		$answer   = array( 'found' => true, 'record' => array( 'id' => 'snap_113' ), 'payload' => base64_encode( serialize( $captured ) ) ); // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_encode, WordPress.PHP.DiscouragedPHPFunctions.serialize_serialize
+
+		$out = Aura_Worker_Redact::redact( array( 'success' => true, 'result' => $answer ), $n );
+
+		$this->assertSame( 1, $n );
+		$back = unserialize( (string) base64_decode( $out['result']['payload'], true ), array( 'allowed_classes' => false ) ); // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.serialize_unserialize, WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_decode
+		$this->assertSame( '<p>aura-redacted:v1:make</p>', $back[7]['fields']['post_content'] );
+		$this->assertSame( 'Contact', $back[7]['fields']['post_title'] );
+		$this->assertArrayNotHasKey( 'payload_redacted', $out['result'] );
+	}
+
+	public function test_the_write_guard_still_matches_only_the_literal_marker(): void {
+		$this->assertFalse( Aura_Worker_Redact::holds_placeholder( array( 'x' => 'aura-redacted&#58;v1:make' ) ), 'the guard does not decode' );
+		$redacted = Aura_Worker_Redact::redact( array( 'x' => 'hooks.zapier.com%252Fx' ), $n );
+		$this->assertSame( 1, $n );
+		$this->assertTrue( Aura_Worker_Redact::holds_placeholder( $redacted ) );
+	}
+
+	// --- performance (spec §4) ---------------------------------------------
+
+	/** @return array<string,array{0:bool}> */
+	public static function jit_modes(): array {
+		return array(
+			'jit on'  => array( true ),
+			'jit off' => array( false ),
+		);
+	}
+
+	/**
+	 * About 1 MB of wptexturize'd prose with nested encodings and no
+	 * receiver: stays linear, never fails closed.
+	 *
+	 * @dataProvider jit_modes
+	 */
+	public function test_a_megabyte_of_encoded_prose_is_not_failed_closed( bool $jit ): void {
+		$old = ini_get( 'pcre.jit' );
+		ini_set( 'pcre.jit', $jit ? '1' : '0' ); // phpcs:ignore WordPress.PHP.IniSet.Risky
+		try {
+			$chunk = 'It&#8217;s &#8220;done&#8221; &#8212; see&nbsp;https://example.com/a?b=1&#038;c=%252F&amp;amp;d caf%C3%A9 \\u00e9 &amp;#8230; ';
+			$long  = 'https://example.com/?q=' . str_repeat( '%2525252Fa&amp;amp;', 2000 );
+			$text  = str_repeat( $chunk, (int) ceil( 1000000 / strlen( $chunk ) ) ) . $long;
+			$this->assertGreaterThan( 1000000, strlen( $text ) );
+
+			$start = microtime( true );
+			$out   = $this->text( $text, $n );
+			$this->assertLessThan( 2.0, microtime( true ) - $start );
+			$this->assertSame( $text, $out );
+			$this->assertSame( 0, $n );
+		} finally {
+			ini_set( 'pcre.jit', (string) $old ); // phpcs:ignore WordPress.PHP.IniSet.Risky
+		}
+	}
+}
