@@ -24,8 +24,8 @@
  * decoding hides again (e.g. a decoded numeric reference landing directly
  * against a host with no separator). `decode_layers()` returns every layer
  * — the raw run first, then each pass whose result differed from the one
- * before it — so Task 2 (`Aura_Worker_Redact::redact_encoded_runs()`) MUST
- * check every layer against URL_PATTERNS, not only the last one.
+ * before it — so `Aura_Worker_Redact::redact_encoded_runs()` MUST check
+ * every layer against URL_PATTERNS, not only the last one.
  *
  * Spec: Digitizers/Aura
  * docs/superpowers/specs/2026-09-17-redaction-decode-then-match-design.md §3.1.
@@ -147,9 +147,10 @@ class Aura_Worker_Redact_Decode {
 	 * could land on — the raw run itself first (element 0), because that is
 	 * what a reader who does no decoding at all sees, then each pass whose
 	 * result differed from the one before it, up to the fixed point. The
-	 * caller (Task 2) MUST check every element against URL_PATTERNS, not
-	 * only the last one: an intermediate layer can expose a receiver URL
-	 * that a later pass's own decoding goes on to hide again.
+	 * caller (`Aura_Worker_Redact::redact_encoded_runs()`) MUST check every
+	 * element against URL_PATTERNS, not only the last one: an intermediate
+	 * layer can expose a receiver URL that a later pass's own decoding goes
+	 * on to hide again.
 	 *
 	 * @param string $run One run of text (no whitespace, quote or angle bracket).
 	 * @return array<int,string>|null 1–(MAX_DECODE_PASSES+1) layers, `[ $run ]`

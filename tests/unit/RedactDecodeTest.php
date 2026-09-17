@@ -327,8 +327,8 @@ final class RedactDecodeTest extends TestCase {
 	}
 
 	/**
-	 * Minor 2 (#113): JSON only defines lowercase `\u`, so RE_JSON_ESCAPE
-	 * must not decode `\U`; the hex digits themselves stay case-insensitive.
+	 * JSON only defines lowercase `\u`, so RE_JSON_ESCAPE must not decode
+	 * `\U`; the hex digits themselves stay case-insensitive.
 	 */
 	public function test_only_lowercase_u_starts_a_json_escape(): void {
 		$this->assertSame( '\\U0041', Aura_Worker_Redact_Decode::decode_run( '\\U0041' ) );
