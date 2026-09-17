@@ -236,6 +236,133 @@ final class RedactEncodedSlashTest extends TestCase {
 		$this->assertSame( 'aura-redacted:v1:make', $this->text( $long ) );
 	}
 
+	// --- fix round 1 ------------------------------------------------------
+
+	/** @return array<string,array{0:string,1:string}> input, expected */
+	public static function non_ascii_boundaries(): array {
+		return array(
+			'curly quotes'   => array( '%E2%80%9Chooks.zapier.com%2Fhooks%2Fcatch%2F1%2FSECRET', '%E2%80%9Caura-redacted:v1:zapier' ),
+			'guillemets'     => array( 'q=%C2%ABhook.eu2.make.com%2Fsecret%C2%BB', 'q=%C2%ABaura-redacted:v1:make' ),
+			'nbsp'           => array( '%C2%A0hooks.zapier.com%2Fhooks%2FSECRET', '%C2%A0aura-redacted:v1:zapier' ),
+			'accented word'  => array( 'caf%C3%A9hooks.zapier.com%2Fx', 'caf%C3%A9aura-redacted:v1:zapier' ),
+			'lower-case hex' => array( '%e2%80%9chooks.zapier.com%2fhooks%2fSECRET', '%e2%80%9caura-redacted:v1:zapier' ),
+		);
+	}
+
+	/**
+	 * I1: a percent-escaped non-ASCII byte is not a hostname character, so
+	 * it is a host boundary.
+	 *
+	 * @dataProvider non_ascii_boundaries
+	 */
+	public function test_a_percent_escaped_non_ascii_byte_is_a_host_boundary( string $in, string $expected ): void {
+		$this->assertSame( $expected, $this->text( $in, $n ) );
+		$this->assertSame( 1, $n );
+	}
+
+	/** @return array<string,array{0:string,1:string}> input, expected */
+	public static function unterminated_references(): array {
+		return array(
+			'decimal'              => array( 'hooks.zapier.com&#47hooks&#47catch&#47SECRET', 'aura-redacted:v1:zapier' ),
+			'hex after host'       => array( 'hooks.zapier.com&#x2Fhooks/catch', 'aura-redacted:v1:zapier' ),
+			'padded decimal'       => array( 'hook.eu2.make.com&#047SECRET', 'aura-redacted:v1:make' ),
+			'scheme'               => array( 'https:&#47;&#47hooks.zapier.com/x', 'aura-redacted:v1:zapier' ),
+			'boundary decimal'     => array( 'x&#47&#47hooks.zapier.com/SECRET', 'x&#47&#47aura-redacted:v1:zapier' ),
+			'boundary hex'         => array( 'x&#x2F&#x2Fhooks.zapier.com/SECRET', 'x&#x2F&#x2Faura-redacted:v1:zapier' ),
+			'boundary one decimal' => array( 'go&#47hooks.zapier.com&#47SECRET', 'go&#47aura-redacted:v1:zapier' ),
+		);
+	}
+
+	/**
+	 * M1: HTML5 decodes a numeric reference without its `;` (the hex form
+	 * only when no hex digit follows).
+	 *
+	 * @dataProvider unterminated_references
+	 */
+	public function test_an_unterminated_numeric_slash_reference_is_a_slash( string $in, string $expected ): void {
+		$this->assertSame( $expected, $this->text( $in, $n ) );
+		$this->assertSame( 1, $n );
+	}
+
+	/** @return array<string,array{0:string}> */
+	public static function round1_negatives(): array {
+		return array(
+			'encoded dot prefix'     => array( 'evil%2Ehook.eu2.make.com%2Fx' ),
+			'encoded digit prefix'   => array( 'x%31hooks.zapier.com%2Fx' ),
+			'decimal 475 is no slash' => array( 'hooks.zapier.com&#475hooks' ),
+			'hex 2fa is no slash'     => array( 'hooks.zapier.com&#x2Fahooks' ),
+			'hex 2fd before discord'  => array( 'x&#x2Fdiscord.com/api/webhooks/1/SECRET' ),
+			'decimal 470 before host' => array( 'x&#470hooks.zapier.com/SECRET' ),
+		);
+	}
+
+	/** @dataProvider round1_negatives */
+	public function test_round1_controls_stay_untouched( string $in ): void {
+		$this->assertSame( $in, $this->text( $in, $n ) );
+		$this->assertSame( 0, $n );
+	}
+
+	/** M3: a padded entity closing the URL keeps its `;` inside the URL. */
+	public function test_a_padded_entity_closing_the_url_is_not_trailing_punctuation(): void {
+		$this->assertSame( 'x aura-redacted:v1:zapier', $this->text( 'x hooks.zapier.com&#x002F;SECRET&#x002F;' ) );
+		$this->assertSame( 'x aura-redacted:v1:zapier', $this->text( 'x hooks.zapier.com&#0047;SECRET&#0047;' ) );
+		$this->assertSame( 'x aura-redacted:v1:zapier.', $this->text( 'x hooks.zapier.com&#x002F;SECRET&#x002F;.' ) );
+		$this->assertSame( 'x aura-redacted:v1:zapier;', $this->text( 'x hooks.zapier.com/SECRET;' ), 'a plain `;` is still punctuation' );
+	}
+
+	/** @return array<string,array{0:bool}> */
+	public static function jit_modes(): array {
+		return array(
+			'jit on'  => array( true ),
+			'jit off' => array( false ),
+		);
+	}
+
+	/**
+	 * M2: the IFTTT event segment must not span an encoded slash, nor
+	 * backtrack over one.
+	 *
+	 * @dataProvider jit_modes
+	 */
+	public function test_long_ifttt_trigger_runs_do_not_fail_closed( bool $jit ): void {
+		$old = ini_get( 'pcre.jit' );
+		ini_set( 'pcre.jit', $jit ? '1' : '0' ); // phpcs:ignore WordPress.PHP.IniSet.Risky
+		try {
+			$cases = array(
+				'maker.ifttt.com%2Ftrigger%2F' . str_repeat( 'a%2F', 90000 ),
+				str_repeat( 'maker.ifttt.com%2Ftrigger%2Fa', 30000 ),
+				str_repeat( 'maker.ifttt.com&#x2F;trigger&#x2F;a ', 30000 ),
+			);
+			foreach ( $cases as $i => $in ) {
+				$start = microtime( true );
+				$this->assertSame( $in, $this->text( $in, $n ), "case {$i}" );
+				$this->assertSame( 0, $n );
+				$this->assertLessThan( 2.0, microtime( true ) - $start );
+			}
+			$hit = 'maker.ifttt.com%2Ftrigger%2F' . str_repeat( 'a%2F', 90000 ) . 'ev%2Fwith%2Fkey%2FSECRET';
+			$this->assertSame( 'maker.ifttt.com%2Ftrigger%2F' . str_repeat( 'a%2F', 90000 ) . 'ev%2Fwith%2Fkey%2FSECRET', $this->text( $hit, $n ), 'a trigger path with extra segments is not the IFTTT shape' );
+			$real = str_repeat( 'x ', 30000 ) . 'maker.ifttt.com%2Ftrigger%2Fev%2Fwith%2Fkey%2FSECRET';
+			$this->assertSame( str_repeat( 'x ', 30000 ) . 'aura-redacted:v1:ifttt', $this->text( $real, $n ) );
+			$this->assertSame( 1, $n );
+		} finally {
+			ini_set( 'pcre.jit', (string) $old ); // phpcs:ignore WordPress.PHP.IniSet.Risky
+		}
+	}
+
+	/** M7: typographic entities do not defeat the fast reject; encoded slashes do. */
+	public function test_the_fast_reject_markers(): void {
+		$m = new ReflectionMethod( Aura_Worker_Redact::class, 'may_hold_encoded_slash' );
+		if ( PHP_VERSION_ID < 80100 ) {
+			$m->setAccessible( true );
+		}
+		foreach ( array( 'it&#8217;s', 'a &amp; b', '&#8220;quoted&#8221;', '100%', '&#x2019;' ) as $no ) {
+			$this->assertFalse( $m->invoke( null, $no ), $no );
+		}
+		foreach ( array( '%2F', '%2f', '&sol;', '&SOL;', '&#47', '&#047;', '&#x2F', '&#X002f;' ) as $yes ) {
+			$this->assertTrue( $m->invoke( null, "x{$yes}y" ), $yes );
+		}
+	}
+
 	// --- carriers ---------------------------------------------------------
 
 	public function test_an_encoded_url_inside_elementor_data_is_redacted_and_the_json_round_trips(): void {

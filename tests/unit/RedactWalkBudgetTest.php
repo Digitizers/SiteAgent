@@ -32,16 +32,46 @@ final class RedactWalkBudgetTest extends TestCase {
 		$out   = Aura_Worker_Redact::redact( array( 'result' => $answer ), $n );
 
 		$this->assertLessThan( 10.0, microtime( true ) - $start, 'exponential without a node budget' );
-		$this->assertGreaterThan( 0, $n );
-		// The payload is walked first and spends the whole budget, so what
-		// follows it in the response fails closed too (the record included).
-		if ( null === $out['result']['payload'] ) {
-			$this->assertTrue( $out['result']['payload_redacted'] );
-		} else {
-			$bytes = base64_decode( $out['result']['payload'], true );
-			$this->assertIsString( $bytes );
-			$this->assertStringContainsString( 'aura-redacted:v1:field', $bytes );
-		}
+		$this->assertSame( 1, $n, 'one replacement: the payload (R12)' );
+		// Fix round 1 (M4): the documented fail-closed shape, and the record survives.
+		$this->assertNull( $out['result']['payload'] );
+		$this->assertTrue( $out['result']['payload_redacted'] );
+		$this->assertTrue( $out['result']['found'] );
+		$this->assertSame( $answer['record'], $out['result']['record'] );
+	}
+
+	public function test_after_an_exhausting_payload_the_rest_of_the_response_is_still_walked(): void {
+		$loop = array(
+			'found'   => true,
+			'record'  => array( 'id' => 'snap_loop' ),
+			'payload' => base64_encode( 'a:2:{i:0;R:1;i:1;R:1;}' ),
+		);
+		$body = array(
+			'a'    => $loop,
+			'b'    => $loop,
+			'text' => 'see https://hook.eu2.make.com/abc123secret',
+		);
+
+		$start = microtime( true );
+		$out   = Aura_Worker_Redact::redact( $body, $n );
+
+		$this->assertLessThan( 10.0, microtime( true ) - $start );
+		$this->assertTrue( $out['a']['payload_redacted'] );
+		$this->assertTrue( $out['b']['payload_redacted'], 'a second exhausting payload fails closed at once' );
+		$this->assertSame( 'see aura-redacted:v1:make', $out['text'] );
+		$this->assertSame( 3, $n );
+	}
+
+	public function test_a_clean_payload_after_an_exhausting_one_fails_closed_too(): void {
+		$loop  = array( 'found' => true, 'record' => null, 'payload' => base64_encode( 'a:2:{i:0;R:1;i:1;R:1;}' ) );
+		$clean = array( 'found' => true, 'record' => null, 'payload' => base64_encode( serialize( array( 'x' => 'plain' ) ) ) );
+		$out   = Aura_Worker_Redact::redact( array( $loop, $clean ), $n );
+		$this->assertNull( $out[1]['payload'] );
+		$this->assertTrue( $out[1]['payload_redacted'] );
+
+		// A new response starts with a fresh budget.
+		$this->assertSame( array( $clean ), Aura_Worker_Redact::redact( array( $clean ), $n ) );
+		$this->assertSame( 0, $n );
 	}
 
 	public function test_an_array_that_references_itself_twice_completes_and_fails_closed(): void {

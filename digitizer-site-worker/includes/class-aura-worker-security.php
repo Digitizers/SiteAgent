@@ -408,9 +408,13 @@ class Aura_Worker_Security {
 	 * token_matches() it must not act for a caller the permission callback
 	 * would still refuse (SiteAgent #110). What validate_request() and the
 	 * route check after these layers — the run-as administrator, the unbind
-	 * marker, the route's capability — is left out: the grant check answers
-	 * an unbound site itself (403 aura_site_unbound), and the run-as user is
-	 * the connecting administrator, who holds every capability a route asks.
+	 * marker, the route's capability — is left out. The grant check answers
+	 * an unbound site itself (403 aura_site_unbound). The capability is NOT
+	 * implied: a caller holding the site token AND a low-privilege
+	 * Application Password is admitted here while the route's
+	 * current_user_can() check refuses it. Accepted as low harm: that caller
+	 * already holds the site token, and at worst it gets a 409 or spends a
+	 * grant nonce it presented itself.
 	 *
 	 * @since 2.18.1
 	 *

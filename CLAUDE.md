@@ -281,10 +281,13 @@ out of every REST response an **agent** reads.
   `RE_ENC_SLASH`, 2.18.1, #110), and so may the scheme or port colon (`%3A`, `&#58;`,
   `&#x3A;`, `&colon;`) and the userinfo `@` (`%40`, …): a URL passed as a query
   parameter (`?redirect=https%3A%2F%2Fhook.eu2.make.com%2F…`) is replaced whole. A
-  percent escape of a non-hostname character (`%2F`, `%40`, `%3D`, … — never `%2D`,
-  `%2E`, a digit or a letter) counts as a host boundary. The fast reject skips a string
-  only when it has no `/`, `%2f`, `&#` or `&sol;`. Double encoding (`%252F`,
-  `&amp;#x2F;`) is out of scope; `SECRET_KEYS` — exact key
+  percent escape of a non-hostname character (`%2F`, `%40`, `%3D`, a non-ASCII byte
+  `%80`–`%FF`, … — never `%2D`, `%2E`, a digit or a letter) counts as a host boundary.
+  A numeric reference to `/` may lack its `;` (`&#47`, `&#x2F` — the hex form only when
+  no hex digit follows, as HTML5 decodes it), and such an unterminated `&#47`/`&#047`/
+  `&#x2F`/`&#x02F` before a host is a boundary too. The fast reject skips a string only
+  when it has no `/`, `%2f`, `&sol` or numeric `/` reference (a bare `&#8217;` does not
+  defeat it). See Limits for what is not decoded; `SECRET_KEYS` — exact key
   names only (`webhooks`), each with its plugin/setting in a comment, never a
   substring match. Carriers decoded: `_elementor_data`/`_elementor_page_settings`
   strings (and a snapshot capture's `{ existed, value }` entry under those keys), the
@@ -308,7 +311,9 @@ out of every REST response an **agent** reads.
   migration): the filter runs before the route's permission callback, so an anonymous,
   throttled or allowlist-refused caller gets that callback's answer — no 409, no
   counter, no nonce spent. The run-as administrator and the route's capability are not
-  re-checked there.
+  re-checked there: a token holder with a low-privilege Application Password passes
+  this gate although the route's capability check refuses it (accepted, low harm — it
+  already holds the site token).
 - **Unredacted grant.** `X-Aura-Unredacted-Grant`, verified by
   `Aura_Worker_Grant::verify()` on two shapes only: a single-object JSON-RPC
   `tools/call` POST to `/mcp/<server>` (tool `unredacted-read:mcp/<server>#<name>`,
@@ -333,7 +338,9 @@ out of every REST response an **agent** reads.
   A total node budget, `MAX_WALK_NODES` (200000 containers, 2.18.1, #110), bounds a
   value that refers back to itself more than once (a payload of
   `a:2:{i:0;R:1;i:1;R:1;}`): one budget per `redact()` call — one served response,
-  every carrier in it included — and every container past it is the field placeholder.
+  every carrier in it included — and every container past it is the field placeholder,
+  except inside a snapshot payload, which is then withheld whole (`payload_redacted`) and
+  gives its nodes back so the rest of the response is still walked.
 - **Limits** (known, accepted):
   - raw-read tools (`db_query`, `execute_php`, `run_wp_cli`, `read_file`, and
     `meta_key`/`meta_value` rows) get only the URL detector — the key names are not
@@ -346,7 +353,15 @@ out of every REST response an **agent** reads.
     walked copy, re-encoded string), and fails closed (placeholder or
     `payload_redacted`) when a step cannot complete;
   - re-serializing a rewritten snapshot payload loses PHP references, and an integer
-    too large for PHP's int comes back from a decoded JSON carrier as a float.
+    too large for PHP's int comes back from a decoded JSON carrier as a float;
+  - not decoded before matching (#110): double encoding (`%252F`, `&amp;#x2F;`),
+    percent-encoded hostname characters (`hook%2Eeu2…`), JSON `\u002F` escapes in a
+    string that is never JSON-decoded, `&period;`/`&#46;` host dots, and an
+    unterminated slash reference padded past one zero (`&#0047hooks…`) as a host
+    boundary;
+  - once a snapshot payload exhausts the node budget, it is withheld whole
+    (`payload: null, payload_redacted: true`) and so is every later payload in that
+    response; the rest of the response is still walked.
 
 ---
 

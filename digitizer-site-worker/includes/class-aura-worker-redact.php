@@ -41,12 +41,27 @@ class Aura_Worker_Redact {
 	 * Regex: a slash written as an escape rather than a literal `/` (#110):
 	 * percent-encoded (`%2F`, `%2f` — a URL passed as a query parameter) or
 	 * an HTML character reference (`&#47;`, `&#x2F;`, `&sol;`, leading zeros
-	 * allowed). The pattern is case-insensitive. Only ONE level of encoding:
+	 * allowed). A numeric reference may lack its `;`, as HTML5 decodes it
+	 * then too — the decimal form when no digit follows, the hex form when
+	 * no hex digit follows (fix round 1). The pattern is case-insensitive.
+	 * Only ONE level of encoding:
 	 * a double-encoded slash (`%252F`, `&amp;#x2F;`) is out of scope, as is a
 	 * percent-encoded hostname character (`hook%2Eeu2…`), which no URL
 	 * encoder produces.
 	 */
-	const RE_ENC_SLASH = '(?:%2f|&#0*47;|&#x0*2f;|&sol;)';
+	const RE_ENC_SLASH = '(?:%2f|&' . self::RE_ENC_SLASH_REF . ')';
+
+	/** Regex (after `&`): the rest of an HTML reference to `/` — see RE_ENC_SLASH. */
+	const RE_ENC_SLASH_REF = '(?:#0*47(?:;|(?![0-9]))|#x0*2f(?:;|(?![0-9a-f]))|sol;)';
+
+	/**
+	 * Regex: one piece of a URL segment that never spans a slash, literal or
+	 * encoded — a possessive run of plain characters, or a single `%` / `&`
+	 * that does not start an encoded slash. Repeated possessively: no
+	 * backtracking, and one PCRE group iteration per run, not per character
+	 * (fix round 1, M2).
+	 */
+	const RE_SEGMENT_PIECE = '(?:[^\\s/\\\\"\'<>%&]++|%(?!2f)|&(?!' . self::RE_ENC_SLASH_REF . '))';
 
 	/** Regex: a slash — literal and JSON-escaped any number of times (or not at all), or encoded (RE_ENC_SLASH). */
 	const RE_SLASH = '(?:(?:\\\\)*/|' . self::RE_ENC_SLASH . ')';
@@ -65,7 +80,7 @@ class Aura_Worker_Redact {
 	 * per-character group would cost PCRE's JIT a stack frame per character
 	 * and fail a long string closed.
 	 */
-	const RE_USERINFO = '(?:(?:[^\\s/\\\\@"\'<>%&]++|%(?!2f|40)|&(?!#0*47;|#x0*2f;|sol;|#0*64;|#x0*40;|commat;))*+(?:@|' . self::RE_ENC_AT . '))?';
+	const RE_USERINFO = '(?:(?:[^\\s/\\\\@"\'<>%&]++|%(?!2f|40)|&(?!' . self::RE_ENC_SLASH_REF . '|#0*64;|#x0*40;|commat;))*+(?:@|' . self::RE_ENC_AT . '))?';
 
 	/** Regex: `//` (each slash as RE_SLASH), then optional userinfo — shared by the schemed and protocol-relative prefixes. */
 	const RE_DOUBLE_SLASH_USERINFO = self::RE_SLASH . self::RE_SLASH . self::RE_USERINFO;
@@ -78,11 +93,16 @@ class Aura_Worker_Redact {
 	 * character that is NOT a hostname character (everything but `-`, `.`,
 	 * digits and letters: `%2D`, `%2E`, `%30`–`%39`, `%41`–`%5A`, `%61`–`%7A`
 	 * are left out), so `evil%2Ehook.eu2.make.com` still is no boundary, as
-	 * `evil.hook.eu2.make.com` is not. An HTML reference already ends in
-	 * `;`, which the plain lookbehind accepts. Fixed-width top-level
+	 * `evil.hook.eu2.make.com` is not. A non-ASCII byte (`%80`–`%FF`, e.g.
+	 * the UTF-8 of a curly quote or a no-break space) is no hostname
+	 * character either (fix round 1, I1). A terminated HTML reference ends
+	 * in `;`, which the plain lookbehind accepts; an UNterminated reference
+	 * to `/` (`&#47`, `&#047`, `&#x2F`, `&#x02F` — deeper zero padding is not
+	 * recognised) is a boundary too, the hex form only when no hex digit
+	 * follows, as HTML5 decodes it (fix round 1, M1). Fixed-width top-level
 	 * alternatives, as PCRE requires in a lookbehind.
 	 */
-	const RE_PCT_BOUNDARY = '(?<=%[01][0-9a-f]|%2[0-9a-cf]|%3[a-f]|%40|%5[b-f]|%60|%7[b-f])';
+	const RE_PCT_BOUNDARY = '(?:(?<=%[01][0-9a-f]|%2[0-9a-cf]|%3[a-f]|%40|%5[b-f]|%60|%7[b-f]|%[89a-f][0-9a-f]|&#47|&#047)|(?<=&#x2f|&#x02f)(?![0-9a-f]))';
 
 	/**
 	 * Regex: the URL's prefix — full scheme (`https://`), protocol-relative
@@ -135,10 +155,18 @@ class Aura_Worker_Redact {
 	 * Punctuation that ends a sentence rather than a URL: stripped from the
 	 * end of a match and kept in the text (`…/abc.` → `…:make.`). Webhook
 	 * secrets are `[A-Za-z0-9_-]`, so a secret is always replaced whole.
-	 * The `;` that closes an encoded slash (`&#x2F;`, `&#47;`, `&sol;`) is
-	 * part of the URL, not punctuation (#110).
+	 * The `;` that closes an encoded slash (`&#x2F;`, `&#x002F;`, `&#47;`,
+	 * `&sol;`) is part of the URL, not punctuation (#110): see
+	 * ENC_SLASH_END.
 	 */
-	const TRAILING_PUNCTUATION = '/(?<!&sol|&#47|&#x2f)[.,;:!?]+$/i';
+	const TRAILING_PUNCTUATION = '/[.,;:!?]+$/';
+
+	/**
+	 * A match that ends in an encoded slash's reference, then (captured) any
+	 * sentence punctuation after it — only that is handed back (fix round 1,
+	 * M3: leading zeros included).
+	 */
+	const ENC_SLASH_END = '/(?:&#0*47|&#x0*2f|&sol);([.,;:!?]*)$/i';
 
 	/**
 	 * Known receivers (spec §2.1): full-URL patterns anchored on the
@@ -159,7 +187,7 @@ class Aura_Worker_Redact {
 		array( 'discord', self::RE_HEAD . '(?:(?:ptb|canary)\.)?discord\.com' . self::RE_HOST_END . 'api' . self::RE_SLASH . '(?:v[0-9]+' . self::RE_SLASH . ')?webhooks' . self::RE_SLASH . self::RE_TAIL ),
 		array( 'discord', self::RE_HEAD . '(?:(?:ptb|canary)\.)?discordapp\.com' . self::RE_HOST_END . 'api' . self::RE_SLASH . '(?:v[0-9]+' . self::RE_SLASH . ')?webhooks' . self::RE_SLASH . self::RE_TAIL ),
 		// IFTTT Webhooks: `/use/<key>`, `/trigger/<event>/with/key/<key>` and `/trigger/<event>/json/with/key/<key>`.
-		array( 'ifttt', self::RE_HEAD . 'maker\.ifttt\.com' . self::RE_HOST_END . '(?:use' . self::RE_SLASH . '|trigger' . self::RE_SLASH . '[^\s/\\\\"\'<>]+' . self::RE_SLASH . '(?:json' . self::RE_SLASH . ')?with' . self::RE_SLASH . 'key' . self::RE_SLASH . ')' . self::RE_TAIL ),
+		array( 'ifttt', self::RE_HEAD . 'maker\.ifttt\.com' . self::RE_HOST_END . '(?:use' . self::RE_SLASH . '|trigger' . self::RE_SLASH . self::RE_SEGMENT_PIECE . '++' . self::RE_SLASH . '(?:json' . self::RE_SLASH . ')?with' . self::RE_SLASH . 'key' . self::RE_SLASH . ')' . self::RE_TAIL ),
 		// Telegram: Bot API `/bot<token>/<method>` and file downloads `/file/bot<token>/<path>`.
 		// The token itself ends at `/`, `?`, `#` or the end of the URL — the
 		// slash is only where a path follows (fix round 1, Codex r1 P3):
@@ -264,6 +292,16 @@ class Aura_Worker_Redact {
 	 * @var int
 	 */
 	private static $walk_nodes = 0;
+
+	/**
+	 * Did a snapshot payload exhaust the node budget in this redaction? Every
+	 * later payload in the same response is then withheld at once, so a
+	 * response of many such payloads costs one budget, not one each (fix
+	 * round 1, M4). Reset by redact().
+	 *
+	 * @var bool
+	 */
+	private static $payload_budget_spent = false;
 
 	/**
 	 * Hook the read seam and the counters. Called from Aura_Worker::init(),
@@ -719,9 +757,10 @@ class Aura_Worker_Redact {
 
 	/** Test seam: forget every exemption. */
 	public static function reset_for_tests() {
-		self::$exempt     = array();
-		self::$walk_level = 0;
-		self::$walk_nodes = 0;
+		self::$exempt               = array();
+		self::$walk_level           = 0;
+		self::$walk_nodes           = 0;
+		self::$payload_budget_spent = false;
 	}
 
 	/**
@@ -767,7 +806,8 @@ class Aura_Worker_Redact {
 		$count = 0;
 		// One node budget for the whole response: every carrier below is
 		// walked from inside this call, never from a fresh one.
-		self::$walk_nodes = 0;
+		self::$walk_nodes           = 0;
+		self::$payload_budget_spent = false;
 		return self::walk( $data, 0, false, $count );
 	}
 
@@ -797,7 +837,7 @@ class Aura_Worker_Redact {
 			$out         = preg_replace_callback(
 				$pattern[1],
 				static function ( $m ) use ( $placeholder ) {
-					return 1 === preg_match( self::TRAILING_PUNCTUATION, $m[0], $tail ) ? $placeholder . $tail[0] : $placeholder;
+					return $placeholder . self::trailing_punctuation( $m[0] );
 				},
 				$text,
 				-1,
@@ -818,15 +858,35 @@ class Aura_Worker_Redact {
 	}
 
 	/**
+	 * The sentence punctuation at the end of a matched URL, handed back to
+	 * the text. After an encoded slash's reference only what follows its
+	 * `;` counts (ENC_SLASH_END).
+	 *
+	 * @param string $url The matched URL.
+	 * @return string
+	 */
+	private static function trailing_punctuation( $url ) {
+		if ( 1 === preg_match( self::ENC_SLASH_END, $url, $m ) ) {
+			return $m[1];
+		}
+		return 1 === preg_match( self::TRAILING_PUNCTUATION, $url, $m ) ? $m[0] : '';
+	}
+
+	/**
 	 * Could $text hold an encoded slash (RE_ENC_SLASH)? A cheap superset
-	 * check for redact_text()'s fast reject: `%2f`, `&#` or `&sol;`, in any
-	 * case.
+	 * check for redact_text()'s fast reject, case-insensitive: `%2f`,
+	 * `&sol`, or a numeric reference to `/` (`&#0*47`, `&#x0*2f`). A bare
+	 * `&#` is not enough — wptexturize'd text is full of `&#8217;` (fix
+	 * round 1, M7).
 	 *
 	 * @param string $text Text.
 	 * @return bool
 	 */
 	private static function may_hold_encoded_slash( $text ) {
-		return false !== strpos( $text, '&#' ) || false !== stripos( $text, '%2f' ) || false !== stripos( $text, '&sol;' );
+		if ( false !== stripos( $text, '%2f' ) || false !== stripos( $text, '&sol' ) ) {
+			return true;
+		}
+		return false !== strpos( $text, '&#' ) && 1 === preg_match( '/&#(?:0*47|x0*2f)/i', $text );
 	}
 
 	/**
@@ -921,6 +981,7 @@ class Aura_Worker_Redact {
 			return $node; // int, float, bool, null
 		}
 		if ( ! self::enter_container() ) {
+			self::refuse_in_payload_past_budget( $in_payload );
 			++$count;
 			return self::PLACEHOLDER . 'field';
 		}
@@ -929,6 +990,22 @@ class Aura_Worker_Redact {
 			return self::walk_container( $node, $depth, $in_payload, $count );
 		} finally {
 			--self::$walk_level;
+		}
+	}
+
+	/**
+	 * Inside a snapshot payload, an exhausted node budget withholds the whole
+	 * payload (`payload: null, payload_redacted: true`) rather than leaving a
+	 * placeholder inside it (fix round 1, M4). The depth bound alone still
+	 * yields the placeholder.
+	 *
+	 * @param bool $in_payload Inside a payload.
+	 * @return void
+	 * @throws UnexpectedValueException Inside a payload, past the node budget.
+	 */
+	private static function refuse_in_payload_past_budget( $in_payload ) {
+		if ( $in_payload && self::$walk_nodes >= self::MAX_WALK_NODES ) {
+			throw new UnexpectedValueException( 'the node budget ran out inside a snapshot payload' );
 		}
 	}
 
@@ -1142,6 +1219,7 @@ class Aura_Worker_Redact {
 	 * @param bool   $in_payload Inside a payload.
 	 * @param int    $count      In/out.
 	 * @return mixed
+	 * @throws UnexpectedValueException Inside a payload only (see walk()).
 	 */
 	private static function walk_with_carrier( $container, $carrier, $depth, $in_payload, &$count ) {
 		$is_object = $container instanceof stdClass;
@@ -1149,6 +1227,7 @@ class Aura_Worker_Redact {
 			return self::walk( $container, $depth, $in_payload, $count );
 		}
 		if ( ! self::enter_container() ) {
+			self::refuse_in_payload_past_budget( $in_payload );
 			++$count;
 			return self::PLACEHOLDER . 'field'; // as walk(): a carrier container can nest in itself too
 		}
@@ -1264,10 +1343,14 @@ class Aura_Worker_Redact {
 	 * @return array
 	 */
 	private static function redact_snapshot_answer( array $answer, $depth, $in_payload, &$count ) {
-		$before = $count;
+		$before       = $count;
+		$nodes_before = self::$walk_nodes;
 		try {
 			if ( $in_payload ) {
 				throw new UnexpectedValueException( 'a payload inside a payload' ); // R2
+			}
+			if ( self::$payload_budget_spent ) {
+				throw new UnexpectedValueException( 'an earlier payload exhausted the node budget' );
 			}
 			$bytes = base64_decode( $answer['payload'], true ); // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_decode -- the snapshot payload's own encoding (Aura_Tool_Snapshot_Get)
 			if ( ! is_string( $bytes ) ) {
@@ -1281,6 +1364,13 @@ class Aura_Worker_Redact {
 		} catch ( UnexpectedValueException $e ) {
 			// Nothing here can be proven free of a key-held secret: fail
 			// closed, keep the record (R12: one replacement).
+			if ( self::$walk_nodes >= self::MAX_WALK_NODES ) {
+				// The payload spent the budget and is withheld whole: give its
+				// nodes back so the rest of the response (the record) is still
+				// walked, and withhold any later payload unwalked (M4).
+				self::$walk_nodes           = min( self::$walk_nodes, $nodes_before );
+				self::$payload_budget_spent = true;
+			}
 			$count                      = $before + 1;
 			$answer['payload']          = null;
 			$answer['payload_redacted'] = true;
