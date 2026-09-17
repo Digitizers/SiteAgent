@@ -1269,7 +1269,7 @@ class Aura_Worker_Redact {
 			if ( $in_payload ) {
 				throw new UnexpectedValueException( 'a payload inside a payload' ); // R2
 			}
-			$bytes = base64_decode( $answer['payload'], true );
+			$bytes = base64_decode( $answer['payload'], true ); // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_decode -- the snapshot payload's own encoding (Aura_Tool_Snapshot_Get)
 			if ( ! is_string( $bytes ) ) {
 				throw new UnexpectedValueException( 'payload is not base64' );
 			}
@@ -1287,7 +1287,8 @@ class Aura_Worker_Redact {
 			return $answer;
 		}
 		if ( $count !== $before ) {
-			$answer['payload'] = base64_encode( serialize( $walked ) );
+			// Written back in the payload's own format: base64 of PHP serialize(), as the snapshot engine stores it.
+			$answer['payload'] = base64_encode( serialize( $walked ) ); // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_encode,WordPress.PHP.DiscouragedPHPFunctions.serialize_serialize -- the payload format; no WordPress alternative
 		}
 		return $answer;
 	}
@@ -1298,7 +1299,7 @@ class Aura_Worker_Redact {
 	 */
 	private static function read_serialized( $bytes ) {
 		try {
-			return @unserialize( $bytes, array( 'allowed_classes' => false ) ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- malformed bytes are an answer (false → fail closed), not a warning to surface.
+			return @unserialize( $bytes, array( 'allowed_classes' => false ) ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.PHP.DiscouragedPHPFunctions.serialize_unserialize -- allowed_classes=false instantiates nothing (maybe_unserialize() cannot say so); malformed bytes are an answer (false → fail closed), not a warning to surface.
 		} catch ( Throwable $e ) {
 			return false;
 		}
@@ -1318,7 +1319,7 @@ class Aura_Worker_Redact {
 	 * @return bool
 	 */
 	private static function opaque_may_hold_secret( $object ) {
-		$bytes   = serialize( $object );
+		$bytes   = serialize( $object ); // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.serialize_serialize -- scanned as bytes, never stored or unserialized
 		$scratch = 0;
 		if ( self::redact_text( $bytes, $scratch ) !== $bytes ) {
 			return true;
