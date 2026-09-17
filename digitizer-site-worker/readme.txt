@@ -4,7 +4,7 @@ Tags: ai, automation, maintenance, updates, wordpress management
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.18.2
+Stable tag: 2.18.3
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -253,6 +253,13 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 
 == Changelog ==
 
+= 2.18.3 =
+* Security: redaction now reads a URL the way a browser's URL parser does. A backslash used as the path separator under http, https, ws, wss, ftp or a protocol-relative prefix (`https://hooks.zapier.com\hooks\catch\1/…`, also percent- or HTML-encoded) is redacted whole, including the part after the first backslash that earlier releases left in place.
+* Security: hostname characters a URL parser normalises away (fullwidth and mathematical letters, the ideographic full stop, zero-width and soft-hyphen characters — Unicode 18.0.0's IDNA mapping table) are mapped before matching, so `ｈooks.zapier.com` and `hooks&#x3002;zapier.com` are redacted like `hooks.zapier.com`.
+* A URL parser's userinfo (`a@b@host`, an encoded slash or backslash inside it) and an empty port (`host:/`) are read as the parser reads them in the backslash and encoded forms above; a plain `https://host:/path` with nothing encoded is still matched by the older rule that wants a port digit (tracked as #121).
+* Redacting a very large field with millions of words now takes about three times the field's size in memory instead of eighteen.
+* Kept as they are: a backslash after a bare host with no scheme, Windows and UNC paths, `file:` URLs.
+
 = 2.18.2 =
 * Security: redaction now decodes HTML references (including the double encoding WordPress itself produces on save and render), percent escapes and JSON escapes before looking for webhook URLs, so encoded or double-encoded Make, Zapier, Slack, Discord, IFTTT or Telegram hook URLs are now redacted.
 * The whole encoded word is replaced, not just the part that decoded into a match.
@@ -439,52 +446,10 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
   whose ruleset has not changed since the upgrade is repaired on its next
   request rather than waiting for the next push.
 
-= 2.11.0 =
-* Feature: **the magic-link connect now mints an Application Password for
-  the dashboard.** A magic-link connection could run SiteAgent's own tools
-  but not the builder tools (Elementor MCP and friends) that authenticate
-  with WordPress Basic auth — only a manual connect, which never provisions
-  the gateway key, could. The signed /connect callback now also mints an
-  Application Password named "Aura SiteAgent" for the administrator who
-  created the link and returns it once, in the callback's response, so the
-  dashboard stores it encrypted beside the site token. Every connect rotates
-  it (earlier ones under that name are deleted first). Where Application
-  Passwords are unavailable (no HTTPS, disabled by a filter, no admin user)
-  the connect succeeds token-only as before and names the reason.
-* The whole install — token, client binding, gateway key, Application
-  Password — runs under one site-wide connect claim, so two callbacks for the
-  same site cannot split the credentials the dashboard ends up holding.
-  "Regenerate Token" takes the same claim (it is refused while a connect is
-  installing). The claim is never taken over by age: a callback the dashboard
-  timed out on may still be running. Every write the install makes — the site
-  token, the client binding, the dashboard URL, the gateway key — is issued by
-  a statement conditional on holding the claim, so a claim that goes away
-  mid-request costs that request its connect (retryable) rather than letting it
-  overwrite the install that replaced it. If a
-  killed request ever leaves a claim behind, every later connect is refused
-  until an administrator deactivates and reactivates the plugin, which
-  releases it.
-  "Regenerate Token" issues its cleanup the same way, and skips revoking the
-  Application Password when it no longer owns the claim — the password on the
-  site then belongs to whichever connect replaced it. It still reveals the
-  token it stored: refusing to would revoke the old token while showing no
-  replacement.
-* Deactivating the plugin now also revokes the Application Password Aura
-  minted. Unregistering SiteAgent's routes does not stop an
-  administrator-level credential from authenticating to WordPress core and to
-  other REST/MCP plugins, so "deactivated" would not have meant
-  "disconnected". If the revocation fails the owner and UUID are kept, and
-  reactivating finishes the job (activation retries a revocation deactivation
-  could not land), as does uninstalling. The site token binding survives
-  deactivation, so the settings screen keeps showing the dashboard it is
-  connected to. The Connect button is always reachable there, and the line above
-  it says what the site actually holds: a working credential, one that was never
-  delivered, none at all, or a site that cannot issue one (token-only).
-
-= 2.10.3 and earlier =
+= 2.11.0 and earlier =
 
 * WordPress.org truncates a Changelog over 5,000 words, and this plugin's history is longer than that.
-  The entries for 2.10.3 and every release before it were moved out of this file verbatim and are kept in full at:
+  The entries for 2.11.0 and every release before it were moved out of this file verbatim and are kept in full at:
   https://github.com/Digitizers/SiteAgent/blob/main/docs/changelog-archive.md
 
 == Upgrade Notice ==

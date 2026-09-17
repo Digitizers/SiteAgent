@@ -17,7 +17,7 @@
   </a>
   <img src="https://img.shields.io/badge/WordPress-6.2%E2%80%937.1-21759b?logo=wordpress" alt="WordPress" />
   <img src="https://img.shields.io/badge/PHP-7.4%2B-777bb4?logo=php" alt="PHP" />
-  <img src="https://img.shields.io/badge/Stable-2.18.2-green" alt="Stable" />
+  <img src="https://img.shields.io/badge/Stable-2.18.3-green" alt="Stable" />
 </p>
 
 ---
@@ -238,6 +238,16 @@ These plug straight into **Aura's Fleet MCP Gateway**: read tools run on demand,
 ---
 
 ## Changelog
+
+### 2.18.3
+
+- **Redaction reads a URL the way a URL parser does.** A backslash used as the path separator under `http:`, `https:`, `ws:`, `wss:`, `ftp:` or a protocol-relative prefix — literal, or encoded as `%5C` / `&#92;` — is a slash, so `https://hooks.zapier.com\hooks\catch\1\SECRET` is redacted whole; the stage 1 cut that used to leave `\catch\1\SECRET` behind is closed.
+- **Hostnames are normalised under UTS-46 before matching**, with a generated table from Unicode 18.0.0's IDNA mapping (fullwidth and mathematical letters, `。` `．` `｡`, zero-width space, soft hyphen, word joiner, BOM, variation selectors), without `intl`.
+- **Userinfo and ports as a parser reads them:** the last `@` delimits userinfo (encoded slashes and backslashes inside it stay userinfo), and an empty port (`host:/`) is a port.
+- **`original_runs()` keeps only the runs at stage 1 cut indexes**, so a field of millions of runs peaks at about 3× its size instead of 18×.
+- Kept by design: a backslash after a bare host (`hooks.zapier.com\abc`), Windows and UNC paths, `file:` URLs. Known limit filed as #121: an empty port after a receiver host in plain text is a stage 1 miss.
+
+Ships Digitizers/SiteAgent#120.
 
 ### 2.18.2
 
