@@ -195,9 +195,16 @@ final class RedactUrlReadingTest extends TestCase {
 		);
 	}
 
-	public function test_a_mapped_prefix_glued_to_a_receiver_host_is_redacted_the_lookalike_cost(): void {
-		// Stage 2 has no left host boundary (#113 owner decision), extended to view 2.
-		$this->assertSame( 'aura-redacted:v1:zapier', $this->text( "\u{FF4D}\u{FF59}hooks.zapier.com/x" ) );
+	public function test_a_mapped_character_inside_a_lookalike_host_is_the_view_2_lookalike_cost(): void {
+		// Stage 1 (frozen) already reads the non-ASCII byte before `hooks` as a
+		// host boundary and redacts the receiver; the fullwidth prefix stays.
+		// Not a stage 2 case.
+		$this->assertSame( "\u{FF4D}\u{FF59}aura-redacted:v1:zapier", $this->text( "\u{FF4D}\u{FF59}hooks.zapier.com/x" ) );
+		// The view 2 lookalike cost proper: a mapped character INSIDE the host
+		// (U+FF4F -> `o`) makes stage 1 miss it, and stage 2 — with no left
+		// boundary — redacts the ASCII-prefixed lookalike whole (#113 owner
+		// decision, extended to view 2).
+		$this->assertSame( 'aura-redacted:v1:zapier', $this->text( "myhooks.zapier.c\u{FF4F}m/x" ) );
 		// Its plain ASCII twin never enters stage 2 and is kept by stage 1's boundary.
 		$this->assertSame( 'myhooks.zapier.com/x', $this->text( 'myhooks.zapier.com/x' ) );
 	}
@@ -213,7 +220,17 @@ final class RedactUrlReadingTest extends TestCase {
 
 	public static function encoded_backslash_then_json_escape(): array {
 		$cases = array();
-		foreach ( self::RECEIVERS as $name => $r ) {
+		// Restricted to the receivers whose pattern accepts any path after the
+		// host (make, celonis, integromat, zapier): slack/discord/discordapp/
+		// ifttt/telegram require a fixed path segment (`services/`,
+		// `api/webhooks/`, `trigger/…/with/key/`, `bot<digits>:`) right after
+		// the host; with `u0061<secret>` glued there, no reader — percent-
+		// decoding, JSON, or URL parser — resolves the text to a WORKING
+		// receiver, so there is nothing to redact. Their encoded-backslash
+		// forms with the real path are covered by schemed_forms()'s `%5C` /
+		// `&#92;` / `&#x5C;` rows.
+		foreach ( array( 'make', 'celonis', 'integromat', 'zapier' ) as $name ) {
+			$r = self::RECEIVERS[ $name ];
 			foreach ( array( '%5C', '%5c', '&#92;', '&#092', '&#x5C;', '&#x5c', '&bsol;' ) as $enc ) {
 				// `u0061` + the secret: a JSON escape for a percent/HTML-decoding reader.
 				$cases[ "{$name} / {$enc}" ] = array( "https://{$r[0]}{$enc}u0061{$r[3]}", $r[2] );
