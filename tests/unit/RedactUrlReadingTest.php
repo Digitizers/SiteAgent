@@ -60,6 +60,9 @@ final class RedactUrlReadingTest extends TestCase {
 			'userinfo, two @'       => static function ( $h, $p ) { return "https://a@b@{$h}\\{$p}"; },
 			'userinfo, three @, //' => static function ( $h, $p ) { return "//a@b@c@{$h}\\{$p}"; },
 			'userinfo, encoded @'   => static function ( $h, $p ) { return "https://a%40b@{$h}\\{$p}"; },
+			'userinfo, encoded slash'       => static function ( $h, $p ) { return "https://a%2Fb@{$h}\\{$p}"; },
+			'userinfo, encoded slash ref'   => static function ( $h, $p ) { return "https://a&sol;b@{$h}\\{$p}"; },
+			'userinfo, encoded slash + two @' => static function ( $h, $p ) { return "https://a%2Fb@c@{$h}\\{$p}"; },
 		);
 	}
 
@@ -127,6 +130,7 @@ final class RedactUrlReadingTest extends TestCase {
 			'other host, receiver in path' => array( 'https://example.com\\hooks.zapier.com\\x' ),
 			'other host, mapped chars'  => array( "https://\u{FF45}xample.com/x" ),
 			'userinfo with a slash before the host' => array( 'https://a@b/hooks.zapier.com\\x' ),
+			'userinfo ended by a literal slash, encoded @ after' => array( 'https://a/b%40hooks.zapier.com\\x' ),
 		);
 	}
 
@@ -321,6 +325,10 @@ final class RedactUrlReadingTest extends TestCase {
 		// #116, Codex r1 on PR #120: userinfo reads to its LAST `@`, as a parser does.
 		$this->assertSame( 1, preg_match( $url[2][1], 'https://a@b@hooks.zapier.com/hooks/catch/1/x' ) );
 		$this->assertSame( 1, preg_match( $url[2][1], '//a@b@hooks.zapier.com/x' ) );
+		// #116, Codex round 2: an encoded slash inside userinfo is not a delimiter
+		// for a parser, unlike a literal one.
+		$this->assertSame( 1, preg_match( $url[2][1], 'https://a%2Fb@hooks.zapier.com/hooks/catch/1/x' ) );
+		$this->assertSame( 0, preg_match( $url[2][1], 'https://a/b@hooks.zapier.com/hooks/catch/1/x' ) );
 	}
 
 	/** @dataProvider url_view_cases */

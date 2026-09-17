@@ -130,10 +130,17 @@ class Aura_Worker_Redact {
 	 * host is the delimiter, and any earlier `@` is part of the userinfo
 	 * (`a@b@host`). One or more RE_USERINFO groups, each ending in its own
 	 * `@` (or an encoded one), possessive: linear, and the host always
-	 * follows the final `@`. Used by RE_HEAD_SCHEMED only (#116, Codex r1
-	 * on PR #120); stage 1 and stage_2_patterns() keep RE_USERINFO.
+	 * follows the final `@`. Unlike RE_USERINFO, an encoded slash (`%2F`,
+	 * `&#47;`/`&sol;`-style, RE_ENC_SLASH_REF) is NOT excluded here: a URL
+	 * parser never decodes userinfo before finding the last `@`, so an
+	 * encoded slash inside userinfo is just userinfo, not a delimiter — only
+	 * a LITERAL `/` (or `\`, already turned into `/` by url_view()) ends the
+	 * authority (`https://a/b@host` has host `a`) (#116, Codex round 2 on
+	 * PR #120). RE_USERINFO keeps excluding it: stage 1 (#110) reads an
+	 * encoded slash as structural there. Used by RE_HEAD_SCHEMED only (#116,
+	 * Codex r1 on PR #120); stage 1 and stage_2_patterns() keep RE_USERINFO.
 	 */
-	const RE_USERINFO_ANY_AT = '(?:(?:[^\\s/\\\\@"\'<>%&]++|%(?!2f|40)|&(?!' . self::RE_ENC_SLASH_REF . '|' . self::RE_ENC_AT_REF . '))*+(?:@|' . self::RE_ENC_AT . '))*+';
+	const RE_USERINFO_ANY_AT = '(?:(?:[^\\s/\\\\@"\'<>%&]++|%(?!40)|&(?!' . self::RE_ENC_AT_REF . '))*+(?:@|' . self::RE_ENC_AT . '))*+';
 
 	/** Regex: `//` (each slash as RE_SLASH), then optional userinfo — shared by the schemed and protocol-relative prefixes. */
 	const RE_DOUBLE_SLASH_USERINFO = self::RE_SLASH . self::RE_SLASH . self::RE_USERINFO;
