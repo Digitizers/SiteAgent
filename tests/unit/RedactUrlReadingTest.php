@@ -1,0 +1,287 @@
+<?php
+/**
+ * SiteAgent #116: stage 2 reads a run the way a URL parser does — a
+ * backslash is a slash under a scheme (url_view + url_patterns), and a
+ * hostname's UTS-46 mapping is a hostname (Aura_Worker_Redact_Idna::map) —
+ * and keeps everything a parser would not resolve to a receiver.
+ *
+ * @package Aura_Worker\Tests
+ */
+
+use PHPUnit\Framework\TestCase;
+
+final class RedactUrlReadingTest extends TestCase {
+
+	/** name => [ host, path after the host's slash, kind, secret ] — one per URL_PATTERNS entry */
+	private const RECEIVERS = array(
+		'make'       => array( 'hook.eu2.make.com', 'abc123secret', 'make', 'abc123secret' ),
+		'celonis'    => array( 'hook.eu1.make.celonis.com', 'cel123secret', 'make', 'cel123secret' ),
+		'integromat' => array( 'hook.integromat.com', 'isecret1', 'integromat', 'isecret1' ),
+		'zapier'     => array( 'hooks.zapier.com', 'hooks/catch/1/zsecret9', 'zapier', 'zsecret9' ),
+		'slack'      => array( 'hooks.slack.com', 'services/T000/B000/SLACKSECRET', 'slack', 'SLACKSECRET' ),
+		'discord'    => array( 'discord.com', 'api/webhooks/123/dsecret-tok', 'discord', 'dsecret-tok' ),
+		'discordapp' => array( 'discordapp.com', 'api/v10/webhooks/123/dsecret-tok', 'discord', 'dsecret-tok' ),
+		'ifttt'      => array( 'maker.ifttt.com', 'trigger/ev/with/key/ksecret_1', 'ifttt', 'ksecret_1' ),
+		'telegram'   => array( 'api.telegram.org', 'bot123456:AAsecret_x/sendMessage', 'telegram', 'AAsecret_x' ),
+	);
+
+	protected function setUp(): void {
+		sa_reset_state();
+	}
+
+	private function text( string $in, ?int &$count = null ): string {
+		$count = 0;
+		return Aura_Worker_Redact::redact_text( $in, $count );
+	}
+
+	/** Every prefix a WHATWG parser resolves to the host, as a function of host and a backslash path. */
+	private static function schemed_forms(): array {
+		return array(
+			'https://'       => static function ( $h, $p ) { return "https://{$h}\\{$p}"; },
+			'http://'        => static function ( $h, $p ) { return "http://{$h}\\{$p}"; },
+			'https:\\'       => static function ( $h, $p ) { return "https:\\{$h}\\{$p}"; },
+			'https:/'        => static function ( $h, $p ) { return "https:/{$h}\\{$p}"; },
+			'https: (none)'  => static function ( $h, $p ) { return "https:{$h}\\{$p}"; },
+			'https:///'      => static function ( $h, $p ) { return "https:///{$h}\\{$p}"; },
+			'//'             => static function ( $h, $p ) { return "//{$h}\\{$p}"; },
+			'\\\\'           => static function ( $h, $p ) { return "\\\\{$h}\\{$p}"; },
+			'mixed'          => static function ( $h, $p ) { return "https://{$h}/" . strtr( $p, '/', '\\' ); },
+			'%5C'            => static function ( $h, $p ) { return "https://{$h}" . str_replace( '\\', '%5C', "\\{$p}" ); },
+			'&#92;'          => static function ( $h, $p ) { return "https://{$h}" . str_replace( '\\', '&#92;', "\\{$p}" ); },
+			'&#x5C;'         => static function ( $h, $p ) { return "https://{$h}" . str_replace( '\\', '&#x5C;', "\\{$p}" ); },
+			'pct whole'      => static function ( $h, $p ) { return rawurlencode( "https://{$h}\\{$p}" ); },
+			'json \\\\'      => static function ( $h, $p ) { return "https://{$h}" . str_replace( '\\', '\\\\', "\\{$p}" ); },
+		);
+	}
+
+	public static function backslash_cases(): array {
+		$cases = array();
+		foreach ( self::RECEIVERS as $name => $r ) {
+			$path = strtr( $r[1], '/', '\\' );
+			foreach ( self::schemed_forms() as $form => $make ) {
+				$cases[ "{$name} / {$form}" ] = array( $make( $r[0], $path ), $r[2], $r[3] );
+			}
+		}
+		return $cases;
+	}
+
+	/** @dataProvider backslash_cases */
+	public function test_a_backslash_path_under_a_scheme_is_redacted_whole( string $url, string $kind, string $secret ): void {
+		foreach ( array( $url, "see {$url} now", "x=\"{$url}\"", "{$url}." ) as $in ) {
+			$out = $this->text( $in, $count );
+			$this->assertStringNotContainsString( $secret, $out, $in );
+			$this->assertStringContainsString( 'aura-redacted:v1:' . $kind, $out, $in );
+			$this->assertGreaterThanOrEqual( 1, $count, $in );
+		}
+		$this->assertSame( 'aura-redacted:v1:' . $kind . '.', $this->text( "{$url}." ) );
+	}
+
+	public function test_the_stage_1_cut_leaves_no_fragment_of_the_secret(): void {
+		$this->assertSame( 'aura-redacted:v1:zapier', $this->text( 'https://hooks.zapier.com/hooks\\catch\\1\\SECRET' ) );
+		$this->assertSame( 'a aura-redacted:v1:slack b', $this->text( 'a https://hooks.slack.com/services\\T0\\B0\\SEC b' ) );
+	}
+
+	/** @dataProvider carriers */
+	public function test_inside_carriers( string $carrier ): void {
+		$url = 'https://hooks.zapier.com\\hooks\\catch\\1\\zsecret9';
+		$out = wp_json_encode( Aura_Worker_Redact::redact( json_decode( sprintf( $carrier, addcslashes( $url, '\\' ) ), true ) ) );
+		$this->assertStringNotContainsString( 'zsecret9', $out );
+		$this->assertStringContainsString( 'aura-redacted:v1:zapier', $out );
+	}
+
+	public static function carriers(): array {
+		return array(
+			'elementor meta' => array( '{"meta":{"_elementor_data":"[{\"settings\":{\"url\":\"%s\"}}]"}}' ),
+			'mcp text'       => array( '{"content":[{"type":"text","text":"call %s"}]}' ),
+			'plain string'   => array( '{"content":{"raw":"%s"}}' ),
+		);
+	}
+
+	/** @dataProvider kept */
+	public function test_what_a_parser_does_not_resolve_to_a_receiver_is_kept( string $in ): void {
+		$this->assertSame( $in, $this->text( $in, $count ), $in );
+		$this->assertSame( 0, $count );
+	}
+
+	public static function kept(): array {
+		return array(
+			'bare host, json newline'   => array( 'hooks.zapier.com\\nNext' ),
+			'bare host, backslash path' => array( 'hooks.zapier.com\\hooks\\catch\\1\\S' ),
+			'windows path'              => array( 'C:\\Users\\hooks.zapier.com\\x' ),
+			'file url'                  => array( 'file://hooks.zapier.com\\x' ),
+			'unc, other host'           => array( '\\\\server\\share\\hooks.zapier.com' ),
+			'one slash: a path'         => array( '/hooks.zapier.com\\x' ),
+			'prose with a backslash'    => array( 'either\\or, see hooks.zapier.com' ),
+			'lookalike host'            => array( 'https://hooks.zapier.com.evil\\x' ),
+			'other host, receiver in path' => array( 'https://example.com\\hooks.zapier.com\\x' ),
+			'other host, mapped chars'  => array( "https://\u{FF45}xample.com/x" ),
+		);
+	}
+
+	/** Every UTS-46 example, as the literal character, as an HTML reference of the code point, and as percent escapes of its UTF-8 bytes. */
+	public static function uts46_cases(): array {
+		$hosts = array(
+			'fullwidth h'     => array( "\u{FF48}ooks.zapier.com", 'hooks/catch/1/zsecret9', 'zapier', 'zsecret9' ),
+			'math bold h'     => array( "\u{1D421}ooks.zapier.com", 'hooks/catch/1/zsecret9', 'zapier', 'zsecret9' ),
+			'circled h'       => array( "\u{24D7}ooks.zapier.com", 'hooks/catch/1/zsecret9', 'zapier', 'zsecret9' ),
+			'ideographic dot' => array( "hooks\u{3002}zapier.com", 'hooks/catch/1/zsecret9', 'zapier', 'zsecret9' ),
+			'fullwidth dot'   => array( "hook.eu2\u{FF0E}make.com", 'abc123secret', 'make', 'abc123secret' ),
+			'soft hyphen'     => array( "hooks\u{00AD}.slack.com", 'services/T0/B0/SLACKSECRET', 'slack', 'SLACKSECRET' ),
+			'zwsp'            => array( "hooks\u{200B}.zapier.com", 'hooks/catch/1/zsecret9', 'zapier', 'zsecret9' ),
+			'bom'             => array( "\u{FEFF}discord.com", 'api/webhooks/1/dsecret-tok', 'discord', 'dsecret-tok' ),
+			'digit one dot'   => array( "api\u{2488}telegram.org", 'bot1:AAsecret_x/x', 'telegram', 'AAsecret_x' ), // "api1.telegram.org" is NOT a receiver — see the kept row below
+		);
+		unset( $hosts['digit one dot'] );
+		$cases = array();
+		foreach ( $hosts as $name => $r ) {
+			// An HTML reference names a CODE POINT (`&#xFF48;`); a percent escape
+			// names a BYTE (`%EF%BD%88`). Both decode to the same UTF-8.
+			$refs = '';
+			foreach ( preg_split( '//u', $r[0], -1, PREG_SPLIT_NO_EMPTY ) as $ch ) {
+				$refs .= strlen( $ch ) > 1 ? '&#x' . strtoupper( dechex( self::code_point( $ch ) ) ) . ';' : $ch;
+			}
+			$pcts = '';
+			foreach ( str_split( $r[0] ) as $byte ) {
+				$pcts .= ord( $byte ) > 0x7F ? '%' . strtoupper( dechex( ord( $byte ) ) ) : $byte;
+			}
+			$cases[ "{$name} / literal" ]        = array( "https://{$r[0]}/{$r[1]}", $r[2], $r[3] );
+			$cases[ "{$name} / bare literal" ]   = array( "{$r[0]}/{$r[1]}", $r[2], $r[3] );
+			$cases[ "{$name} / code point refs" ] = array( "https://{$refs}/{$r[1]}", $r[2], $r[3] );
+			$cases[ "{$name} / pct bytes" ]      = array( "https://{$pcts}/{$r[1]}", $r[2], $r[3] );
+			$cases[ "{$name} / backslash path" ] = array( "https://{$r[0]}\\" . strtr( $r[1], '/', '\\' ), $r[2], $r[3] );
+		}
+		return $cases;
+	}
+
+	/** The code point of one UTF-8 character (no mbstring). */
+	private static function code_point( string $ch ): int {
+		$b = array_values( unpack( 'C*', $ch ) );
+		switch ( count( $b ) ) {
+			case 1:
+				return $b[0];
+			case 2:
+				return ( ( $b[0] & 0x1F ) << 6 ) | ( $b[1] & 0x3F );
+			case 3:
+				return ( ( $b[0] & 0x0F ) << 12 ) | ( ( $b[1] & 0x3F ) << 6 ) | ( $b[2] & 0x3F );
+			default:
+				return ( ( $b[0] & 0x07 ) << 18 ) | ( ( $b[1] & 0x3F ) << 12 ) | ( ( $b[2] & 0x3F ) << 6 ) | ( $b[3] & 0x3F );
+		}
+	}
+
+	/** @dataProvider uts46_cases */
+	public function test_a_host_a_parser_normalises_is_redacted( string $url, string $kind, string $secret ): void {
+		foreach ( array( $url, "see {$url} now", "{$url}." ) as $in ) {
+			$out = $this->text( $in, $count );
+			$this->assertStringNotContainsString( $secret, $out, $in );
+			$this->assertStringContainsString( 'aura-redacted:v1:' . $kind, $out, $in );
+		}
+	}
+
+	/** @dataProvider uts46_kept */
+	public function test_a_host_a_parser_keeps_different_is_kept( string $in ): void {
+		$this->assertSame( $in, $this->text( $in, $count ), $in );
+		$this->assertSame( 0, $count );
+	}
+
+	public static function uts46_kept(): array {
+		return array(
+			'zwj inside the host (deviation)' => array( "https://hooks\u{200D}.zapier.com/x" ),
+			'combining mark (no NFC)'         => array( "https://h\u{0301}ooks.zapier.com/x" ),
+			'cyrillic shha'                   => array( "https://\u{04BB}ooks.zapier.com/x" ),
+			'digit one dot: another host'     => array( "https://api\u{2488}telegram.org/bot1:AAx/x" ),
+			'hebrew prose with slashes'       => array( "\u{05E9}\u{05DC}\u{05D5}\u{05DD}/\u{05E2}\u{05D5}\u{05DC}\u{05DD} hooks.example.com/x" ),
+			'arabic prose with slashes'       => array( "\u{0645}\u{0631}\u{062D}\u{0628}\u{0627}/\u{0628}\u{0643}" ),
+			'emoji with slashes'              => array( "\u{1F600}/\u{1F601} example.com/x" ),
+		);
+	}
+
+	public function test_a_mapped_prefix_glued_to_a_receiver_host_is_redacted_the_lookalike_cost(): void {
+		// Stage 2 has no left host boundary (#113 owner decision), extended to view 2.
+		$this->assertSame( 'aura-redacted:v1:zapier', $this->text( "\u{FF4D}\u{FF59}hooks.zapier.com/x" ) );
+		// Its plain ASCII twin never enters stage 2 and is kept by stage 1's boundary.
+		$this->assertSame( 'myhooks.zapier.com/x', $this->text( 'myhooks.zapier.com/x' ) );
+	}
+
+	/** @dataProvider encoded_backslash_then_json_escape */
+	public function test_an_encoded_backslash_before_a_json_escape_is_read_in_the_raw_layer( string $in, string $kind ): void {
+		// D11: `%5Cu0061` decodes to `a` within ONE pass, so no layer ever holds
+		// the backslash; url_view() reads the encoded one in the raw layer.
+		$out = $this->text( $in, $count );
+		$this->assertSame( 'aura-redacted:v1:' . $kind, $out, $in );
+		$this->assertSame( 1, $count );
+	}
+
+	public static function encoded_backslash_then_json_escape(): array {
+		$cases = array();
+		foreach ( self::RECEIVERS as $name => $r ) {
+			foreach ( array( '%5C', '%5c', '&#92;', '&#092', '&#x5C;', '&#x5c', '&bsol;' ) as $enc ) {
+				// `u0061` + the secret: a JSON escape for a percent/HTML-decoding reader.
+				$cases[ "{$name} / {$enc}" ] = array( "https://{$r[0]}{$enc}u0061{$r[3]}", $r[2] );
+			}
+		}
+		$cases['zapier / encoded backslash, no escape after it'] = array( 'https://hooks.zapier.com%5Chooks%5Ccatch%5C1%5CS', 'zapier' );
+		return $cases;
+	}
+
+	public function test_an_encoded_scheme_colon_before_a_receiver_host_is_the_lookalike_cost(): void {
+		// D8: the plain file: URL is kept (RE_HEAD_SCHEMED's lookbehind sees its
+		// colon); an ENCODED colon is not a colon in the raw layer's URL view, so
+		// the run is redacted — stage 2's accepted lookalike cost, not a leak.
+		$this->assertSame( 'file://hooks.zapier.com\\x', $this->text( 'file://hooks.zapier.com\\x' ) );
+		foreach ( array( 'file&#58;//hooks.zapier.com\\x', 'file\\u003A//hooks.zapier.com\\x', 'file%253A//hooks.zapier.com\\x' ) as $in ) {
+			$this->assertSame( 'aura-redacted:v1:zapier', $this->text( $in ), $in );
+		}
+	}
+
+	public function test_the_write_guard_is_unchanged(): void {
+		$this->assertTrue( Aura_Worker_Redact::holds_placeholder( array( 'content' => 'aura-redacted:v1:zapier' ) ) );
+		$this->assertFalse( Aura_Worker_Redact::holds_placeholder( array( 'content' => "https://\u{FF48}ooks.zapier.com/x" ) ) );
+	}
+
+	public function test_hebrew_prose_without_a_slash_is_returned_as_the_same_string(): void {
+		$in = str_repeat( "\u{05E9}\u{05DC}\u{05D5}\u{05DD} \u{05E2}\u{05D5}\u{05DC}\u{05DD} ", 50000 );
+		$this->assertSame( $in, $this->text( $in ) );
+	}
+
+	public function test_a_megabyte_of_hebrew_prose_with_slashes_is_linear(): void {
+		$word = "\u{05E9}\u{05DC}\u{05D5}\u{05DD}/\u{05E2}\u{05D5}\u{05DC}\u{05DD} ";
+		$in   = str_repeat( $word, (int) ( 1048576 / strlen( $word ) ) );
+		foreach ( array( 1, 0 ) as $jit ) {
+			$old = ini_set( 'pcre.jit', (string) $jit ); // phpcs:ignore WordPress.PHP.IniSet.Risky
+			try {
+				$start = microtime( true );
+				$this->assertSame( $in, $this->text( $in ) );
+				$this->assertLessThan( 2.0, microtime( true ) - $start, "pcre.jit={$jit}" );
+			} finally {
+				ini_set( 'pcre.jit', $old ); // phpcs:ignore WordPress.PHP.IniSet.Risky
+			}
+		}
+	}
+
+	public function test_a_megabyte_of_cjk_prose_with_slashes_is_linear(): void {
+		// CJK lead bytes ARE in Aura_Worker_Redact_Idna::LEAD (U+3002 is mapped), so
+		// every such run pays the strtr(): this pins that it is still linear.
+		$word = "\u{65E5}\u{672C}\u{8A9E}\u{3002}/\u{30C6}\u{30B9}\u{30C8} ";
+		$in   = str_repeat( $word, (int) ( 1048576 / strlen( $word ) ) );
+		$start = microtime( true );
+		$this->assertSame( $in, $this->text( $in ) );
+		$this->assertLessThan( 2.0, microtime( true ) - $start );
+	}
+
+	public function test_url_patterns_require_a_prefix_and_keep_kinds_and_order(): void {
+		$stage_2 = Aura_Worker_Redact::stage_2_patterns();
+		$url     = Aura_Worker_Redact::url_patterns();
+		$this->assertCount( count( $stage_2 ), $url );
+		foreach ( $url as $i => $pattern ) {
+			$this->assertSame( $stage_2[ $i ][0], $pattern[0] );
+			$this->assertSame( 0, preg_match( $pattern[1], 'hooks.zapier.com/hooks/catch/1/x' ), $pattern[0] . ': a bare host must not match' );
+		}
+		$this->assertSame( 1, preg_match( $url[2][1], 'https:hooks.zapier.com/hooks/catch/1/x' ) );
+		$this->assertSame( 1, preg_match( $url[2][1], '//hooks.zapier.com/hooks/catch/1/x' ) );
+		$this->assertSame( 0, preg_match( $url[2][1], '/hooks.zapier.com/hooks/catch/1/x' ) );
+		$this->assertSame( 0, preg_match( $url[2][1], 'file://hooks.zapier.com/hooks/catch/1/x' ), 'another scheme\'s // is not protocol-relative' );
+		$this->assertSame( 0, preg_match( $url[2][1], 'file%3A//hooks.zapier.com/hooks/catch/1/x' ) );
+		$this->assertSame( 0, preg_match( $url[2][1], '////hooks.zapier.com/hooks/catch/1/x' ) );
+		$this->assertSame( 1, preg_match( $url[2][1], 'https:////hooks.zapier.com/hooks/catch/1/x' ) );
+	}
+}
