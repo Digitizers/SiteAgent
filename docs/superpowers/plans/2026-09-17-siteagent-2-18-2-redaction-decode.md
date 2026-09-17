@@ -708,7 +708,7 @@ require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-redact.php';
 - [ ] **Step 5: Run the test and make sure it passes**
 
 Run: `vendor/bin/phpunit tests/unit/RedactDecodeTest.php`
-Expected: `OK (86 tests, 13078 assertions)`
+Expected: `OK (86 tests, …)`: 86 tests, all passing. The assertion count depends on the PHP build (the HTML5 table size), so it is not a gate.
 
 Then run: `vendor/bin/phpunit`
 Expected: the baseline count + 86 tests, with no failures and the baseline deprecation counts. `UninstallCoverageTest` scans the plugin's PHP sources, and the new file must not trip it.
@@ -1355,13 +1355,13 @@ Right after the closing `}` of `redact_urls()`, and before the docblock that sta
 - [ ] **Step 7: Run the tests and make sure they pass**
 
 Run: `vendor/bin/phpunit tests/unit/RedactEncodedRunTest.php`
-Expected: `OK (443 tests, 1096 assertions)`
+Expected: `OK (443 tests, …)`: 443 tests, all passing. The assertion count is not a gate.
 
 Run: `vendor/bin/phpunit --filter Redact`
 Expected: OK, with no failures.
 
 Run: `vendor/bin/phpunit`
-Expected: the baseline count + 529 tests (on the reference machine: `Tests: 4572, Assertions: 28795, Deprecations: 10, PHPUnit Deprecations: 1`), with no failures.
+Expected: the baseline count + 529 tests (on the reference machine: `Tests: 4572`; the deprecation counts must not grow; the assertion count is not a gate), with no failures.
 
 - [ ] **Step 8: Lint, and a PHP 7.4 check if you can**
 
