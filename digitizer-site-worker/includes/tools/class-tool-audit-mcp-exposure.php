@@ -73,6 +73,32 @@ class Aura_Tool_Audit_Mcp_Exposure extends Aura_Tool_Base {
 	const ELEMENTOR_CONSENT_META    = 'elementor_mcp_consent';
 	const ELEMENTOR_MODULE_CLASS    = '\\Elementor\\Modules\\Mcp\\Module';
 
+	/**
+	 * The kill switch Elementor 4.3.0-beta3 put in front of the
+	 * `/elementor/mcp` token door. `Server_Bootstrap::register_server()`
+	 * returns early unless `McpSettingsController::is_enabled()`, which is
+	 * FALSE when this option is absent — a 4.3 upgrade no longer opens a token
+	 * door by itself. The option is read, never the class: the class may not
+	 * be loaded on this request, and on an older Elementor there is no such
+	 * option and no such door, where "absent ⇒ off" is honest too.
+	 */
+	const ELEMENTOR_SWITCH_OPTION = 'elementor_mcp_enabled';
+
+	/**
+	 * The WP MCP adapter. WHICH vendored copy answers this name is autoload
+	 * order, not version: Elementor declares `WP\MCP\` through the Jetpack
+	 * autoloader and a co-installed plugin may prepend its own resolver for
+	 * the same namespace. The copy that resolves here is the one this site
+	 * runs.
+	 */
+	const ELEMENTOR_ADAPTER_CLASS = '\\WP\\MCP\\Core\\McpAdapter';
+
+	/** The elementor-mcp-composer package that owns `/elementor/mcp`. */
+	const ELEMENTOR_COMPOSER_CLASS = '\\Elementor\\MCP\\Composer\\Mcp\\Server_Bootstrap';
+
+	/** The composer.json this tool will decode, at most. Bigger is not read. */
+	const ELEMENTOR_COMPOSER_JSON_MAX = 65536;
+
 	public function get_name() {
 		return 'audit_mcp_exposure';
 	}
@@ -93,7 +119,7 @@ class Aura_Tool_Audit_Mcp_Exposure extends Aura_Tool_Base {
 			'angie'                => 'object — { active, version, mcp_server_present } (the known second door; absence of Angie does not mean absence of a second server)',
 			'abilities'            => 'object — { total, discoverable_by_type_rule, discoverable_and_mutating, discoverable_mutating_names }. These count abilities that PASS the discovery rule co-installed servers apply (no meta.mcp.type, or "tool") — a property of the abilities, NOT proof that anything currently serves them. Reachability additionally requires a server that resolves targets from the site-wide registry; a server with an explicit tool list reaches only what it lists. Read together with `servers`: with none registered, these counts describe a door that does not exist yet.',
 			'coverage'             => 'object — { total_seen, returned, truncated, cap } bounded-coverage contract',
-			'elementor'            => 'object — Elementor >= 4.3\'s official MCP door (2.15.0). { installed, version, mcp_module: { class_present, active, abilities_registered, server_id }, consent: [{ user_id, login, allowed, timestamp }], consent_unproven: [user_id], consent_truncated, app_passwords: { elementor: [{ user_id, login, name, created, last_used, last_ip }], elementor_entries_truncated, elementor_unproven: [user_id], candidates_read, elementor_truncated, other: { users_checked, count, recently_used, unproven: [user_id] } }, coverage: { users_total, users_checked, truncated, cap }, governor: { active } when the 2.16.0 door governor did not initialise (no Elementor MCP module on this site), else { active: true, epoch, seam: ok|unavailable|unchecked, door: open|closed, held_count, log_unacked, log_ungoverned_30d, unobserved_30d, hook_missed_30d, unknown_ability_30d, queue_full, log_full: { since, refused } | null } — the door log and hold queue this site\'s own governor is keeping, so the fleet rollup can flag a full log, a full hold queue, or a seam that never verified without polling /status. The `_30d` fields are rolling 24h×30 hourly-bucket sums; `log_ungoverned_30d` counts refusals the door log itself could not record. }. consent rows and Elementor-named Application Passwords are found across ALL users (two bounded usermeta queries, 50 rows each); every other Application Password of edit_posts users is counted (200 users). No usermeta value over 256 KB is decoded — such a row is listed in the subtree\'s *_unproven. A scan that failed is { error } in its place (mcp_module / consent / app_passwords.elementor / app_passwords.other / coverage / governor), never an empty list. Requires manage_options; every subtree is { error: \'manage_options required\' } otherwise. Shape: Digitizers/Aura docs/superpowers/specs/2026-09-02-elementor-mcp-door-detection-design.md §3; the governor block: docs/superpowers/specs/2026-09-02-elementor-door-governance-design.md.',
+			'elementor'            => 'object — Elementor >= 4.3\'s official MCP door (2.15.0; switch/adapter/composer: 2.19.0). { installed, version, mcp_module: { class_present, active, abilities_registered, server_id }, consent: [{ user_id, login, allowed, timestamp }], consent_unproven: [user_id], consent_truncated, app_passwords: { elementor: [{ user_id, login, name, created, last_used, last_ip }], elementor_entries_truncated, elementor_unproven: [user_id], candidates_read, elementor_truncated, other: { users_checked, count, recently_used, unproven: [user_id] } }, coverage: { users_total, users_checked, truncated, cap }, governor: { active } when the 2.16.0 door governor did not initialise (no Elementor MCP module on this site), else { active: true, epoch, seam: ok|unavailable|unchecked, door: open|closed, held_count, log_unacked, log_ungoverned_30d, unobserved_30d, hook_missed_30d, unknown_ability_30d, queue_full, log_full: { since, refused } | null } — the door log and hold queue this site\'s own governor is keeping, so the fleet rollup can flag a full log, a full hold queue, or a seam that never verified without polling /status. The `_30d` fields are rolling 24h×30 hourly-bucket sums; `log_ungoverned_30d` counts refusals the door log itself could not record. }, switch: { option_present, enabled } — the kill switch Elementor 4.3.0-beta3 put in front of the `/elementor/mcp` token door: the `elementor_mcp_enabled` OPTION (never the class, which may not be loaded on this request), read by the same rule McpSettingsController::is_enabled() applies — ABSENT ⇒ enabled:false, so a 4.3 upgrade no longer opens a token door by itself and an older Elementor with no such option reads as off, which it is; `option_present` tells those two sites apart, and the switch closes THAT door only (the 27 abilities stay registered, the adapter default server stands up, and elementor/v1/mcp-proxy never consults it), adapter: { class_present, version, path } — the WP MCP adapter copy that actually RESOLVES here (0.6.1 at beta3): which copy that is is autoload order, not version, since a co-installed plugin may prepend its own resolver for `WP\\MCP\\`; version is the class constant VERSION, null when absent or not a string, composer: { class_present, version, path } — the elementor-mcp-composer copy that owns /elementor/mcp, its version read from the package\'s own composer.json two directories above the class file (bounded: one file, at most 64 KB; missing, oversized, non-JSON or a non-string version ⇒ version:null with the copy still reported). Both `path`s are the class file relative to ABSPATH — the basename alone when it lies outside it — so no absolute server path leaves the audit. Nothing is instantiated. }. consent rows and Elementor-named Application Passwords are found across ALL users (two bounded usermeta queries, 50 rows each); every other Application Password of edit_posts users is counted (200 users). No usermeta value over 256 KB is decoded — such a row is listed in the subtree\'s *_unproven. A scan that failed is { error } in its place (mcp_module / consent / app_passwords.elementor / app_passwords.other / coverage / governor / switch / adapter / composer), never an empty list. Requires manage_options; every subtree is { error: \'manage_options required\' } otherwise. Shape: Digitizers/Aura docs/superpowers/specs/2026-09-02-elementor-mcp-door-detection-design.md §3; the governor block: docs/superpowers/specs/2026-09-02-elementor-door-governance-design.md.',
 		);
 	}
 
@@ -420,6 +446,96 @@ class Aura_Tool_Audit_Mcp_Exposure extends Aura_Tool_Base {
 			return null;
 		}
 		return $plugins['elementor/elementor.php'];
+	}
+
+	/**
+	 * The raw `elementor_mcp_enabled` value, or null when the option is
+	 * absent. A seam — tests override it, since a suite cannot write the
+	 * option row of a plugin it does not have.
+	 *
+	 * Multisite: the current blog's option, like every other read this block
+	 * makes.
+	 *
+	 * @return mixed
+	 */
+	protected function elementor_switch_option() {
+		return get_option( static::ELEMENTOR_SWITCH_OPTION, null );
+	}
+
+	/**
+	 * Whether a class resolves on this request. Asked WITHOUT the autoloader
+	 * first — a class already loaded is the strongest answer there is — and
+	 * then ONCE with it: this audit runs late in a REST request, where the
+	 * plugins that vendor these classes have already registered their
+	 * resolvers, and autoloading a registered class is what any other request
+	 * would do. Nothing is instantiated. A seam: a suite can neither load nor
+	 * unload a vendored class.
+	 *
+	 * @param string $fqcn Fully-qualified class name.
+	 * @return bool
+	 */
+	protected function class_present( $fqcn ) {
+		return class_exists( $fqcn, false ) || class_exists( $fqcn );
+	}
+
+	/**
+	 * The file a class was declared in, or null when the class is absent or
+	 * has no file of its own (an internal or `eval`'d class). A seam.
+	 *
+	 * @param string $fqcn Fully-qualified class name.
+	 * @return string|null
+	 */
+	protected function class_file( $fqcn ) {
+		if ( ! $this->class_present( $fqcn ) ) {
+			return null;
+		}
+		$ref  = new \ReflectionClass( $fqcn );
+		$file = $ref->getFileName();
+		return is_string( $file ) && '' !== $file ? $file : null;
+	}
+
+	/**
+	 * One class constant, or null when the class or the constant is absent.
+	 * A seam.
+	 *
+	 * @param string $fqcn Fully-qualified class name.
+	 * @param string $name Constant name.
+	 * @return mixed
+	 */
+	protected function class_constant( $fqcn, $name ) {
+		if ( ! $this->class_present( $fqcn ) ) {
+			return null;
+		}
+		$ref = new \ReflectionClass( $fqcn );
+		if ( ! $ref->hasConstant( $name ) ) {
+			return null;
+		}
+		return $ref->getConstant( $name );
+	}
+
+	/**
+	 * A bounded JSON file, decoded to an array, or null when it is missing,
+	 * not a file, larger than ELEMENTOR_COMPOSER_JSON_MAX, unreadable, or not
+	 * a JSON object. The ONLY file this tool reads: a package manifest whose
+	 * `version` names the copy that resolved. A seam.
+	 *
+	 * @param string $path Absolute path.
+	 * @return array|null
+	 */
+	protected function read_small_json( $path ) {
+		if ( ! is_string( $path ) || '' === $path || ! is_file( $path ) ) {
+			return null;
+		}
+		$size = filesize( $path );
+		if ( ! is_int( $size ) || $size <= 0 || $size > static::ELEMENTOR_COMPOSER_JSON_MAX ) {
+			return null;
+		}
+		$raw = file_get_contents( $path ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- A bounded local package manifest, never a URL.
+		if ( ! is_string( $raw ) || '' === $raw ) {
+			return null;
+		}
+		$data = json_decode( $raw, true );
+		return is_array( $data ) ? $data : null;
 	}
 
 	/**
@@ -1047,7 +1163,152 @@ class Aura_Tool_Audit_Mcp_Exposure extends Aura_Tool_Base {
 	}
 
 	/**
-	 * The `elementor` block: four scans, each failing on its own.
+	 * The `switch` subtree: the kill switch Elementor 4.3.0-beta3 put in front
+	 * of the `/elementor/mcp` token door.
+	 *
+	 * The rule is `McpSettingsController::is_enabled()`'s own at composer
+	 * 1.0.13 — absent ⇒ false — applied to the OPTION rather than to the
+	 * class, which may not be loaded on this request. On an Elementor older
+	 * than beta3 there is no such option, and "absent ⇒ off" is honest there
+	 * too: there is no switch and no token door. `option_present` is what
+	 * tells those two sites apart.
+	 *
+	 * The switch closes THAT door only: the 27 abilities stay registered, the
+	 * adapter's default server still stands up, and `elementor/v1/mcp-proxy`
+	 * never consults it.
+	 *
+	 * @return array { option_present, enabled }
+	 */
+	protected function elementor_switch() {
+		$raw = $this->elementor_switch_option();
+		return array(
+			'option_present' => null !== $raw,
+			'enabled'        => null !== $raw && (bool) $raw,
+		);
+	}
+
+	/**
+	 * The `adapter` subtree: the WP MCP adapter copy that actually resolves
+	 * here.
+	 *
+	 * Which copy that is is autoload order, not version — Elementor declares
+	 * `WP\MCP\` through the Jetpack autoloader, and a co-installed plugin may
+	 * prepend its own resolver for the same namespace. Reporting the file and
+	 * the VERSION constant of the copy that answers is the only way a reader
+	 * learns which one the site runs.
+	 *
+	 * @return array { class_present, version, path }
+	 */
+	protected function elementor_adapter() {
+		return $this->resolved_copy( static::ELEMENTOR_ADAPTER_CLASS, false );
+	}
+
+	/**
+	 * The `composer` subtree: the elementor-mcp-composer copy that owns
+	 * `/elementor/mcp`. Same question as `adapter`, the other package — Angie
+	 * vendors its own copy, and the package's `Versions` class loads the
+	 * highest of the copies bundled on the site.
+	 *
+	 * @return array { class_present, version, path }
+	 */
+	protected function elementor_composer() {
+		return $this->resolved_copy( static::ELEMENTOR_COMPOSER_CLASS, true );
+	}
+
+	/**
+	 * One vendored copy, reported the same way for either package: does the
+	 * class resolve, which version is it, and which file — relative to
+	 * ABSPATH, never an absolute server path.
+	 *
+	 * @param string $fqcn         Fully-qualified class name.
+	 * @param bool   $from_manifest Read the version from the package's
+	 *                              composer.json (the composer package) rather
+	 *                              than from a VERSION constant (the adapter).
+	 * @return array { class_present, version, path }
+	 */
+	private function resolved_copy( $fqcn, $from_manifest ) {
+		if ( ! $this->class_present( $fqcn ) ) {
+			return array(
+				'class_present' => false,
+				'version'       => null,
+				'path'          => null,
+			);
+		}
+		$file = $this->class_file( $fqcn );
+		return array(
+			'class_present' => true,
+			'version'       => $from_manifest ? $this->manifest_version( $file ) : $this->constant_version( $fqcn ),
+			'path'          => $this->relative_path( $file ),
+		);
+	}
+
+	/**
+	 * A copy's version from its class constant. Anything that is not a
+	 * non-empty string is no version.
+	 *
+	 * @param string $fqcn Fully-qualified class name.
+	 * @return string|null
+	 */
+	private function constant_version( $fqcn ) {
+		$version = $this->class_constant( $fqcn, 'VERSION' );
+		return is_string( $version ) && '' !== $version ? $this->clip( $version ) : null;
+	}
+
+	/**
+	 * A copy's version from its package manifest: `<pkg>/composer.json`, two
+	 * directories above `<pkg>/src/Mcp/Server_Bootstrap.php`. A manifest that
+	 * is missing, oversized, unreadable, not JSON, or carries no string
+	 * `version` leaves the version null — the copy itself is still reported.
+	 *
+	 * @param string|null $file The class file.
+	 * @return string|null
+	 */
+	private function manifest_version( $file ) {
+		if ( ! is_string( $file ) || '' === $file ) {
+			return null;
+		}
+		$data = $this->read_small_json( dirname( $file, 3 ) . '/composer.json' );
+		if ( ! is_array( $data ) || ! isset( $data['version'] ) || ! is_string( $data['version'] ) || '' === $data['version'] ) {
+			return null;
+		}
+		return $this->clip( $data['version'] );
+	}
+
+	/**
+	 * A file as this tool reports one: relative to ABSPATH, or the basename
+	 * alone when it lies outside it, clipped. No absolute server path leaves
+	 * the audit.
+	 *
+	 * @param string|null $file Absolute path, or null.
+	 * @return string|null
+	 */
+	private function relative_path( $file ) {
+		if ( ! is_string( $file ) || '' === $file ) {
+			return null;
+		}
+		return $this->clip( static::abspath_relative( $file ) );
+	}
+
+	/**
+	 * Pure: the ABSPATH-relative form of a path, or its basename when it is
+	 * not under ABSPATH (or ABSPATH is undefined).
+	 *
+	 * @param string $file Absolute path.
+	 * @return string
+	 */
+	public static function abspath_relative( $file ) {
+		$file = (string) $file;
+		if ( defined( 'ABSPATH' ) ) {
+			$root = (string) ABSPATH;
+			if ( '' !== $root && 0 === strpos( $file, $root ) ) {
+				return (string) substr( $file, strlen( $root ) );
+			}
+		}
+		return basename( $file );
+	}
+
+	/**
+	 * The `elementor` block: seven scans, each failing on its own.
 	 *
 	 * @param array|\Throwable $servers From servers(), read once by execute() —
 	 *                                  the Throwable when that read failed, so
@@ -1080,6 +1341,9 @@ class Aura_Tool_Audit_Mcp_Exposure extends Aura_Tool_Base {
 				),
 				'coverage'      => array( 'error' => 'manage_options required' ),
 				'governor'      => array( 'error' => 'manage_options required' ),
+				'switch'        => array( 'error' => 'manage_options required' ),
+				'adapter'       => array( 'error' => 'manage_options required' ),
+				'composer'      => array( 'error' => 'manage_options required' ),
 			);
 		}
 		$out = array(
@@ -1139,6 +1403,24 @@ class Aura_Tool_Audit_Mcp_Exposure extends Aura_Tool_Base {
 			$out['governor'] = Aura_Worker_Elementor_Door::governor_block();
 		} catch ( \Throwable $e ) {
 			$out['governor'] = $this->subtree_error( $e );
+		}
+		// The three 2.19.0 subtrees, each in its own try like every scan above.
+		// `switch` runs even when Elementor is absent: an option outlives the
+		// plugin that wrote it, exactly as a consent row does.
+		try {
+			$out['switch'] = $this->elementor_switch();
+		} catch ( \Throwable $e ) {
+			$out['switch'] = $this->subtree_error( $e );
+		}
+		try {
+			$out['adapter'] = $this->elementor_adapter();
+		} catch ( \Throwable $e ) {
+			$out['adapter'] = $this->subtree_error( $e );
+		}
+		try {
+			$out['composer'] = $this->elementor_composer();
+		} catch ( \Throwable $e ) {
+			$out['composer'] = $this->subtree_error( $e );
 		}
 		return $out;
 	}
