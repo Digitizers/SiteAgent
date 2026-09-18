@@ -1335,8 +1335,8 @@ class Aura_Tool_Audit_Mcp_Exposure extends Aura_Tool_Base {
 
 	/**
 	 * A file as this tool reports one: relative to ABSPATH, or the basename
-	 * alone when it lies outside it, clipped. No absolute server path leaves
-	 * the audit.
+	 * alone when it lies outside it, clipped. No path under ABSPATH leaves
+	 * the audit in absolute form.
 	 *
 	 * @param string|null $file Absolute path, or null.
 	 * @return string|null
@@ -1537,8 +1537,9 @@ class Aura_Tool_Audit_Mcp_Exposure extends Aura_Tool_Base {
 			$out['switch'] = $this->subtree_error( $e );
 		}
 		// These two can have handled a real filesystem path, so their errors go
-		// through the ABSPATH-stripping form: no absolute server path leaves
-		// the audit, not even inside a message.
+		// through the ABSPATH-stripping form: no path under ABSPATH leaves the
+		// audit in absolute form, not even inside a message (a path outside
+		// ABSPATH could only arrive through a throwing autoloader; review R1).
 		try {
 			$out['adapter'] = $this->elementor_adapter();
 		} catch ( \Throwable $e ) {

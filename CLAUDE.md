@@ -586,7 +586,7 @@ subtrees — `switch`, `adapter`, `composer` — each read in its own `try` in `
   copy would point that formula at a stranger's `composer.json`, and a wrong version in an audit
   is worse than none. Missing, oversized, non-JSON or a non-string `version` leaves
   `version: null` with the copy still reported.
-- **No absolute server path leaves the audit — including inside an `{ error }`.** The manifest
+- **No path under ABSPATH leaves the audit as an absolute path — including inside an `{ error }`.** (A path outside ABSPATH — a split-root install such as Bedrock — is reported as its basename; only a throwing autoloader could put one into an error message, and that message is then the only place it could appear.) The manifest
   read is the block's only filesystem call, and a site that converts warnings to exceptions
   (Whoops, which Bedrock ships; any hardening plugin calling `set_error_handler`) would turn an
   `open_basedir` or permission warning into a `Throwable` whose **message carries the absolute
