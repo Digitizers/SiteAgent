@@ -508,6 +508,45 @@ out of every REST response an **agent** reads.
 
 ---
 
+### The second door in `audit_mcp_exposure` — the `elementor` block (2.19.0)
+
+`audit_mcp_exposure`'s `elementor` block reports Elementor's own MCP door as facts, never a
+verdict, and every subtree fails on its own (`{ error }` in its place, `manage_options`
+required for all of them). Elementor 4.3.0-beta3 moved twice, so the block gained three
+subtrees — `switch`, `adapter`, `composer` — each read in its own `try` in `elementor_state()`.
+
+- **`switch: { option_present, enabled }`** — beta3 put the `/elementor/mcp` token door behind
+  a kill switch: `Server_Bootstrap::register_server()` returns early unless
+  `McpSettingsController::is_enabled()`, which is **false when the `elementor_mcp_enabled`
+  option is absent**. A 4.3 upgrade no longer opens a token door by itself, and the block could
+  not tell an off door from an on one. The **option** is read, never the class — the class may
+  not be loaded on this request, and an older Elementor has no such option, where "absent ⇒
+  off" is honest too (no switch and no door). `option_present` is what tells those two sites
+  apart. The switch runs even when Elementor is absent: an option outlives the plugin that
+  wrote it, exactly as a consent row does. It also closes **that door only** — the 27 abilities
+  stay registered, the adapter's default server still stands up, and `elementor/v1/mcp-proxy`
+  never consults it.
+- **`adapter` / `composer`: `{ class_present, version, path }`** — the WP MCP adapter moved
+  0.5.0 → 0.6.1, and **which vendored copy answers is autoload order, not version**: Elementor
+  declares `WP\MCP\` through the Jetpack autoloader while a co-installed plugin (EMCP) prepends
+  its own resolver for the same namespace, and the `elementor-mcp-composer` package picks the
+  highest of several bundled copies. So the audit reports the copy that actually **resolves**
+  here — the adapter's `VERSION` constant, the composer package's `version` from its own
+  `composer.json` two directories above the class file — rather than a version a reader looks
+  up elsewhere. `class_present` asks `class_exists()` without the autoloader first and once
+  with it (the audit runs late in a REST request, where a registered resolver is what any other
+  request would use); nothing is instantiated. Both paths are the class file **relative to
+  ABSPATH**, the basename alone when it lies outside it, clipped like every other string in the
+  block — no absolute server path leaves the audit. The manifest is the only file this tool
+  reads, once, and only when it is a file under 64 KB; missing, oversized, non-JSON or a
+  non-string `version` leaves `version: null` with the copy still reported.
+
+Each new read sits behind its own seam (`elementor_switch_option()`, `class_present()`,
+`class_file()`, `class_constant()`, `read_small_json()`) so the suite states the site it models
+instead of loading a vendored class or touching the filesystem.
+
+---
+
 ## WordPress Options
 
 | Option Key | Description |
