@@ -508,6 +508,46 @@ out of every REST response an **agent** reads.
 
 ---
 
+### Elementor door governor — the three doors (#61)
+
+`Aura_Worker_Elementor_Door` (`includes/class-elementor-door-governor.php`) governs
+Elementor's abilities. Three transports reach them, and each is covered once:
+
+- **The token door** (`/elementor/mcp`) and **the default abilities server**
+  (`/wp-abilities/v1/abilities/elementor/…`) both run the ability's **registered**
+  `execute_callback`, so `wrap_args()` wraps every non-read `elementor/*` ability and
+  that wrapper is the seam. `verify_coverage()` reads the stored callback back after
+  registration; if it cannot prove the wrapper is in place, `close_transport()` (on
+  `rest_request_before_callbacks`, priority 2) answers `503 aura_door_ungoverned` on
+  those two routes — reads included.
+- **Elementor's cookie proxy** (`POST|GET /wp-json/elementor/v1/mcp-proxy`, Elementor
+  4.3) calls `execute_guarded()` on the ability **object** and never reaches the
+  registered callback, so no wrapper can govern it. Its `permission_callback` is only
+  `current_user_can( 'edit_posts' )`, so an Application Password (or any bearer scheme
+  a plugin adds) reached it ungoverned: `Ability_Registry::find_by_proxy_slug()`
+  refuses abilities whose `is_exposed_via_proxy()` is false, and five of the eleven
+  governed writes opt out (build-composition, create-page, create-preview-link,
+  publish-document, update-page-settings), leaving **six** — manage-elements,
+  manage-component, manage-default-styles, manage-classes, reorder-classes,
+  manage-global-variable — reachable past the seam.
+
+So `close_transport()` carries a second, independent rule: on a route matching
+`route_is_proxy()` (`#^/elementor/v1/mcp-proxy(/|$)#`), with the governor `active()`,
+a request that is **not** a browser session is refused with
+`403 aura_door_proxy_closed`. "Browser session" is `Aura_Worker_Rules::cookie_authenticated()`
+— core's `$wp_rest_auth_cookie === true` (cookie **and** verified nonce, since core
+authenticates this route) and no Application Password — the same seam redaction uses,
+never a second copy. Both methods are refused, reads included, and the rule is
+independent of the coverage seam: an agent is refused even when coverage is `ok`,
+because coverage is exactly what this transport bypasses. A cookie session passes
+through untouched, so the editor's Global Classes / Variables UI keeps working.
+
+A refused proxy call is **not counted and not logged** — the governor's audit block has
+a strict consumer on the Aura side, and this refusal has no ability, actor or touches to
+report. Observability for it is a follow-up.
+
+---
+
 ## WordPress Options
 
 | Option Key | Description |

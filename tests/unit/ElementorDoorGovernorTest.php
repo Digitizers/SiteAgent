@@ -767,9 +767,11 @@ final class ElementorDoorGovernorTest extends TestCase {
 		$this->assertSame( 'ok', Aura_Worker_Door_Log::get( 1 )['result'] );
 	}
 
-	public function test_coverage_failure_closes_both_transports_reads_included(): void {
-		$this->registerAll();
-		// A later filter replaced the wrapper AFTER wrap_args ran.
+	/**
+	 * Replace the stored wrapper the way a later filter would, then re-verify:
+	 * the coverage failure every `unavailable` seam in this file is built on.
+	 */
+	private function breakCoverage(): void {
 		$obj  = wp_get_ability( 'elementor/publish-document' );
 		$prop = new ReflectionProperty( WP_Ability::class, 'execute_callback' );
 		if ( PHP_VERSION_ID < 80100 ) {
@@ -777,6 +779,12 @@ final class ElementorDoorGovernorTest extends TestCase {
 		}
 		$prop->setValue( $obj, '__return_true' );
 		do_action( 'wp_abilities_api_init' );
+	}
+
+	public function test_coverage_failure_closes_both_transports_reads_included(): void {
+		$this->registerAll();
+		// A later filter replaced the wrapper AFTER wrap_args ran.
+		$this->breakCoverage();
 		$this->assertSame( 'unavailable', Aura_Worker_Elementor_Door::seam() );
 		foreach ( array( '/elementor/mcp', '/wp-abilities/v1/abilities/elementor/list-posts/run' ) as $route ) {
 			$req = new WP_REST_Request( 'POST', $route );
@@ -787,6 +795,112 @@ final class ElementorDoorGovernorTest extends TestCase {
 		}
 		$req = new WP_REST_Request( 'POST', '/aura/mcp/tools/execute' );
 		$this->assertNull( Aura_Worker_Elementor_Door::close_transport( null, array(), $req ), 'SiteAgent\'s own routes are untouched' );
+	}
+
+	/* --------------------------------------------------------------- */
+	/* The cookie proxy — Elementor's own transport (#61)              */
+	/* --------------------------------------------------------------- */
+
+	/** Both methods refused at the proxy, with the code and status decided. */
+	private function assertProxyRefused( string $why ): void {
+		foreach ( array( 'POST', 'GET' ) as $method ) {
+			$req = new WP_REST_Request( $method, '/elementor/v1/mcp-proxy' );
+			$res = Aura_Worker_Elementor_Door::close_transport( null, array(), $req );
+			$this->assertInstanceOf( WP_Error::class, $res, "$method, $why" );
+			$this->assertSame( 'aura_door_proxy_closed', $res->get_error_code(), "$method, $why" );
+			$this->assertSame( 403, $res->get_error_data()['status'], "$method, $why" );
+		}
+	}
+
+	/**
+	 * Elementor's cookie proxy, reached by anything that is not a browser
+	 * session, is refused — POST (tool) and GET (resource) alike, reads
+	 * included, and whatever the callback seam reports about the OTHER door.
+	 * A healthy seam is no defence here: covering the registered callback is
+	 * exactly what this transport bypasses.
+	 */
+	public function test_the_cookie_proxy_is_closed_to_a_caller_that_is_not_a_browser_session(): void {
+		$GLOBALS['_sa_force_door'] = true;
+		$this->registerAll();
+		$this->assertFalse( Aura_Worker_Rules::cookie_authenticated(), 'this caller is not a browser session' );
+
+		$this->assertSame( 'ok', Aura_Worker_Elementor_Door::seam() );
+		$this->assertProxyRefused( 'seam ok' );
+
+		$this->breakCoverage();
+		$this->assertSame( 'unavailable', Aura_Worker_Elementor_Door::seam() );
+		$this->assertProxyRefused( 'seam unavailable' );
+	}
+
+	/**
+	 * An Application Password session sets the cookie global false and reports
+	 * itself; the seam answers false for it even if the global were true, so
+	 * the editor's transport is closed to the credential an agent carries.
+	 */
+	public function test_an_application_password_session_is_never_a_browser_session_at_the_proxy(): void {
+		$GLOBALS['_sa_force_door'] = true;
+		$this->registerAll();
+		$GLOBALS['wp_rest_auth_cookie'] = true;
+		$GLOBALS['_rest_app_password']  = 'uuid-1';
+
+		$this->assertProxyRefused( 'an Application Password session' );
+	}
+
+	/** The editor keeps working: a cookie session with a verified nonce passes. */
+	public function test_a_browser_session_reaches_the_cookie_proxy_untouched(): void {
+		$GLOBALS['_sa_force_door'] = true;
+		$this->registerAll();
+		sa_cookie_session( 3 );
+		$this->assertTrue( Aura_Worker_Rules::cookie_authenticated() );
+
+		foreach ( array( 'POST', 'GET' ) as $method ) {
+			$req = new WP_REST_Request( $method, '/elementor/v1/mcp-proxy' );
+			$this->assertNull( Aura_Worker_Elementor_Door::close_transport( null, array(), $req ), $method );
+		}
+	}
+
+	/** No Elementor MCP module, no proxy to close — exactly like the other door. */
+	public function test_the_cookie_proxy_rule_is_inert_without_a_door(): void {
+		$this->assertFalse( Aura_Worker_Elementor_Door::active() );
+		$req = new WP_REST_Request( 'POST', '/elementor/v1/mcp-proxy' );
+		$this->assertNull( Aura_Worker_Elementor_Door::close_transport( null, array(), $req ) );
+	}
+
+	/** A handler another filter already answered is never re-answered here. */
+	public function test_a_short_circuited_response_is_returned_untouched_at_the_proxy(): void {
+		$GLOBALS['_sa_force_door'] = true;
+		$this->registerAll();
+		$already = new WP_REST_Response( array( 'ok' => true ) );
+		$req     = new WP_REST_Request( 'POST', '/elementor/v1/mcp-proxy' );
+		$this->assertSame( $already, Aura_Worker_Elementor_Door::close_transport( $already, array(), $req ) );
+	}
+
+	/**
+	 * The token door is the callback seam's, not the cookie flag's: a browser
+	 * session does not open it and the absence of one does not close it.
+	 */
+	public function test_the_token_door_is_unaffected_by_the_cookie_flag(): void {
+		$GLOBALS['_sa_force_door'] = true;
+		$this->registerAll();
+		$this->assertSame( 'ok', Aura_Worker_Elementor_Door::seam() );
+		foreach ( array( '/elementor/mcp', '/wp-abilities/v1/abilities/elementor/list-posts/run' ) as $route ) {
+			$req = new WP_REST_Request( 'POST', $route );
+			$this->assertNull( Aura_Worker_Elementor_Door::close_transport( null, array(), $req ), "$route with no cookie session" );
+			sa_cookie_session( 3 );
+			$this->assertNull( Aura_Worker_Elementor_Door::close_transport( null, array(), $req ), "$route with a cookie session" );
+			unset( $GLOBALS['wp_rest_auth_cookie'] );
+		}
+	}
+
+	/** Two doors, two rules: the proxy matcher answers for the proxy alone. */
+	public function test_route_is_proxy_matches_the_proxy_route_and_nothing_else(): void {
+		$this->assertTrue( Aura_Worker_Elementor_Door::route_is_proxy( '/elementor/v1/mcp-proxy' ) );
+		$this->assertTrue( Aura_Worker_Elementor_Door::route_is_proxy( '/elementor/v1/mcp-proxy/' ) );
+		$this->assertTrue( Aura_Worker_Elementor_Door::route_is_proxy( '/elementor/v1/mcp-proxy/anything' ) );
+		$this->assertFalse( Aura_Worker_Elementor_Door::route_is_proxy( '/elementor/v1/mcp-proxyx' ) );
+		$this->assertFalse( Aura_Worker_Elementor_Door::route_is_proxy( '/elementor/mcp' ) );
+		$this->assertFalse( Aura_Worker_Elementor_Door::route_is_proxy( '/aura/mcp/tools/execute' ) );
+		$this->assertFalse( Aura_Worker_Elementor_Door::route_is_door( '/elementor/v1/mcp-proxy' ), 'the two doors never answer for each other' );
 	}
 
 	public function test_a_build_without_the_stored_callback_property_is_a_coverage_failure(): void {
