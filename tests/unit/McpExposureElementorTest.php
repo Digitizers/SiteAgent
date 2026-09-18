@@ -42,6 +42,24 @@ class SA_Elementor_Fake_Tool extends Aura_Tool_Audit_Mcp_Exposure {
 	/** @var int how many times consent_rows() was invoked — the manage_options gate test proves this stays 0 */
 	public $consent_rows_calls = 0;
 
+	// --- 2.19.0: the beta3 switch, and which vendored copies resolve ---------
+	/** @var mixed raw `elementor_mcp_enabled` value; null = the option is absent */
+	public $switch_option = null;
+	/** @var array fqcn => bool */
+	public $classes = array();
+	/** @var array fqcn => string|null — what ReflectionClass::getFileName() would answer */
+	public $class_files = array();
+	/** @var array fqcn => array( constant => value ) */
+	public $class_constants = array();
+	/** @var array path => array|null — what read_small_json() would answer */
+	public $json = array();
+	/** @var int how many times the switch option was read (the gate test proves this stays 0) */
+	public $switch_reads = 0;
+	/** @var int how many times a class was inspected (ditto) */
+	public $class_reads = 0;
+	/** @var string[] paths handed to read_small_json(), in order (ditto: stays empty) */
+	public $json_reads = array();
+
 	private function maybe_throw( $seam ) {
 		if ( in_array( $seam, $this->throw_in, true ) ) {
 			throw new RuntimeException( $seam . ' exploded' );
@@ -93,6 +111,41 @@ class SA_Elementor_Fake_Tool extends Aura_Tool_Audit_Mcp_Exposure {
 	protected function user_login( $uid ) {
 		return 'user' . (int) $uid;
 	}
+
+	protected function elementor_switch_option() {
+		$this->maybe_throw( 'switch' );
+		++$this->switch_reads;
+		return $this->switch_option;
+	}
+	protected function class_present( $fqcn ) {
+		$this->throw_for_class( $fqcn );
+		++$this->class_reads;
+		return ! empty( $this->classes[ $fqcn ] );
+	}
+	protected function class_file( $fqcn ) {
+		$this->throw_for_class( $fqcn );
+		++$this->class_reads;
+		return array_key_exists( $fqcn, $this->class_files ) ? $this->class_files[ $fqcn ] : null;
+	}
+	protected function class_constant( $fqcn, $name ) {
+		$this->throw_for_class( $fqcn );
+		++$this->class_reads;
+		return isset( $this->class_constants[ $fqcn ][ $name ] ) ? $this->class_constants[ $fqcn ][ $name ] : null;
+	}
+	protected function read_small_json( $path ) {
+		$this->maybe_throw( 'json' );
+		$this->json_reads[] = (string) $path;
+		return array_key_exists( $path, $this->json ) ? $this->json[ $path ] : null;
+	}
+	/** One seam name per subtree, so a throw can be aimed at adapter or composer alone. */
+	private function throw_for_class( $fqcn ) {
+		if ( Aura_Tool_Audit_Mcp_Exposure::ELEMENTOR_ADAPTER_CLASS === $fqcn ) {
+			$this->maybe_throw( 'adapter' );
+		}
+		if ( Aura_Tool_Audit_Mcp_Exposure::ELEMENTOR_COMPOSER_CLASS === $fqcn ) {
+			$this->maybe_throw( 'composer' );
+		}
+	}
 }
 
 final class McpExposureElementorTest extends TestCase {
@@ -122,6 +175,20 @@ final class McpExposureElementorTest extends TestCase {
 		foreach ( array( 'abilities_api_active', 'mcp_adapter', 'servers', 'angie', 'abilities', 'coverage' ) as $key ) {
 			$this->assertArrayHasKey( $key, $result );
 		}
+		// 2.19.0 added three subtrees to the `elementor` block and nothing else:
+		// every subtree the block promised before is still in its place.
+		$b = $result['elementor'];
+		foreach ( array( 'installed', 'version', 'mcp_module', 'consent', 'app_passwords', 'coverage', 'governor' ) as $key ) {
+			$this->assertArrayHasKey( $key, $b );
+		}
+		$this->assertSame(
+			array( 'class_present' => true, 'active' => true, 'abilities_registered' => 0, 'server_id' => 'elementor-mcp-server' ),
+			$b['mcp_module']
+		);
+		$this->assertSame( array(), $b['consent'] );
+		$this->assertArrayHasKey( 'elementor', $b['app_passwords'] );
+		$this->assertArrayHasKey( 'other', $b['app_passwords'] );
+		$this->assertArrayHasKey( 'users_total', $b['coverage'] );
 	}
 
 	// --- Codex round-3 P2: the block requires manage_options -----------------
@@ -144,11 +211,19 @@ final class McpExposureElementorTest extends TestCase {
 				),
 				'coverage'      => array( 'error' => 'manage_options required' ),
 				'governor'      => array( 'error' => 'manage_options required' ),
+				'switch'        => array( 'error' => 'manage_options required' ),
+				'adapter'       => array( 'error' => 'manage_options required' ),
+				'composer'      => array( 'error' => 'manage_options required' ),
 			),
 			$b
 		);
 		$this->assertSame( array(), $this->tool->reads );
 		$this->assertSame( 0, $this->tool->consent_rows_calls );
+		// 2.19.0: the switch option, the two class inspections and the bounded
+		// composer.json read are reads too — a refused caller makes none of them.
+		$this->assertSame( 0, $this->tool->switch_reads );
+		$this->assertSame( 0, $this->tool->class_reads );
+		$this->assertSame( array(), $this->tool->json_reads );
 	}
 
 	public function test_with_manage_options_the_block_is_read(): void {
@@ -313,6 +388,270 @@ final class McpExposureElementorTest extends TestCase {
 			array( array( 'id' => 'angie' ) )
 		);
 		$this->assertSame( array( 'class_present' => true, 'active' => false, 'abilities_registered' => 2, 'server_id' => null ), $m );
+	}
+
+
+	// --- 2.19.0: the beta3 switch, and which vendored copies resolve --------
+	// Elementor 4.3.0-beta3 put the `/elementor/mcp` token door behind
+	// `elementor_mcp_enabled` (absent ⇒ OFF), and the WP MCP adapter moved
+	// 0.5.0 → 0.6.1 and may be served by ANOTHER plugin's vendored copy. The
+	// block reports which switch and which copies this site actually has.
+
+	public function test_the_three_new_subtrees_are_documented_and_in_the_payload(): void {
+		$doc = $this->tool->get_returns()['elementor'];
+		foreach ( array( 'switch:', 'adapter:', 'composer:', 'elementor_mcp_enabled', '2.19.0' ) as $needle ) {
+			$this->assertStringContainsString( $needle, $doc );
+		}
+		$b = $this->block();
+		foreach ( array( 'switch', 'adapter', 'composer' ) as $key ) {
+			$this->assertArrayHasKey( $key, $b );
+		}
+	}
+
+	public function test_the_switch_option_absent_is_a_door_that_is_off(): void {
+		// The rule McpSettingsController::is_enabled() applies at composer
+		// 1.0.13: no option ⇒ false. On an older Elementor there is no switch
+		// and no token door either, so "off" is honest there too.
+		$this->tool->switch_option = null;
+		$this->assertSame( array( 'option_present' => false, 'enabled' => false ), $this->block()['switch'] );
+	}
+
+	public function test_the_switch_reads_the_stored_value_as_is_enabled_does(): void {
+		// A list of pairs, not a keyed array: PHP would collapse '1', 1 and
+		// true (and '0' and 0) into one key and silently drop the coverage.
+		$cases = array(
+			array( '1', true ),
+			array( 1, true ),
+			array( true, true ),
+			array( 'yes', true ),
+			array( '0', false ),
+			array( 0, false ),
+			array( '', false ),
+			array( false, false ),
+		);
+		foreach ( $cases as $case ) {
+			list( $raw, $expected ) = $case;
+			$tool                   = new SA_Elementor_Fake_Tool();
+			$tool->switch_option    = $raw;
+			$sw                     = $tool->execute( array() )['elementor']['switch'];
+			$this->assertTrue( $sw['option_present'], var_export( $raw, true ) );
+			$this->assertSame( $expected, $sw['enabled'], var_export( $raw, true ) );
+		}
+	}
+
+	public function test_the_switch_is_read_even_when_elementor_is_absent(): void {
+		// An option outlives the plugin that wrote it, like a consent row.
+		$this->tool->env           = array( 'installed' => false, 'version' => null, 'class_present' => false, 'active' => null );
+		$this->tool->switch_option = '1';
+		$b                         = $this->block();
+		$this->assertFalse( $b['installed'] );
+		$this->assertSame( array( 'option_present' => true, 'enabled' => true ), $b['switch'] );
+	}
+
+	public function test_a_throw_reading_the_switch_replaces_only_the_switch(): void {
+		$this->tool->throw_in = array( 'switch' );
+		$b                    = $this->block();
+		$this->assertSame( array( 'error' => 'switch exploded' ), $b['switch'] );
+		$this->assertSame( array( 'class_present' => false, 'version' => null, 'path' => null ), $b['adapter'] );
+		$this->assertSame( array( 'class_present' => false, 'version' => null, 'path' => null ), $b['composer'] );
+		$this->assertTrue( $b['installed'] );
+		$this->assertArrayNotHasKey( 'error', $b['mcp_module'] );
+	}
+
+	public function test_the_adapter_is_absent_when_no_copy_resolves(): void {
+		$this->assertSame(
+			array( 'class_present' => false, 'version' => null, 'path' => null ),
+			$this->block()['adapter']
+		);
+	}
+
+	public function test_the_adapter_copy_that_resolves_is_reported_with_its_version_and_relative_path(): void {
+		$fqcn                            = Aura_Tool_Audit_Mcp_Exposure::ELEMENTOR_ADAPTER_CLASS;
+		$this->tool->classes             = array( $fqcn => true );
+		$this->tool->class_constants     = array( $fqcn => array( 'VERSION' => '0.6.1' ) );
+		$this->tool->class_files         = array( $fqcn => ABSPATH . 'wp-content/plugins/elementor/vendor/wordpress/mcp-adapter/includes/Core/McpAdapter.php' );
+		$this->assertSame(
+			array(
+				'class_present' => true,
+				'version'       => '0.6.1',
+				'path'          => 'wp-content/plugins/elementor/vendor/wordpress/mcp-adapter/includes/Core/McpAdapter.php',
+			),
+			$this->block()['adapter']
+		);
+	}
+
+	public function test_a_non_string_adapter_version_is_null(): void {
+		$fqcn                        = Aura_Tool_Audit_Mcp_Exposure::ELEMENTOR_ADAPTER_CLASS;
+		$this->tool->classes         = array( $fqcn => true );
+		$this->tool->class_constants = array( $fqcn => array( 'VERSION' => 61 ) );
+		$this->tool->class_files     = array( $fqcn => ABSPATH . 'a.php' );
+		$a                           = $this->block()['adapter'];
+		$this->assertTrue( $a['class_present'] );
+		$this->assertNull( $a['version'] );
+		$this->assertSame( 'a.php', $a['path'] );
+	}
+
+	public function test_an_adapter_file_outside_abspath_is_reported_as_a_basename(): void {
+		// No absolute server path ever leaves this tool.
+		$fqcn                    = Aura_Tool_Audit_Mcp_Exposure::ELEMENTOR_ADAPTER_CLASS;
+		$this->tool->classes     = array( $fqcn => true );
+		$this->tool->class_files = array( $fqcn => '/opt/elsewhere/mcp-adapter/includes/Core/McpAdapter.php' );
+		$this->assertSame( 'McpAdapter.php', $this->block()['adapter']['path'] );
+	}
+
+	public function test_an_adapter_class_with_no_file_has_a_null_path(): void {
+		$fqcn                    = Aura_Tool_Audit_Mcp_Exposure::ELEMENTOR_ADAPTER_CLASS;
+		$this->tool->classes     = array( $fqcn => true );
+		$this->tool->class_files = array( $fqcn => null );
+		$this->assertNull( $this->block()['adapter']['path'] );
+	}
+
+	public function test_a_throw_inspecting_the_adapter_replaces_only_the_adapter(): void {
+		$this->tool->throw_in = array( 'adapter' );
+		$b                    = $this->block();
+		$this->assertSame( array( 'error' => 'adapter exploded' ), $b['adapter'] );
+		$this->assertSame( array( 'option_present' => false, 'enabled' => false ), $b['switch'] );
+		$this->assertSame( array( 'class_present' => false, 'version' => null, 'path' => null ), $b['composer'] );
+	}
+
+	public function test_the_composer_copy_is_read_from_the_package_manifest_two_directories_up(): void {
+		$fqcn                    = Aura_Tool_Audit_Mcp_Exposure::ELEMENTOR_COMPOSER_CLASS;
+		$file                    = ABSPATH . 'wp-content/plugins/elementor/vendor/elementor/mcp-composer/src/Mcp/Server_Bootstrap.php';
+		$this->tool->classes     = array( $fqcn => true );
+		$this->tool->class_files = array( $fqcn => $file );
+		$this->tool->json        = array(
+			ABSPATH . 'wp-content/plugins/elementor/vendor/elementor/mcp-composer/composer.json' => array( 'version' => '1.0.13' ),
+		);
+		$this->assertSame(
+			array(
+				'class_present' => true,
+				'version'       => '1.0.13',
+				'path'          => 'wp-content/plugins/elementor/vendor/elementor/mcp-composer/src/Mcp/Server_Bootstrap.php',
+			),
+			$this->block()['composer']
+		);
+		$this->assertSame(
+			array( ABSPATH . 'wp-content/plugins/elementor/vendor/elementor/mcp-composer/composer.json' ),
+			$this->tool->json_reads
+		);
+	}
+
+	public function test_an_unreadable_manifest_leaves_the_version_null_and_the_copy_reported(): void {
+		// Missing, over 64 KB, or not JSON: the seam answers null for each, and
+		// the copy that resolves is still worth reporting.
+		$fqcn                    = Aura_Tool_Audit_Mcp_Exposure::ELEMENTOR_COMPOSER_CLASS;
+		$this->tool->classes     = array( $fqcn => true );
+		$this->tool->class_files = array( $fqcn => ABSPATH . 'wp-content/plugins/x/src/Mcp/Server_Bootstrap.php' );
+		$this->tool->json        = array();
+		$this->assertSame(
+			array(
+				'class_present' => true,
+				'version'       => null,
+				'path'          => 'wp-content/plugins/x/src/Mcp/Server_Bootstrap.php',
+			),
+			$this->block()['composer']
+		);
+	}
+
+	public function test_a_manifest_version_that_is_not_a_string_is_null(): void {
+		$fqcn                    = Aura_Tool_Audit_Mcp_Exposure::ELEMENTOR_COMPOSER_CLASS;
+		$this->tool->classes     = array( $fqcn => true );
+		$this->tool->class_files = array( $fqcn => ABSPATH . 'wp-content/plugins/x/src/Mcp/Server_Bootstrap.php' );
+		$this->tool->json        = array( ABSPATH . 'wp-content/plugins/x/composer.json' => array( 'version' => array( '1.0.13' ) ) );
+		$this->assertNull( $this->block()['composer']['version'] );
+		$this->assertTrue( $this->block()['composer']['class_present'] );
+	}
+
+	public function test_the_composer_manifest_is_not_read_when_the_class_is_absent(): void {
+		$this->assertSame( array(), $this->tool->json_reads );
+		$this->assertSame( array( 'class_present' => false, 'version' => null, 'path' => null ), $this->block()['composer'] );
+		$this->assertSame( array(), $this->tool->json_reads );
+	}
+
+	public function test_a_throw_reading_the_manifest_is_the_composer_subtree_error(): void {
+		$fqcn                    = Aura_Tool_Audit_Mcp_Exposure::ELEMENTOR_COMPOSER_CLASS;
+		$this->tool->classes     = array( $fqcn => true );
+		$this->tool->class_files = array( $fqcn => ABSPATH . 'wp-content/plugins/x/src/Mcp/Server_Bootstrap.php' );
+		$this->tool->throw_in    = array( 'json' );
+		$b                       = $this->block();
+		$this->assertSame( array( 'error' => 'json exploded' ), $b['composer'] );
+		$this->assertSame( array( 'class_present' => false, 'version' => null, 'path' => null ), $b['adapter'] );
+		$this->assertSame( array( 'option_present' => false, 'enabled' => false ), $b['switch'] );
+	}
+
+	public function test_a_throw_inspecting_the_composer_class_replaces_only_the_composer(): void {
+		$this->tool->throw_in = array( 'composer' );
+		$b                    = $this->block();
+		$this->assertSame( array( 'error' => 'composer exploded' ), $b['composer'] );
+		$this->assertSame( array( 'class_present' => false, 'version' => null, 'path' => null ), $b['adapter'] );
+	}
+
+	public function test_a_long_path_and_a_long_version_are_clipped_at_200(): void {
+		$fqcn                        = Aura_Tool_Audit_Mcp_Exposure::ELEMENTOR_ADAPTER_CLASS;
+		$this->tool->classes         = array( $fqcn => true );
+		$this->tool->class_files     = array( $fqcn => ABSPATH . str_repeat( 'p', 300 ) . '.php' );
+		$this->tool->class_constants = array( $fqcn => array( 'VERSION' => str_repeat( 'v', 300 ) ) );
+		$a                           = $this->block()['adapter'];
+		$this->assertSame( 200, strlen( $a['path'] ) );
+		$this->assertSame( 200, strlen( $a['version'] ) );
+	}
+
+	// --- the REAL seams: reflection, and the one bounded file read ----------
+
+	public function test_the_real_class_seams_read_a_class_that_exists(): void {
+		$seam = new class() extends Aura_Tool_Audit_Mcp_Exposure {
+			public function present( $fqcn ) {
+				return $this->class_present( $fqcn );
+			}
+			public function file( $fqcn ) {
+				return $this->class_file( $fqcn );
+			}
+			public function constant_of( $fqcn, $name ) {
+				return $this->class_constant( $fqcn, $name );
+			}
+		};
+		$this->assertTrue( $seam->present( 'Aura_Tool_Audit_Mcp_Exposure' ) );
+		$this->assertFalse( $seam->present( '\\Definitely\\Not\\Here' ) );
+		$this->assertNull( $seam->file( '\\Definitely\\Not\\Here' ) );
+		$this->assertNull( $seam->constant_of( '\\Definitely\\Not\\Here', 'VERSION' ) );
+		$this->assertStringEndsWith( 'class-tool-audit-mcp-exposure.php', (string) $seam->file( 'Aura_Tool_Audit_Mcp_Exposure' ) );
+		$this->assertSame( 500, $seam->constant_of( 'Aura_Tool_Audit_Mcp_Exposure', 'MAX_ABILITIES' ) );
+		$this->assertNull( $seam->constant_of( 'Aura_Tool_Audit_Mcp_Exposure', 'NO_SUCH_CONSTANT' ) );
+	}
+
+	public function test_the_real_manifest_seam_is_bounded(): void {
+		$seam = new class() extends Aura_Tool_Audit_Mcp_Exposure {
+			public function read( $path ) {
+				return $this->read_small_json( $path );
+			}
+		};
+		$dir = sys_get_temp_dir() . '/sa-composer-' . getmypid();
+		if ( ! is_dir( $dir ) ) {
+			mkdir( $dir, 0777, true );
+		}
+		$good = $dir . '/good.json';
+		$bad  = $dir . '/bad.json';
+		$big  = $dir . '/big.json';
+		file_put_contents( $good, '{"version":"1.0.13","name":"elementor/mcp-composer"}' );
+		file_put_contents( $bad, '{"version": ' );
+		file_put_contents( $big, '{"version":"1.0.13","pad":"' . str_repeat( 'x', 70000 ) . '"}' );
+		try {
+			$this->assertSame( '1.0.13', $seam->read( $good )['version'] );
+			$this->assertNull( $seam->read( $bad ) );
+			$this->assertNull( $seam->read( $big ) );
+			$this->assertNull( $seam->read( $dir . '/missing.json' ) );
+			$this->assertNull( $seam->read( $dir ) );   // a directory is not a file
+			$this->assertNull( $seam->read( '' ) );
+		} finally {
+			foreach ( array( $good, $bad, $big ) as $f ) {
+				if ( is_file( $f ) ) {
+					unlink( $f );
+				}
+			}
+			if ( is_dir( $dir ) ) {
+				rmdir( $dir );
+			}
+		}
 	}
 
 	// --- Codex round-1 P2: a deactivated Elementor is still "installed" ----
