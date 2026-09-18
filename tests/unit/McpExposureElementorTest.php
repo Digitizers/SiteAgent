@@ -37,6 +37,8 @@ class SA_Elementor_Fake_Tool extends Aura_Tool_Audit_Mcp_Exposure {
 	public $context_total = 0;
 	/** @var string[] seam names that throw */
 	public $throw_in = array();
+	/** @var string|null the message a throwing seam carries (default: "<seam> exploded") */
+	public $throw_message = null;
 	/** @var int[] user ids whose list was read, in order */
 	public $reads = array();
 	/** @var int how many times consent_rows() was invoked — the manage_options gate test proves this stays 0 */
@@ -62,7 +64,7 @@ class SA_Elementor_Fake_Tool extends Aura_Tool_Audit_Mcp_Exposure {
 
 	private function maybe_throw( $seam ) {
 		if ( in_array( $seam, $this->throw_in, true ) ) {
-			throw new RuntimeException( $seam . ' exploded' );
+			throw new RuntimeException( null === $this->throw_message ? $seam . ' exploded' : $this->throw_message );
 		}
 	}
 	protected function elementor_env() {
@@ -145,6 +147,27 @@ class SA_Elementor_Fake_Tool extends Aura_Tool_Audit_Mcp_Exposure {
 		if ( Aura_Tool_Audit_Mcp_Exposure::ELEMENTOR_COMPOSER_CLASS === $fqcn ) {
 			$this->maybe_throw( 'composer' );
 		}
+	}
+}
+
+/**
+ * A stream whose files "exist" and are readable but refuse to open — the
+ * portable stand-in for an open_basedir or permission failure that raises
+ * AFTER read_small_json()'s guards have passed. PHP's warning for it names the
+ * path, which is the whole point.
+ */
+class SA_Refusing_Stream {
+	/** @var resource|null */
+	public $context;
+	public function stream_open( $path, $mode, $options, &$opened_path ) {
+		return false; // PHP raises "failed to open stream" naming $path
+	}
+	public function url_stat( $path, $flags ) {
+		return array(
+			'dev' => 0, 'ino' => 0, 'mode' => 0100644, 'nlink' => 1, 'uid' => 0, 'gid' => 0,
+			'rdev' => 0, 'size' => 128, 'atime' => 0, 'mtime' => 0, 'ctime' => 0,
+			'blksize' => -1, 'blocks' => -1,
+		);
 	}
 }
 
@@ -596,6 +619,240 @@ final class McpExposureElementorTest extends TestCase {
 		$this->assertSame( 200, strlen( $a['version'] ) );
 	}
 
+
+	// --- Fix round 1 / I1: no absolute server path may leave through { error }
+	// A site that converts warnings to exceptions (Whoops, which Bedrock ships;
+	// a hardening plugin calling set_error_handler) turns an open_basedir or
+	// permission warning into a Throwable whose MESSAGE carries the absolute
+	// path — and subtree_error() would publish it verbatim, defeating
+	// abspath_relative() on the one subtree that touches the filesystem.
+
+	public function test_a_throw_carrying_an_absolute_path_never_reaches_the_composer_error(): void {
+		$fqcn                      = Aura_Tool_Audit_Mcp_Exposure::ELEMENTOR_COMPOSER_CLASS;
+		$this->tool->classes       = array( $fqcn => true );
+		$this->tool->class_files   = array( $fqcn => ABSPATH . 'wp-content/plugins/x/src/Mcp/Server_Bootstrap.php' );
+		$this->tool->throw_in      = array( 'json' );
+		$this->tool->throw_message = 'file_get_contents(' . ABSPATH . 'wp-content/plugins/x/composer.json): failed to open stream';
+		$error                     = $this->block()['composer']['error'];
+		$this->assertStringNotContainsString( ABSPATH, $error );
+		$this->assertStringContainsString( 'wp-content/plugins/x/composer.json', $error ); // relative-ised, not thrown away
+	}
+
+	public function test_a_throw_carrying_an_absolute_path_never_reaches_the_adapter_error(): void {
+		$this->tool->throw_in      = array( 'adapter' );
+		$this->tool->throw_message = 'autoloader died reading ' . ABSPATH . 'wp-content/plugins/emcp/vendor/autoload.php';
+		$error                     = $this->block()['adapter']['error'];
+		$this->assertStringNotContainsString( ABSPATH, $error );
+		$this->assertStringContainsString( 'wp-content/plugins/emcp/vendor/autoload.php', $error );
+	}
+
+	public function test_the_abspath_stripper_is_pure_and_handles_both_separators(): void {
+		$win = str_replace( '/', '\\', ABSPATH );
+		$this->assertSame(
+			'file_get_contents(wp-content/x/composer.json): denied',
+			Aura_Tool_Audit_Mcp_Exposure::without_abspath( 'file_get_contents(' . ABSPATH . 'wp-content/x/composer.json): denied' )
+		);
+		$this->assertSame(
+			'open_basedir restriction: wp-content\\x\\composer.json',
+			Aura_Tool_Audit_Mcp_Exposure::without_abspath( 'open_basedir restriction: ' . $win . 'wp-content\\x\\composer.json' )
+		);
+		// The directory named without its trailing separator is stripped too.
+		$this->assertSame( 'no such directory: ', Aura_Tool_Audit_Mcp_Exposure::without_abspath( 'no such directory: ' . rtrim( ABSPATH, '/' ) ) );
+		// A message with no path in it is untouched.
+		$this->assertSame( 'json exploded', Aura_Tool_Audit_Mcp_Exposure::without_abspath( 'json exploded' ) );
+	}
+
+	public function test_the_real_manifest_seam_converts_a_raising_read_to_a_fixed_message(): void {
+		// The real conversion, on every supported PHP: with a throwing error
+		// handler installed, a path PHP refuses raises (a warning on 7.4, a
+		// ValueError on 8.x) inside the seam — and what comes out is the fixed
+		// message, never the raised one.
+		$seam = new class() extends Aura_Tool_Audit_Mcp_Exposure {
+			public function read( $path ) {
+				return $this->read_small_json( $path );
+			}
+		};
+		stream_wrapper_register( 'sa-refusing', 'SA_Refusing_Stream' );
+		set_error_handler(
+			static function ( $severity, $message, $file = '', $line = 0 ) {
+				throw new ErrorException( $message, 0, $severity, $file, $line );
+			}
+		);
+		$thrown = null;
+		try {
+			$seam->read( 'sa-refusing://' . ABSPATH . 'wp-content/plugins/x/composer.json' );
+		} catch ( \Throwable $e ) {
+			$thrown = $e;
+		} finally {
+			restore_error_handler();
+			stream_wrapper_unregister( 'sa-refusing' );
+		}
+		$this->assertInstanceOf( RuntimeException::class, $thrown );
+		$this->assertSame( Aura_Tool_Audit_Mcp_Exposure::MANIFEST_UNREADABLE, $thrown->getMessage() );
+		$this->assertStringNotContainsString( ABSPATH, $thrown->getMessage() );
+		$this->assertNull( $thrown->getPrevious() ); // the raised message is not carried along either
+	}
+
+	public function test_the_fixed_message_is_what_the_composer_subtree_reports(): void {
+		$fqcn                      = Aura_Tool_Audit_Mcp_Exposure::ELEMENTOR_COMPOSER_CLASS;
+		$this->tool->classes       = array( $fqcn => true );
+		$this->tool->class_files   = array( $fqcn => ABSPATH . 'wp-content/plugins/x/src/Mcp/Server_Bootstrap.php' );
+		$this->tool->throw_in      = array( 'json' );
+		$this->tool->throw_message = Aura_Tool_Audit_Mcp_Exposure::MANIFEST_UNREADABLE;
+		$this->assertSame(
+			array( 'error' => Aura_Tool_Audit_Mcp_Exposure::MANIFEST_UNREADABLE ),
+			$this->block()['composer']
+		);
+	}
+
+	// --- Fix round 1 / I2: the two-step autoload rule ------------------------
+
+	public function test_the_presence_seam_asks_without_the_autoloader_first_and_with_it_once(): void {
+		// A seam under class_present() records the autoload flag of every
+		// lookup, so neither half of `class_exists( $f, false ) || class_exists( $f )`
+		// can be deleted with the suite still green.
+		$probe = new class() extends Aura_Tool_Audit_Mcp_Exposure {
+			/** @var bool[] the autoload flag of each lookup, in order */
+			public $flags = array();
+			/** @var bool[] fqcn => what the NON-autoloading lookup answers */
+			public $loaded = array();
+			/** @var bool[] fqcn => what the autoloading lookup answers */
+			public $autoloadable = array();
+			protected function class_declared( $fqcn, $autoload ) {
+				$this->flags[] = (bool) $autoload;
+				return $autoload
+					? ! empty( $this->autoloadable[ $fqcn ] )
+					: ! empty( $this->loaded[ $fqcn ] );
+			}
+			public function present( $fqcn ) {
+				return $this->class_present( $fqcn );
+			}
+		};
+
+		// Already loaded: answered without the autoloader, and the autoloading
+		// lookup is never made.
+		$probe->loaded = array( 'A' => true );
+		$this->assertTrue( $probe->present( 'A' ) );
+		$this->assertSame( array( false ), $probe->flags );
+
+		// Not loaded but registered: the second lookup, with the autoloader,
+		// is what finds it — this is the copy a real request would resolve.
+		$probe->flags        = array();
+		$probe->autoloadable = array( 'B' => true );
+		$this->assertTrue( $probe->present( 'B' ) );
+		$this->assertSame( array( false, true ), $probe->flags );
+
+		// Absent either way: asked twice, at most once with the autoloader.
+		$probe->flags = array();
+		$this->assertFalse( $probe->present( 'C' ) );
+		$this->assertSame( array( false, true ), $probe->flags );
+	}
+
+	public function test_the_real_presence_seam_resolves_a_registered_class_through_the_autoloader_once(): void {
+		$seam = new class() extends Aura_Tool_Audit_Mcp_Exposure {
+			public function present( $fqcn ) {
+				return $this->class_present( $fqcn );
+			}
+		};
+		$name   = 'SA_Autoloaded_Probe_' . getmypid();
+		$calls  = 0;
+		$loader = static function ( $requested ) use ( $name, &$calls ) {
+			if ( $requested === $name ) {
+				++$calls;
+				eval( 'class ' . $name . ' {}' ); // phpcs:ignore Squiz.PHP.Eval
+			}
+		};
+		spl_autoload_register( $loader );
+		try {
+			$this->assertFalse( class_exists( $name, false ) ); // not loaded yet
+			$this->assertTrue( $seam->present( $name ) );       // the autoloading lookup found it
+			$this->assertSame( 1, $calls );
+			$this->assertTrue( class_exists( $name, false ) );
+		} finally {
+			spl_autoload_unregister( $loader );
+		}
+	}
+
+	// --- Fix round 1 / M1: the manifest is only read at the package layout ---
+
+	public function test_a_composer_copy_outside_the_package_layout_reads_no_manifest(): void {
+		// `<pkg>/composer.json` is two directories above
+		// `<pkg>/src/Mcp/Server_Bootstrap.php`. A flattened or relocated copy
+		// would make that formula point at a STRANGER's manifest, and a wrong
+		// version in an audit is worse than none.
+		$fqcn                    = Aura_Tool_Audit_Mcp_Exposure::ELEMENTOR_COMPOSER_CLASS;
+		$this->tool->classes     = array( $fqcn => true );
+		$this->tool->class_files = array( $fqcn => ABSPATH . 'wp-content/plugins/foo/src/Server_Bootstrap.php' );
+		$this->tool->json        = array( ABSPATH . 'wp-content/plugins/composer.json' => array( 'version' => '9.9.9' ) );
+		$this->assertSame(
+			array(
+				'class_present' => true,
+				'version'       => null,
+				'path'          => 'wp-content/plugins/foo/src/Server_Bootstrap.php',
+			),
+			$this->block()['composer']
+		);
+		$this->assertSame( array(), $this->tool->json_reads );
+	}
+
+	// --- Fix round 1 / M2: native separators and doubled slashes ------------
+
+	public function test_the_relative_path_survives_native_separators_and_doubled_slashes(): void {
+		$win = str_replace( '/', '\\', ABSPATH );
+		$this->assertSame(
+			'wp-content/plugins/x/McpAdapter.php',
+			Aura_Tool_Audit_Mcp_Exposure::abspath_relative( $win . 'wp-content\\plugins\\x\\McpAdapter.php' )
+		);
+		$this->assertSame(
+			'wp-content/plugins/x/McpAdapter.php',
+			Aura_Tool_Audit_Mcp_Exposure::abspath_relative( ABSPATH . 'wp-content//plugins/x/McpAdapter.php' )
+		);
+		$this->assertSame( 'McpAdapter.php', Aura_Tool_Audit_Mcp_Exposure::abspath_relative( '/opt/elsewhere/McpAdapter.php' ) );
+		$this->assertSame( 'McpAdapter.php', Aura_Tool_Audit_Mcp_Exposure::abspath_relative( 'C:\\elsewhere\\McpAdapter.php' ) );
+	}
+
+	// --- Fix round 1 / M10: the size boundary, and a subtree that reads no file
+
+	public function test_the_manifest_size_boundary_is_at_most_64_kb(): void {
+		$seam = new class() extends Aura_Tool_Audit_Mcp_Exposure {
+			public function read( $path ) {
+				return $this->read_small_json( $path );
+			}
+		};
+		$dir = sys_get_temp_dir() . '/sa-composer-bound-' . getmypid() . '-' . uniqid();
+		mkdir( $dir, 0777, true );
+		$max  = Aura_Tool_Audit_Mcp_Exposure::ELEMENTOR_COMPOSER_JSON_MAX;
+		$at   = $dir . '/at.json';
+		$over = $dir . '/over.json';
+		// Exactly the cap, and one byte over it, both valid JSON.
+		$head = '{"version":"1.0.13","pad":"';
+		$tail = '"}';
+		file_put_contents( $at, $head . str_repeat( 'x', $max - strlen( $head ) - strlen( $tail ) ) . $tail );
+		file_put_contents( $over, $head . str_repeat( 'x', $max - strlen( $head ) - strlen( $tail ) + 1 ) . $tail );
+		try {
+			$this->assertSame( $max, filesize( $at ) );
+			$this->assertSame( $max + 1, filesize( $over ) );
+			$this->assertSame( '1.0.13', $seam->read( $at )['version'] ); // at the cap: read
+			$this->assertNull( $seam->read( $over ) );                    // one byte over: not read
+		} finally {
+			foreach ( array( $at, $over ) as $f ) {
+				if ( is_file( $f ) ) {
+					unlink( $f );
+				}
+			}
+			rmdir( $dir );
+		}
+	}
+
+	public function test_the_adapter_subtree_never_touches_the_filesystem(): void {
+		$fqcn                        = Aura_Tool_Audit_Mcp_Exposure::ELEMENTOR_ADAPTER_CLASS;
+		$this->tool->classes         = array( $fqcn => true );
+		$this->tool->class_constants = array( $fqcn => array( 'VERSION' => '0.6.1' ) );
+		$this->tool->class_files     = array( $fqcn => ABSPATH . 'wp-content/plugins/elementor/vendor/x/McpAdapter.php' );
+		$this->assertSame( '0.6.1', $this->block()['adapter']['version'] );
+		$this->assertSame( array(), $this->tool->json_reads );
+	}
+
 	// --- the REAL seams: reflection, and the one bounded file read ----------
 
 	public function test_the_real_class_seams_read_a_class_that_exists(): void {
@@ -625,10 +882,8 @@ final class McpExposureElementorTest extends TestCase {
 				return $this->read_small_json( $path );
 			}
 		};
-		$dir = sys_get_temp_dir() . '/sa-composer-' . getmypid();
-		if ( ! is_dir( $dir ) ) {
-			mkdir( $dir, 0777, true );
-		}
+		$dir = sys_get_temp_dir() . '/sa-composer-' . getmypid() . '-' . uniqid();
+		mkdir( $dir, 0777, true );
 		$good = $dir . '/good.json';
 		$bad  = $dir . '/bad.json';
 		$big  = $dir . '/big.json';

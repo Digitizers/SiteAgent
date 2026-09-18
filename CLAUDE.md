@@ -522,7 +522,9 @@ subtrees — `switch`, `adapter`, `composer` — each read in its own `try` in `
   not tell an off door from an on one. The **option** is read, never the class — the class may
   not be loaded on this request, and an older Elementor has no such option, where "absent ⇒
   off" is honest too (no switch and no door). `option_present` is what tells those two sites
-  apart. The switch runs even when Elementor is absent: an option outlives the plugin that
+  apart. Absent ⇒ `false` is upstream's own answer; a value that IS there is reported by its
+  **PHP truthiness**, since nothing here pins how upstream reads a stored `"no"`/`"off"` — that
+  case would over-report an open door, never under-report one. The switch runs even when Elementor is absent: an option outlives the plugin that
   wrote it, exactly as a consent row does. It also closes **that door only** — the 27 abilities
   stay registered, the adapter's default server still stands up, and `elementor/v1/mcp-proxy`
   never consults it.
@@ -535,15 +537,32 @@ subtrees — `switch`, `adapter`, `composer` — each read in its own `try` in `
   `composer.json` two directories above the class file — rather than a version a reader looks
   up elsewhere. `class_present` asks `class_exists()` without the autoloader first and once
   with it (the audit runs late in a REST request, where a registered resolver is what any other
-  request would use); nothing is instantiated. Both paths are the class file **relative to
-  ABSPATH**, the basename alone when it lies outside it, clipped like every other string in the
-  block — no absolute server path leaves the audit. The manifest is the only file this tool
-  reads, once, and only when it is a file under 64 KB; missing, oversized, non-JSON or a
-  non-string `version` leaves `version: null` with the copy still reported.
+  request would use). Nothing is instantiated and nothing is written — though letting the
+  autoloader answer can load a vendored class *file* on a request that otherwise would not
+  have, which the seam docblock says out loud. Both paths are the class file **relative to
+  ABSPATH** (both sides normalised, so native separators and symlinked installs still match),
+  the basename alone when it lies outside it, clipped like every other string in the block. The
+  manifest is the only file this tool reads **directly** (Elementor's plugin header still comes
+  off disk through core's `get_plugins()`), once, only when it is a readable file of **at most**
+  64 KB, and only for a copy that actually sits at `<pkg>/src/Mcp/<Class>.php` — a flattened
+  copy would point that formula at a stranger's `composer.json`, and a wrong version in an audit
+  is worse than none. Missing, oversized, non-JSON or a non-string `version` leaves
+  `version: null` with the copy still reported.
+- **No absolute server path leaves the audit — including inside an `{ error }`.** The manifest
+  read is the block's only filesystem call, and a site that converts warnings to exceptions
+  (Whoops, which Bedrock ships; any hardening plugin calling `set_error_handler`) would turn an
+  `open_basedir` or permission warning into a `Throwable` whose **message carries the absolute
+  path** — which `subtree_error()` would publish verbatim. So `read_small_json()` wraps every
+  filesystem call and converts any throw to the fixed `MANIFEST_UNREADABLE`
+  (`'composer.json unreadable'`, no `previous`), and the `adapter`/`composer` subtrees report
+  through `path_safe_subtree_error()`, which strips every form of `ABSPATH` from the message
+  first. Both halves are pinned by tests.
 
-Each new read sits behind its own seam (`elementor_switch_option()`, `class_present()`,
-`class_file()`, `class_constant()`, `read_small_json()`) so the suite states the site it models
-instead of loading a vendored class or touching the filesystem.
+Each new read sits behind its own seam (`elementor_switch_option()`, `class_present()` over the
+`class_declared( $fqcn, $autoload )` primitive, `class_file()`, `class_constant()`,
+`read_small_json()`) so the suite states the site it models instead of loading a vendored class
+or touching the filesystem — and a test that records the autoload flag of each lookup is what
+keeps the two-step rule from being simplified away.
 
 ---
 
