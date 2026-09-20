@@ -2711,23 +2711,28 @@ class Aura_Worker_Rules {
 	 * Did WordPress itself authenticate this request from a cookie session?
 	 *
 	 * Core decides this before any handler runs: rest_cookie_collect_status()
-	 * sets $wp_rest_auth_cookie = true only when the auth cookie validated,
-	 * and rest_cookie_check_errors() then requires a verified nonce or ends
-	 * the request (no nonce at all → the user is set to 0 and could not write).
-	 * So `true === $wp_rest_auth_cookie` at our seams means cookie AND nonce,
-	 * verified by core. A header the caller chose to send proves nothing —
-	 * any bearer client can add X-WP-Nonce — so it is never consulted.
+	 * sets $wp_rest_auth_cookie = true only when the auth cookie validated.
+	 * So `true` here means core authenticated a browser session from a valid
+	 * cookie. A header the caller chose to send proves nothing — any bearer
+	 * client can add X-WP-Nonce — so it is never consulted.
+	 *
+	 * It does NOT mean "the nonce verified" (corrected 2026-09-20, in the review of the proxy closure): a BAD nonce ends
+	 * the request in rest_cookie_check_errors(), but NO nonce at all only sets
+	 * the current user to 0 and leaves this global true. So a cookie-carrying
+	 * cross-site request reaches these seams as `true` with nobody attached,
+	 * and it is core's capability checks that refuse it. Read this as "a
+	 * person's browser, not an agent" — never as "this call is authorised".
 	 *
 	 * An application-password session sets this global false and reports
 	 * itself through rest_get_authenticated_app_password(); checked too, as
 	 * defence in depth.
 	 *
-	 * Caveat (SiteAgent #110): "cookie flag ⇒ nonce verified" holds at the
-	 * seams core authenticates — its own routes and any route whose
-	 * permission callback relies on the current user. SiteAgent's token
-	 * routes (the gateway's `/aura/mcp/tools/execute`) authenticate by
-	 * X-Aura-Token and never consult this flag, so a cookie session there
-	 * proves nothing about who is calling.
+	 * Caveat (SiteAgent #110): even "cookie flag ⇒ core authenticated this
+	 * request" holds only at the seams core authenticates — its own routes and
+	 * any route whose permission callback relies on the current user.
+	 * SiteAgent's token routes (the gateway's `/aura/mcp/tools/execute`)
+	 * authenticate by X-Aura-Token and never consult this flag, so a cookie
+	 * session there proves nothing about who is calling.
 	 *
 	 * @return bool
 	 */
@@ -2774,12 +2779,13 @@ class Aura_Worker_Rules {
 	 * Not agents, at every seam:
 	 *  - wp-admin, WP-CLI and cron: the site operating on itself (not REST).
 	 *  - A Gutenberg save: that is REST too (/wp/v2), but core authenticated it
-	 *    from a cookie session with a verified nonce (see
-	 *    is_cookie_authenticated()). That is an editor at the keyboard, and the
-	 *    spec promises wp-admin is unaffected. (Cookie flag ⇒ nonce holds at
-	 *    the core-authenticated seams this method serves; SiteAgent's token
-	 *    routes, such as the gateway's tools/execute, do not consult the
-	 *    cookie flag at all — see is_cookie_authenticated(), #110.)
+	 *    from a cookie session (see is_cookie_authenticated()), and core's own
+	 *    nonce and capability checks let it reach a handler at all. That is an
+	 *    editor at the keyboard, and the spec promises wp-admin is unaffected.
+	 *    (The flag is core's answer at the core-authenticated seams this method
+	 *    serves; SiteAgent's token routes, such as the gateway's tools/execute,
+	 *    do not consult the cookie flag at all — see is_cookie_authenticated(),
+	 *    #110.)
 	 *  - SiteAgent's own routes: execute_tool() already decided; refusing again
 	 *    would double-enforce the same call on its way to the same post.
 	 *

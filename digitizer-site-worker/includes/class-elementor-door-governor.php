@@ -2712,12 +2712,30 @@ class Aura_Worker_Elementor_Door {
 	}
 
 	/**
+	 * CASE-INSENSITIVE, because core's dispatcher is: WP_REST_Server::dispatch()
+	 * matches the request path with `'@^' . $route . '$@i'`
+	 * (wp-includes/rest-api/class-wp-rest-server.php), and
+	 * `WP_REST_Request::get_route()` returns the path as the CALLER spelled it,
+	 * never the registered spelling. A case-sensitive matcher here would
+	 * therefore answer "not a door" about a request core is about to hand the
+	 * door — `POST /wp-json/Elementor/mcp` is one changed letter and a bypass.
+	 * The namespace shortcut core tries first IS case-sensitive, so a
+	 * mixed-case path just falls through to the full route table, where the
+	 * `@i` regex matches it. Both spellings of the URL — `/wp-json/…` and
+	 * `?rest_route=…` — reach get_route() identically.
+	 *
+	 * (The flaw was here from 2.16.0 and is lower-impact on this matcher than
+	 * on route_is_proxy(): the callback wrapper still governs the token door
+	 * whatever the URL's casing, and this branch is only the fail-closed 503
+	 * for a build whose wrapper could not be verified. On exactly that build,
+	 * though, a case change walked past it.)
+	 *
 	 * @param string $route REST route.
 	 * @return bool
 	 */
 	public static function route_is_door( $route ) {
 		$route = (string) $route;
-		return (bool) preg_match( '#^/elementor/mcp(/|$)#', $route ) || (bool) preg_match( '#^/wp-abilities/v1/abilities/elementor/#', $route );
+		return (bool) preg_match( '#^/elementor/mcp(/|$)#i', $route ) || (bool) preg_match( '#^/wp-abilities/v1/abilities/elementor/#i', $route );
 	}
 
 	/**
@@ -2727,11 +2745,15 @@ class Aura_Worker_Elementor_Door {
 	 * from the two `route_is_door()` answers for, with a different rule, so
 	 * it gets its own matcher rather than widening that one.
 	 *
+	 * Case-insensitive for the reason route_is_door() is — core dispatches
+	 * `/Elementor/v1/mcp-proxy` to this route, so the governor must recognise
+	 * it as this route.
+	 *
 	 * @param string $route REST route.
 	 * @return bool
 	 */
 	public static function route_is_proxy( $route ) {
-		return (bool) preg_match( '#^/elementor/v1/mcp-proxy(/|$)#', (string) $route );
+		return (bool) preg_match( '#^/elementor/v1/mcp-proxy(/|$)#i', (string) $route );
 	}
 
 	/**
@@ -2779,14 +2801,23 @@ class Aura_Worker_Elementor_Door {
 			if ( ! self::active() ) {
 				return $response; // a door that does not exist is not closed
 			}
-			// Core decided this before any handler ran, and decides it for
-			// this route: the proxy's permission callback is
-			// current_user_can( 'edit_posts' ), so core authenticated the
-			// request and `true` there means cookie AND verified nonce (the
-			// #110 caveat is about SiteAgent's own token routes, which this
-			// is not). Anything else — an Application Password, any bearer
-			// scheme a plugin adds — is an agent, and agents reach Elementor
-			// through the governed door.
+			// What this asks, exactly: did core authenticate this request from
+			// a valid auth cookie, with no Application Password involved?
+			// Core decided it before any handler ran, and the #110 caveat is
+			// about SiteAgent's own token routes, which this is not.
+			//
+			// It is NOT "the nonce verified". rest_cookie_check_errors() sets
+			// the current user to 0 on a request with no nonce at all and
+			// leaves $wp_rest_auth_cookie true, so a cookie-carrying
+			// cross-site POST reaches here as `true`. Core then refuses it at
+			// this route's own permission callback, current_user_can(
+			// 'edit_posts' ), against user 0 — which is why this seam is only
+			// ever consulted to let a request THROUGH, and never to grant
+			// anything.
+			//
+			// Anything else — an Application Password, any bearer scheme a
+			// plugin adds — is an agent, and agents reach Elementor through
+			// the governed door.
 			if ( Aura_Worker_Rules::cookie_authenticated() ) {
 				return $response;
 			}

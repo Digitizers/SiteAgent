@@ -11,6 +11,19 @@ use PHPUnit\Framework\TestCase;
 
 final class ElementorDoorGovernorTest extends TestCase {
 
+	/**
+	 * Spellings of Elementor's proxy route that core's dispatcher accepts —
+	 * the pretty form and the `?rest_route=` form both hand get_route() the
+	 * caller's own casing.
+	 */
+	private const MIXED_CASE_PROXY_ROUTES = array(
+		'/Elementor/v1/mcp-proxy',
+		'/ELEMENTOR/V1/MCP-PROXY',
+		'/elementor/v1/MCP-Proxy',
+		'/Elementor/v1/mcp-proxy/',
+		'/Elementor/v1/mcp-proxy/tools',
+	);
+
 	/** @var array<string,int> how many times each inner callback ran */
 	private $ran = array();
 
@@ -798,17 +811,17 @@ final class ElementorDoorGovernorTest extends TestCase {
 	}
 
 	/* --------------------------------------------------------------- */
-	/* The cookie proxy — Elementor's own transport (#61)              */
+	/* The cookie proxy — Elementor's own transport (2.19.0)           */
 	/* --------------------------------------------------------------- */
 
 	/** Both methods refused at the proxy, with the code and status decided. */
-	private function assertProxyRefused( string $why ): void {
+	private function assertProxyRefused( string $why, string $route = '/elementor/v1/mcp-proxy' ): void {
 		foreach ( array( 'POST', 'GET' ) as $method ) {
-			$req = new WP_REST_Request( $method, '/elementor/v1/mcp-proxy' );
+			$req = new WP_REST_Request( $method, $route );
 			$res = Aura_Worker_Elementor_Door::close_transport( null, array(), $req );
-			$this->assertInstanceOf( WP_Error::class, $res, "$method, $why" );
-			$this->assertSame( 'aura_door_proxy_closed', $res->get_error_code(), "$method, $why" );
-			$this->assertSame( 403, $res->get_error_data()['status'], "$method, $why" );
+			$this->assertInstanceOf( WP_Error::class, $res, "$method $route, $why" );
+			$this->assertSame( 'aura_door_proxy_closed', $res->get_error_code(), "$method $route, $why" );
+			$this->assertSame( 403, $res->get_error_data()['status'], "$method $route, $why" );
 		}
 	}
 
@@ -901,6 +914,66 @@ final class ElementorDoorGovernorTest extends TestCase {
 		$this->assertFalse( Aura_Worker_Elementor_Door::route_is_proxy( '/elementor/mcp' ) );
 		$this->assertFalse( Aura_Worker_Elementor_Door::route_is_proxy( '/aura/mcp/tools/execute' ) );
 		$this->assertFalse( Aura_Worker_Elementor_Door::route_is_door( '/elementor/v1/mcp-proxy' ), 'the two doors never answer for each other' );
+	}
+
+	/**
+	 * Core dispatches a REST route CASE-INSENSITIVELY — `'@^' . $route . '$@i'`
+	 * in WP_REST_Server::dispatch() — and WP_REST_Request::get_route() hands us
+	 * the path as the caller spelled it, never the registered spelling. A
+	 * case-sensitive matcher therefore says "not the proxy" about a request
+	 * core is about to send straight to the proxy: one changed letter and the
+	 * whole rule is bypassed. The matcher runs core's own semantics.
+	 *
+	 * The two ways in produce the same string, so this covers both:
+	 * `/wp-json/Elementor/v1/mcp-proxy` and `?rest_route=/Elementor/v1/mcp-proxy`
+	 * both leave `get_route()` as `/Elementor/v1/mcp-proxy`.
+	 */
+	public function test_route_is_proxy_matches_the_way_core_dispatches_whatever_the_case(): void {
+		foreach ( self::MIXED_CASE_PROXY_ROUTES as $route ) {
+			$this->assertTrue( Aura_Worker_Elementor_Door::route_is_proxy( $route ), $route );
+		}
+		$this->assertFalse( Aura_Worker_Elementor_Door::route_is_proxy( '/Elementor/v1/mcp-proxyx' ), 'wider in case, not in shape' );
+		$this->assertFalse( Aura_Worker_Elementor_Door::route_is_proxy( '/Elementor/mcp' ) );
+	}
+
+	/** The refusal itself, not just the matcher, follows core's casing. */
+	public function test_the_cookie_proxy_is_closed_whatever_the_case_of_the_route(): void {
+		$GLOBALS['_sa_force_door'] = true;
+		$this->registerAll();
+		foreach ( self::MIXED_CASE_PROXY_ROUTES as $route ) {
+			$this->assertProxyRefused( 'a case change is not a different door', $route );
+		}
+	}
+
+	/**
+	 * The same defect in the neighbouring matcher (present since 2.16.0): on
+	 * the very build the 503 exists for — one whose wrapper could not be
+	 * verified — `/Elementor/mcp` walked past `aura_door_ungoverned`.
+	 */
+	public function test_the_token_door_is_closed_whatever_the_case_of_the_route(): void {
+		$routes = array(
+			'/Elementor/mcp',
+			'/ELEMENTOR/MCP',
+			'/Elementor/mcp/tools/call',
+			'/wp-abilities/v1/abilities/Elementor/manage-elements/run',
+			'/WP-Abilities/v1/abilities/elementor/manage-elements/run',
+		);
+		foreach ( $routes as $route ) {
+			$this->assertTrue( Aura_Worker_Elementor_Door::route_is_door( $route ), $route );
+		}
+		$this->assertFalse( Aura_Worker_Elementor_Door::route_is_door( '/Elementor/mcpx' ), 'wider in case, not in shape' );
+
+		$GLOBALS['_sa_force_door'] = true;
+		$this->registerAll();
+		$this->breakCoverage();
+		$this->assertSame( 'unavailable', Aura_Worker_Elementor_Door::seam() );
+		foreach ( $routes as $route ) {
+			$req = new WP_REST_Request( 'POST', $route );
+			$res = Aura_Worker_Elementor_Door::close_transport( null, array(), $req );
+			$this->assertInstanceOf( WP_Error::class, $res, $route );
+			$this->assertSame( 'aura_door_ungoverned', $res->get_error_code(), $route );
+			$this->assertSame( 503, $res->get_error_data()['status'], $route );
+		}
 	}
 
 	public function test_a_build_without_the_stored_callback_property_is_a_coverage_failure(): void {

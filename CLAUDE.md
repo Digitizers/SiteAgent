@@ -508,7 +508,7 @@ out of every REST response an **agent** reads.
 
 ---
 
-### Elementor door governor — the three doors (#61)
+### Elementor door governor — the three doors (2.19.0)
 
 `Aura_Worker_Elementor_Door` (`includes/class-elementor-door-governor.php`) governs
 Elementor's abilities. Three transports reach them, and each is covered once:
