@@ -471,6 +471,14 @@ class Aura_Tool_Audit_Mcp_Exposure extends Aura_Tool_Base {
 	 * Multisite: the current blog's option, like every other read this block
 	 * makes.
 	 *
+	 * Limit (Codex round-16 on #125, not taken): a third plugin hooking
+	 * `default_option_elementor_mcp_enabled` makes a row-less site answer that
+	 * plugin's default instead of $absent, so `option_present` reads true —
+	 * and `enabled` reads what Elementor's own is_enabled() would then read,
+	 * which is the field a consumer acts on. Reading the row directly would
+	 * add a raw query and a cache bypass to a read-only audit for a case no
+	 * shipped plugin produces.
+	 *
 	 * @param object $absent The sentinel to answer for an absent row.
 	 * @return mixed
 	 */
