@@ -46,7 +46,7 @@ class SA_Elementor_Fake_Tool extends Aura_Tool_Audit_Mcp_Exposure {
 
 	// --- 2.19.0: the beta3 switch, and which vendored copies resolve ---------
 	/** @var mixed raw `elementor_mcp_enabled` value; null = the option is absent */
-	public $switch_option = null;
+	public $switch_option = Aura_Tool_Audit_Mcp_Exposure::OPTION_ABSENT;
 	/** @var array fqcn => bool */
 	public $classes = array();
 	/** @var array fqcn => string|null — what ReflectionClass::getFileName() would answer */
@@ -473,8 +473,11 @@ final class McpExposureElementorTest extends TestCase {
 		// The rule McpSettingsController::is_enabled() applies at composer
 		// 1.0.13: no option ⇒ false. On an older Elementor there is no switch
 		// and no token door either, so "off" is honest there too.
-		$this->tool->switch_option = null;
+		$this->tool->switch_option = Aura_Tool_Audit_Mcp_Exposure::OPTION_ABSENT;
 		$this->assertSame( array( 'option_present' => false, 'enabled' => false ), $this->block()['switch'] );
+		// A row whose STORED value is null is present — and off (Codex round-14 on #125).
+		$this->tool->switch_option = null;
+		$this->assertSame( array( 'option_present' => true, 'enabled' => false ), $this->block()['switch'] );
 	}
 
 	public function test_the_switch_reads_the_stored_value_as_is_enabled_does(): void {
