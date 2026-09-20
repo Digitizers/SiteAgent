@@ -652,14 +652,24 @@ final class McpExposureElementorTest extends TestCase {
 			'file_get_contents(wp-content/x/composer.json): denied',
 			Aura_Tool_Audit_Mcp_Exposure::without_abspath( 'file_get_contents(' . ABSPATH . 'wp-content/x/composer.json): denied' )
 		);
+		// Separators are normalised to `/` on the way out (Codex round-1 on
+		// #125): the message is an error string, so the remainder is spelled
+		// forward-slash whatever the platform spelled it.
 		$this->assertSame(
-			'open_basedir restriction: wp-content\\x\\composer.json',
+			'open_basedir restriction: wp-content/x/composer.json',
 			Aura_Tool_Audit_Mcp_Exposure::without_abspath( 'open_basedir restriction: ' . $win . 'wp-content\\x\\composer.json' )
 		);
 		// The directory named without its trailing separator is stripped too.
 		$this->assertSame( 'no such directory: ', Aura_Tool_Audit_Mcp_Exposure::without_abspath( 'no such directory: ' . rtrim( ABSPATH, '/' ) ) );
 		// A message with no path in it is untouched.
 		$this->assertSame( 'json exploded', Aura_Tool_Audit_Mcp_Exposure::without_abspath( 'json exploded' ) );
+		// Windows, mixed separators (Codex round-1 on #125): an ABSPATH spelled
+		// with backslashes and a message spelling the same directory with
+		// forward slashes — or the reverse — still strips.
+		$mixed = 'C:\\site\\wp/';
+		$this->assertSame( 'open(vendor/x.php): denied', Aura_Tool_Audit_Mcp_Exposure::without_abspath_from( 'open(C:/site/wp/vendor/x.php): denied', $mixed ) );
+		$this->assertSame( 'open(vendor/x.php): denied', Aura_Tool_Audit_Mcp_Exposure::without_abspath_from( 'open(C:\\site\\wp\\vendor/x.php): denied', $mixed ) );
+		$this->assertSame( 'open(vendor/x.php): denied', Aura_Tool_Audit_Mcp_Exposure::without_abspath_from( 'open(C:/site/wp\\vendor\\x.php): denied', 'C:/site/wp/' ) );
 	}
 
 	public function test_the_real_manifest_seam_converts_a_raising_read_to_a_fixed_message(): void {

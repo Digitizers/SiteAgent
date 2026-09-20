@@ -1398,11 +1398,20 @@ class Aura_Tool_Audit_Mcp_Exposure extends Aura_Tool_Base {
 	 * @return string
 	 */
 	public static function without_abspath( $msg ) {
-		$msg = (string) $msg;
-		if ( ! defined( 'ABSPATH' ) ) {
-			return $msg;
-		}
-		$root = (string) ABSPATH;
+		return self::without_abspath_from( $msg, defined( 'ABSPATH' ) ? (string) ABSPATH : '' );
+	}
+
+	/**
+	 * without_abspath() with the root as a parameter — the seam that lets a
+	 * Windows root be exercised on any platform.
+	 *
+	 * @param string $msg  Message.
+	 * @param string $root ABSPATH as this site spells it ('' = unknown).
+	 * @return string
+	 */
+	public static function without_abspath_from( $msg, $root ) {
+		$msg  = (string) $msg;
+		$root = (string) $root;
 		if ( '' === $root ) {
 			return $msg;
 		}
@@ -1410,10 +1419,17 @@ class Aura_Tool_Audit_Mcp_Exposure extends Aura_Tool_Base {
 		if ( '' === $bare ) {
 			return $msg;
 		}
-		// With a separator first, then the bare directory: whatever is left of
-		// the path after the longest match is relative.
-		foreach ( array( $bare . '/', $bare . '\\', $bare ) as $form ) {
-			$msg = str_replace( array( $form, str_replace( '/', '\\', $form ) ), '', $msg );
+		// Separators are normalised on BOTH sides before matching, so a Windows
+		// ABSPATH spelled `C:\\site\\wp/` still strips a message that spells the
+		// same directory `C:/site/wp/vendor.php` or `C:\\site\\wp\\vendor.php`
+		// (Codex round-1 on #125): every backslash in the message becomes `/`,
+		// which is harmless in an error string and makes one spelling of the
+		// root enough. With a separator first, then the bare directory:
+		// whatever is left of the path after the longest match is relative.
+		$msg  = str_replace( '\\', '/', $msg );
+		$bare = str_replace( '\\', '/', $bare );
+		foreach ( array( $bare . '/', $bare ) as $form ) {
+			$msg = str_replace( $form, '', $msg );
 		}
 		return $msg;
 	}
