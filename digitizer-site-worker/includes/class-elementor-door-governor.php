@@ -2712,17 +2712,80 @@ class Aura_Worker_Elementor_Door {
 	}
 
 	/**
+	 * CASE-INSENSITIVE, because core's dispatcher is: WP_REST_Server::dispatch()
+	 * matches the request path with `'@^' . $route . '$@i'`
+	 * (wp-includes/rest-api/class-wp-rest-server.php), and
+	 * `WP_REST_Request::get_route()` returns the path as the CALLER spelled it,
+	 * never the registered spelling. A case-sensitive matcher here would
+	 * therefore answer "not a door" about a request core is about to hand the
+	 * door — `POST /wp-json/Elementor/mcp` is one changed letter and a bypass.
+	 * The namespace shortcut core tries first IS case-sensitive, so a
+	 * mixed-case path just falls through to the full route table, where the
+	 * `@i` regex matches it. Both spellings of the URL — `/wp-json/…` and
+	 * `?rest_route=…` — reach get_route() identically.
+	 *
+	 * (The flaw was here from 2.16.0 and is lower-impact on this matcher than
+	 * on route_is_proxy(): the callback wrapper still governs the token door
+	 * whatever the URL's casing, and this branch is only the fail-closed 503
+	 * for a build whose wrapper could not be verified. On exactly that build,
+	 * though, a case change walked past it.)
+	 *
 	 * @param string $route REST route.
 	 * @return bool
 	 */
 	public static function route_is_door( $route ) {
 		$route = (string) $route;
-		return (bool) preg_match( '#^/elementor/mcp(/|$)#', $route ) || (bool) preg_match( '#^/wp-abilities/v1/abilities/elementor/#', $route );
+		return (bool) preg_match( '#^/elementor/mcp(/|$)#i', $route ) || (bool) preg_match( '#^/wp-abilities/v1/abilities/elementor/#i', $route );
+	}
+
+	/**
+	 * Elementor's OWN transport: `POST|GET /elementor/v1/mcp-proxy`, the
+	 * cookie proxy its editor packages call (Elementor 4.3,
+	 * `modules/mcp/rest-api/mcp-proxy-rest-api.php`). It is a different door
+	 * from the two `route_is_door()` answers for, with a different rule, so
+	 * it gets its own matcher rather than widening that one.
+	 *
+	 * Case-insensitive for the reason route_is_door() is — core dispatches
+	 * `/Elementor/v1/mcp-proxy` to this route, so the governor must recognise
+	 * it as this route.
+	 *
+	 * @param string $route REST route.
+	 * @return bool
+	 */
+	public static function route_is_proxy( $route ) {
+		return (bool) preg_match( '#^/elementor/v1/mcp-proxy(/|$)#i', (string) $route );
 	}
 
 	/**
 	 * The transport blocker: independent of the wrapper, so a build that
 	 * bypasses the wrapper still meets a closed door — reads included.
+	 *
+	 * Three doors reach Elementor's abilities, and each is covered once. The
+	 * token door (`/elementor/mcp`) and the default abilities server
+	 * (`/wp-abilities/v1/abilities/elementor/…`) both run the REGISTERED
+	 * `execute_callback`, so `wrap_args()` governs them and this method only
+	 * closes them when `verify_coverage()` could not prove that seam is in
+	 * place. The cookie proxy runs `execute_guarded()` on Elementor's ability
+	 * OBJECT and never reaches the registered callback at all, so no wrapper
+	 * can govern it — it is instead restricted to the callers it exists for,
+	 * browser sessions in the editor, and refused to everyone else.
+	 *
+	 * What that door left open: `Ability_Registry::find_by_proxy_slug()`
+	 * refuses any ability whose `is_exposed_via_proxy()` is false, and five of
+	 * the eleven governed writes opt out (build-composition, create-page,
+	 * create-preview-link, publish-document, update-page-settings). The other
+	 * six — manage-elements, manage-component, manage-default-styles,
+	 * manage-classes, reorder-classes, manage-global-variable — were reachable
+	 * past the seam until this rule.
+	 *
+	 * The proxy rule is independent of self::$seam on purpose: an agent
+	 * calling the proxy is refused even when coverage is `ok`, because
+	 * coverage is exactly what the proxy bypasses.
+	 *
+	 * A refused proxy call is NOT counted or logged: the governor's audit
+	 * block has a strict consumer on the Aura side and this refusal has no
+	 * ability, actor or touches to report. Observability for it is a
+	 * follow-up.
 	 *
 	 * @param mixed           $response Short-circuit value.
 	 * @param array           $handler  Route handler.
@@ -2733,7 +2796,38 @@ class Aura_Worker_Elementor_Door {
 		if ( null !== $response || ! $request || ! method_exists( $request, 'get_route' ) ) {
 			return $response;
 		}
-		if ( ! self::route_is_door( $request->get_route() ) ) {
+		$route = (string) $request->get_route();
+		if ( self::route_is_proxy( $route ) ) {
+			if ( ! self::active() ) {
+				return $response; // a door that does not exist is not closed
+			}
+			// What this asks, exactly: did core authenticate this request from
+			// a valid auth cookie, with no Application Password involved?
+			// Core decided it before any handler ran, and the #110 caveat is
+			// about SiteAgent's own token routes, which this is not.
+			//
+			// It is NOT "the nonce verified". rest_cookie_check_errors() sets
+			// the current user to 0 on a request with no nonce at all and
+			// leaves $wp_rest_auth_cookie true, so a cookie-carrying
+			// cross-site POST reaches here as `true`. Core then refuses it at
+			// this route's own permission callback, current_user_can(
+			// 'edit_posts' ), against user 0 — which is why this seam is only
+			// ever consulted to let a request THROUGH, and never to grant
+			// anything.
+			//
+			// Anything else — an Application Password, any bearer scheme a
+			// plugin adds — is an agent, and agents reach Elementor through
+			// the governed door.
+			if ( Aura_Worker_Rules::cookie_authenticated() ) {
+				return $response;
+			}
+			return new WP_Error(
+				'aura_door_proxy_closed',
+				__( 'This transport belongs to the Elementor editor; agents reach Elementor through /elementor/mcp, which Aura governs', 'digitizer-site-worker' ),
+				array( 'status' => 403 )
+			);
+		}
+		if ( ! self::route_is_door( $route ) ) {
 			return $response;
 		}
 		if ( ! self::active() ) {
