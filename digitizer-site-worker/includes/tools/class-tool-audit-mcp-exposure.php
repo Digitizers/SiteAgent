@@ -1383,6 +1383,14 @@ class Aura_Tool_Audit_Mcp_Exposure extends Aura_Tool_Base {
 		// `c:/site/wp/…` are one directory; on a POSIX host `/srv/Site/` and
 		// `/srv/site/` are two, and a file under the twin is outside WordPress
 		// and must stay a bare filename.
+		// A stream-wrapper spelling (`phar:///srv/site/x.phar/a.php` — a class
+		// loaded from an archive) is the path after its scheme: judged against
+		// ABSPATH like any other, so a PHAR under the root is relative and one
+		// outside it is a basename (Codex round-11 on #125). Stripped BEFORE
+		// normalisation (which would fold the `///`), keeping one leading
+		// slash — and none before a drive letter (`file:///C:/…` → `C:/…`).
+		$file = (string) preg_replace( '#^[a-z][a-z0-9+.-]*:[/\\\\]{2,}#i', '/', (string) $file );
+		$file = (string) preg_replace( '#^/(?=[A-Za-z]:[/\\\\])#', '', $file );
 		$file = static::normalize_path( $file );
 		$root = static::normalize_path( (string) $root );
 		$root = '' === $root ? '' : rtrim( $root, '/' ) . '/';
