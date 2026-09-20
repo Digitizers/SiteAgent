@@ -546,6 +546,54 @@ A refused proxy call is **not counted and not logged** — the governor's audit 
 a strict consumer on the Aura side, and this refusal has no ability, actor or touches to
 report. Observability for it is a follow-up.
 
+### The second door in `audit_mcp_exposure` — the `elementor` block (2.19.0)
+
+`audit_mcp_exposure`'s `elementor` block reports Elementor's own MCP door as facts, never a
+verdict, and every subtree fails on its own (`{ error }` in its place, `manage_options`
+required for all of them). Elementor 4.3.0-beta3 moved twice, so the block gained three
+subtrees — `switch`, `adapter`, `composer` — each read in its own `try` in `elementor_state()`.
+
+- **`switch: { option_present, enabled }`** — beta3 put the `/elementor/mcp` token door behind
+  a kill switch: `Server_Bootstrap::register_server()` returns early unless
+  `McpSettingsController::is_enabled()`, which is **false when the `elementor_mcp_enabled`
+  option is absent**. A 4.3 upgrade no longer opens a token door by itself, and the block could
+  not tell an off door from an on one. The **option** is read, never the class — the class may
+  not be loaded on this request, and an older Elementor has no such option, where "absent ⇒
+  off" is honest too (no switch and no door). `option_present` is what tells those two sites
+  apart. Absent ⇒ `false` is upstream's own answer; a value that IS there is reported by its
+  **PHP truthiness**, since nothing here pins how upstream reads a stored `"no"`/`"off"` — that
+  case would over-report an open door, never under-report one. The switch runs even when Elementor is absent: an option outlives the plugin that
+  wrote it, exactly as a consent row does. It also closes **that door only** — the 27 abilities
+  stay registered, the adapter's default server still stands up, and `elementor/v1/mcp-proxy`
+  never consults it.
+- **`adapter` / `composer`: `{ class_present, version, path }`** — the WP MCP adapter moved
+  0.5.0 → 0.6.1, and **which vendored copy answers is autoload order, not version**: Elementor
+  declares `WP\MCP\` through the Jetpack autoloader while a co-installed plugin (EMCP) prepends
+  its own resolver for the same namespace, and the `elementor-mcp-composer` package picks the
+  highest of several bundled copies. So the audit reports the copy that actually **resolves**
+  here — the adapter's `VERSION` constant, the composer package's `version` from its own
+  `composer.json` two directories above the class file — rather than a version a reader looks
+  up elsewhere. `class_present` asks `class_exists()` without the autoloader first and once
+  with it (the audit runs late in a REST request, where a registered resolver is what any other
+  request would use). Nothing is instantiated and nothing is written — though letting the
+  autoloader answer can load a vendored class *file* on a request that otherwise would not
+  have, which the seam docblock says out loud. Both paths are the class file **relative to
+  ABSPATH** (both sides normalised, so native separators and symlinked installs still match),
+  the basename alone when it lies outside it, clipped like every other string in the block. The
+  manifest is the only file this tool reads **directly** (Elementor's plugin header still comes
+  off disk through core's `get_plugins()`), once, only when it is a readable file of **at most**
+  64 KB, and only for a copy that actually sits at `<pkg>/src/Mcp/<Class>.php` — a flattened
+  copy would point that formula at a stranger's `composer.json`, and a wrong version in an audit
+  is worse than none. Missing, oversized, non-JSON or a non-string `version` leaves
+  `version: null` with the copy still reported.
+- **The `adapter` / `composer` `{ error }` is a fixed literal (`adapter unreadable`, `composer unreadable`, or the manifest read's own `composer.json unreadable`), never the throw's text.** The two subtrees are the block's only filesystem-touching reads; a throw there (a warning converted to an exception, an autoloader naming what it opened) carries the absolute path in a spelling a scrubber has to anticipate — drive letters, UNC shares, `file:///`, an `ABSPATH` of `/`, a sibling that merely contains the root — and ten review rounds each found one more. What is never copied cannot leave. `abspath_relative()` / `without_abspath()` remain as tested helpers for the relative `path` the block DOES publish.
+
+Each new read sits behind its own seam (`elementor_switch_option()`, `class_present()` over the
+`class_declared( $fqcn, $autoload )` primitive, `class_file()`, `class_constant()`,
+`read_small_json()`) so the suite states the site it models instead of loading a vendored class
+or touching the filesystem — and a test that records the autoload flag of each lookup is what
+keeps the two-step rule from being simplified away.
+
 ---
 
 ## WordPress Options
