@@ -1428,8 +1428,12 @@ class Aura_Tool_Audit_Mcp_Exposure extends Aura_Tool_Base {
 		// whatever is left of the path after the longest match is relative.
 		$msg  = str_replace( '\\', '/', $msg );
 		$bare = str_replace( '\\', '/', $bare );
+		// Case-insensitively (Codex round-2 on #125): Windows paths are, so
+		// `C:\\Site\\WP\\` and `c:/site/wp/vendor.php` name one directory. On a
+		// case-sensitive filesystem this can only strip MORE than the root —
+		// text from an error message, in the safe direction.
 		foreach ( array( $bare . '/', $bare ) as $form ) {
-			$msg = str_replace( $form, '', $msg );
+			$msg = str_ireplace( $form, '', $msg );
 		}
 		return $msg;
 	}

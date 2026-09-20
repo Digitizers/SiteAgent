@@ -670,6 +670,8 @@ final class McpExposureElementorTest extends TestCase {
 		$this->assertSame( 'open(vendor/x.php): denied', Aura_Tool_Audit_Mcp_Exposure::without_abspath_from( 'open(C:/site/wp/vendor/x.php): denied', $mixed ) );
 		$this->assertSame( 'open(vendor/x.php): denied', Aura_Tool_Audit_Mcp_Exposure::without_abspath_from( 'open(C:\\site\\wp\\vendor/x.php): denied', $mixed ) );
 		$this->assertSame( 'open(vendor/x.php): denied', Aura_Tool_Audit_Mcp_Exposure::without_abspath_from( 'open(C:/site/wp\\vendor\\x.php): denied', 'C:/site/wp/' ) );
+		// …and case-insensitively, because Windows is (Codex round-2 on #125).
+		$this->assertSame( 'open(vendor/x.php): denied', Aura_Tool_Audit_Mcp_Exposure::without_abspath_from( 'open(c:/SITE/wp/vendor/x.php): denied', 'C:\\Site\\WP\\' ) );
 	}
 
 	public function test_the_real_manifest_seam_converts_a_raising_read_to_a_fixed_message(): void {
