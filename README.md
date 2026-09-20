@@ -17,7 +17,7 @@
   </a>
   <img src="https://img.shields.io/badge/WordPress-6.2%E2%80%937.1-21759b?logo=wordpress" alt="WordPress" />
   <img src="https://img.shields.io/badge/PHP-7.4%2B-777bb4?logo=php" alt="PHP" />
-  <img src="https://img.shields.io/badge/Stable-2.18.4-green" alt="Stable" />
+  <img src="https://img.shields.io/badge/Stable-2.19.0-green" alt="Stable" />
 </p>
 
 ---
@@ -238,6 +238,14 @@ These plug straight into **Aura's Fleet MCP Gateway**: read tools run on demand,
 ---
 
 ## Changelog
+
+### 2.19.0
+
+- **Elementor's cookie proxy is closed to agents.** `elementor/v1/mcp-proxy` calls the ability object directly and never passed the door governor's seam; its `permission_callback` is `edit_posts` alone, so an Application Password client reached six of the eleven governed writes there ungoverned since 2.16.0. While the governor is active, a request that is not a browser session (core's cookie + verified-nonce flag) is refused `403 aura_door_proxy_closed`, both methods, reads included — the editor's own sessions pass untouched. Owner decision 2026-09-18 (option C).
+- **Route matchers are case-insensitive**, as `WP_REST_Server::dispatch()` is; `route_is_door()` had the flaw since 2.16.0.
+- **`audit_mcp_exposure` → `elementor` gains `switch`, `adapter`, `composer`** for Elementor 4.3.0-beta3: the token door's kill switch (`elementor_mcp_enabled`, absent ⇒ off), and which vendored copies of the WP MCP adapter (0.6.1 at beta3) and `elementor-mcp-composer` actually resolve — version and ABSPATH-relative path; the `{ error }` of those two subtrees is a fixed literal, so no exception text (and no path spelling) can leave through it.
+
+Ships Digitizers/SiteAgent#125 and #126. Aura side: Digitizers/Aura#572.
 
 ### 2.18.4
 

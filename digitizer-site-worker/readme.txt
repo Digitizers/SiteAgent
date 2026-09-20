@@ -4,7 +4,7 @@ Tags: ai, automation, maintenance, updates, wordpress management
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.18.4
+Stable tag: 2.19.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -252,6 +252,11 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 7. Connections: provider connections (Cloudways, Cloudflare, Bunny, Hostinger, Vultr, xCloud) with resource counts, status, and credential-rotation reminders.
 
 == Changelog ==
+
+= 2.19.0 =
+* Security: Elementor's editor-internal MCP proxy (`elementor/v1/mcp-proxy`) is closed to anything but a browser session while the Aura door governor is active — an Application Password or bearer client is answered `403 aura_door_proxy_closed` and pointed at the governed `/elementor/mcp` door. Six of the eleven governed Elementor writes were reachable there past the governor since 2.16.0; the editor's own Global Classes / Variables UI is unaffected.
+* Security: the door governor's route matchers are case-insensitive, as WordPress's REST dispatcher is — a mixed-case spelling of a governed route no longer walks past the transport closer.
+* `audit_mcp_exposure`'s `elementor` block now reports Elementor 4.3.0-beta3's kill switch on the token door (`switch`: the `elementor_mcp_enabled` option, absent means off) and which vendored WP MCP adapter and `elementor-mcp-composer` copies actually resolve on the site (`adapter`, `composer`: version and ABSPATH-relative path).
 
 = 2.18.4 =
 * Security: an empty port after a webhook host (`https://hooks.zapier.com:/hooks/...`, `hooks.zapier.com:/...`) is now read as a URL parser reads it, so such URLs are redacted in plain text too — the case 2.18.3 listed as a known limit. A colon followed by anything but a port and a slash is still not a port.
