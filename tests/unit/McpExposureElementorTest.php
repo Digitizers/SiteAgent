@@ -674,6 +674,12 @@ final class McpExposureElementorTest extends TestCase {
 		$this->assertSame( 'open(vendor/x.php): denied', Aura_Tool_Audit_Mcp_Exposure::without_abspath_from( 'open(c:/SITE/wp/vendor/x.php): denied', 'C:\\Site\\WP\\' ) );
 		// A POSIX root strips byte-exactly: the differently-cased twin is not this tree.
 		$this->assertSame( 'open(/srv/site/vendor/x.php): denied', Aura_Tool_Audit_Mcp_Exposure::without_abspath_from( 'open(/srv/site/vendor/x.php): denied', '/srv/Site/' ) );
+		// ABSPATH '/' (a container): the leading slash of each path token goes,
+		// other slashes stay (Codex round-5 on #125).
+		$this->assertSame( 'open(wp-content/plugins/x/vendor.php): denied at wp-content/y', Aura_Tool_Audit_Mcp_Exposure::without_abspath_from( 'open(/wp-content/plugins/x/vendor.php): denied at /wp-content/y', '/' ) );
+		$this->assertSame( 'a/b and 3/4', Aura_Tool_Audit_Mcp_Exposure::without_abspath_from( 'a/b and 3/4', '/' ) );
+		// UNC root in the message, different casing.
+		$this->assertSame( 'open(vendor/x.php)', Aura_Tool_Audit_Mcp_Exposure::without_abspath_from( 'open(//SERVER/Share/site/vendor/x.php)', '\\\\server\\share\\site\\' ) );
 	}
 
 	public function test_the_real_manifest_seam_converts_a_raising_read_to_a_fixed_message(): void {
@@ -834,6 +840,11 @@ final class McpExposureElementorTest extends TestCase {
 		$this->assertSame( 'McpAdapter.php', Aura_Tool_Audit_Mcp_Exposure::abspath_relative_from( '/srv/site/wp-content/plugins/foo/McpAdapter.php', '/srv/Site/' ) );
 		$this->assertSame( 'wp-content/plugins/foo/McpAdapter.php', Aura_Tool_Audit_Mcp_Exposure::abspath_relative_from( '/srv/Site/wp-content/plugins/foo/McpAdapter.php', '/srv/Site/' ) );
 		$this->assertTrue( Aura_Tool_Audit_Mcp_Exposure::is_windows_root( 'c:/x/' ) );
+		$this->assertTrue( Aura_Tool_Audit_Mcp_Exposure::is_windows_root( '//server/share/site/' ) );
+		// UNC root, different casing (Codex round-5 on #125): still one directory.
+		$this->assertSame( 'wp-content/plugins/x/McpAdapter.php', Aura_Tool_Audit_Mcp_Exposure::abspath_relative_from( '//SERVER/share/Site/wp-content/plugins/x/McpAdapter.php', '\\\\server\\share\\site\\' ) );
+		// ABSPATH is the filesystem root: relative = the path without its leading slash.
+		$this->assertSame( 'wp-content/plugins/x/McpAdapter.php', Aura_Tool_Audit_Mcp_Exposure::abspath_relative_from( '/wp-content/plugins/x/McpAdapter.php', '/' ) );
 		$this->assertFalse( Aura_Tool_Audit_Mcp_Exposure::is_windows_root( '/srv/x/' ) );
 		$this->assertSame( 'McpAdapter.php', Aura_Tool_Audit_Mcp_Exposure::abspath_relative( 'C:\\elsewhere\\McpAdapter.php' ) );
 	}

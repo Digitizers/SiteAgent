@@ -1380,7 +1380,13 @@ class Aura_Tool_Audit_Mcp_Exposure extends Aura_Tool_Base {
 		$file = static::normalize_path( $file );
 		$root = static::normalize_path( (string) $root );
 		$root = '' === $root ? '' : rtrim( $root, '/' ) . '/';
-		if ( '/' !== $root && '' !== $root && static::path_prefix_matches( $file, $root ) ) {
+		if ( '/' === $root ) {
+			// A container whose ABSPATH is the filesystem root: every absolute
+			// path is under it, and its relative form is the path without the
+			// leading slash (Codex round-5 on #125).
+			return ltrim( $file, '/' );
+		}
+		if ( '' !== $root && static::path_prefix_matches( $file, $root ) ) {
 			return (string) substr( $file, strlen( $root ) );
 		}
 		return basename( $file );
@@ -1410,7 +1416,9 @@ class Aura_Tool_Audit_Mcp_Exposure extends Aura_Tool_Base {
 	 * @return bool
 	 */
 	public static function is_windows_root( $path ) {
-		return 1 === preg_match( '#^[A-Za-z]:/#', (string) $path );
+		// A drive letter (`C:/`) or a UNC share (`//server/share/`, which is
+		// what `\\\\server\\share\\` normalises to — Codex round-5 on #125).
+		return 1 === preg_match( '#^(?:[A-Za-z]:/|//[^/]+/[^/]+/)#', (string) $path );
 	}
 
 	/**
@@ -1423,7 +1431,9 @@ class Aura_Tool_Audit_Mcp_Exposure extends Aura_Tool_Base {
 	 */
 	public static function normalize_path( $path ) {
 		$path = str_replace( '\\', '/', (string) $path );
-		return (string) preg_replace( '#/+#', '/', $path );
+		// Doubled separators collapse EXCEPT a leading pair, which is a UNC
+		// share (`//server/share/`) — the same rule as wp_normalize_path().
+		return (string) preg_replace( '#(?<=.)/+#', '/', $path );
 	}
 
 	/**
@@ -1459,7 +1469,12 @@ class Aura_Tool_Audit_Mcp_Exposure extends Aura_Tool_Base {
 		}
 		$bare = rtrim( $root, '/\\' );
 		if ( '' === $bare ) {
-			return $msg;
+			// ABSPATH is the filesystem root (a container): every absolute path
+			// in the message is under it, and its relative form is the token
+			// without its leading slash. Only a slash that BEGINS a path token
+			// (preceded by nothing, a space, a quote or a bracket, followed by a
+			// path character) is removed — never every slash (Codex round-5).
+			return (string) preg_replace( '#(?<![\\w./-])/(?=[\\w.-])#', '', str_replace( '\\', '/', $msg ) );
 		}
 		// Separators are normalised on BOTH sides before matching, so a Windows
 		// ABSPATH spelled `C:\\site\\wp/` still strips a message that spells the
