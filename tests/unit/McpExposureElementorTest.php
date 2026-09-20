@@ -171,6 +171,44 @@ class SA_Refusing_Stream {
 	}
 }
 
+/**
+ * A stream that stats SMALL and streams BIG: the stand-in for a manifest a
+ * concurrent plugin update grew between read_small_json()'s stat and its read
+ * (Codex round-8 on #125). The bound must hold during the read itself.
+ */
+class SA_Growing_Stream {
+	/** @var resource|null */
+	public $context;
+	private $pos = 0;
+	private $len;
+	public function stream_open( $path, $mode, $options, &$opened_path ) {
+		$this->len = Aura_Tool_Audit_Mcp_Exposure::ELEMENTOR_COMPOSER_JSON_MAX + 4096;
+		$this->pos = 0;
+		return true;
+	}
+	public function stream_read( $count ) {
+		$n = min( $count, $this->len - $this->pos );
+		if ( $n <= 0 ) {
+			return '';
+		}
+		$this->pos += $n;
+		return str_repeat( '{', $n );
+	}
+	public function stream_eof() {
+		return $this->pos >= $this->len;
+	}
+	public function stream_stat() {
+		return $this->url_stat( '', 0 );
+	}
+	public function url_stat( $path, $flags ) {
+		return array(
+			'dev' => 0, 'ino' => 0, 'mode' => 0100644, 'nlink' => 1, 'uid' => 0, 'gid' => 0,
+			'rdev' => 0, 'size' => 10, 'atime' => 0, 'mtime' => 0, 'ctime' => 0,
+			'blksize' => -1, 'blocks' => -1,
+		);
+	}
+}
+
 final class McpExposureElementorTest extends TestCase {
 
 	private SA_Elementor_Fake_Tool $tool;
@@ -686,6 +724,8 @@ final class McpExposureElementorTest extends TestCase {
 		// other slashes stay (Codex round-5 on #125).
 		$this->assertSame( 'open(wp-content/plugins/x/vendor.php): denied at wp-content/y', Aura_Tool_Audit_Mcp_Exposure::without_abspath_from( 'open(/wp-content/plugins/x/vendor.php): denied at /wp-content/y', '/' ) );
 		$this->assertSame( 'a/b and 3/4', Aura_Tool_Audit_Mcp_Exposure::without_abspath_from( 'a/b and 3/4', '/' ) );
+		// A stream-wrapper spelling under a '/' root (Codex round-8 on #125).
+		$this->assertSame( 'open(file://wp-content/plugins/x.php)', Aura_Tool_Audit_Mcp_Exposure::without_abspath_from( 'open(file:///wp-content/plugins/x.php)', '/' ) );
 		// UNC root in the message, different casing.
 		$this->assertSame( 'open(vendor/x.php)', Aura_Tool_Audit_Mcp_Exposure::without_abspath_from( 'open(//SERVER/Share/site/vendor/x.php)', '\\\\server\\share\\site\\' ) );
 	}
@@ -719,6 +759,20 @@ final class McpExposureElementorTest extends TestCase {
 		$this->assertSame( Aura_Tool_Audit_Mcp_Exposure::MANIFEST_UNREADABLE, $thrown->getMessage() );
 		$this->assertStringNotContainsString( ABSPATH, $thrown->getMessage() );
 		$this->assertNull( $thrown->getPrevious() ); // the raised message is not carried along either
+	}
+
+	public function test_a_manifest_that_grows_after_the_stat_is_still_bounded_during_the_read(): void {
+		$seam = new class() extends Aura_Tool_Audit_Mcp_Exposure {
+			public function read( $path ) {
+				return $this->read_small_json( $path );
+			}
+		};
+		stream_wrapper_register( 'sa-growing', 'SA_Growing_Stream' );
+		try {
+			$this->assertNull( $seam->read( 'sa-growing://composer.json' ) );
+		} finally {
+			stream_wrapper_unregister( 'sa-growing' );
+		}
 	}
 
 	public function test_the_fixed_message_is_what_the_composer_subtree_reports(): void {

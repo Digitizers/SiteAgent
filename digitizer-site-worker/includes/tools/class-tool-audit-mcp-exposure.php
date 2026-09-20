@@ -573,7 +573,13 @@ class Aura_Tool_Audit_Mcp_Exposure extends Aura_Tool_Base {
 			if ( ! is_int( $size ) || $size <= 0 || $size > static::ELEMENTOR_COMPOSER_JSON_MAX ) {
 				return null;
 			}
-			$raw = file_get_contents( $path ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- A bounded local package manifest, never a URL.
+			// The bound is enforced DURING the read as well (Codex round-8 on
+			// #125): the stat above is a pre-check a concurrent plugin update can
+			// race, so at most MAX+1 bytes are ever read, and MAX+1 means "over".
+			$raw = file_get_contents( $path, false, null, 0, static::ELEMENTOR_COMPOSER_JSON_MAX + 1 ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- A bounded local package manifest, never a URL.
+			if ( is_string( $raw ) && strlen( $raw ) > static::ELEMENTOR_COMPOSER_JSON_MAX ) {
+				return null;
+			}
 		} catch ( \Throwable $e ) {
 			throw new \RuntimeException( esc_html( static::MANIFEST_UNREADABLE ) ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- the message is escaped; it is a fixed literal that never carries the throw it replaces.
 		}
@@ -1474,7 +1480,11 @@ class Aura_Tool_Audit_Mcp_Exposure extends Aura_Tool_Base {
 			// without its leading slash. Only a slash that BEGINS a path token
 			// (preceded by nothing, a space, a quote or a bracket, followed by a
 			// path character) is removed — never every slash (Codex round-5).
-			return (string) preg_replace( '#(?<![\\w./-])/(?=[\\w.-])#', '', str_replace( '\\', '/', $msg ) );
+			// A stream-wrapper spelling (`file:///wp-content/x`) is a path too:
+			// its third slash is the one that begins the path token (round 8).
+			$msg = str_replace( '\\', '/', $msg );
+			$msg = (string) preg_replace( '#(?<=://)/+(?=[\\w.-])#', '', $msg );
+			return (string) preg_replace( '#(?<![\\w./-])/(?=[\\w.-])#', '', $msg );
 		}
 		// Separators are normalised on BOTH sides before matching, so a Windows
 		// ABSPATH spelled `C:\\site\\wp/` still strips a message that spells the
