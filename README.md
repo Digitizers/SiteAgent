@@ -241,7 +241,7 @@ These plug straight into **Aura's Fleet MCP Gateway**: read tools run on demand,
 
 ### 2.19.1
 
-- **Refusals at the cookie proxy are counted.** 2.19.0 closed `elementor/v1/mcp-proxy` to agents but kept no evidence of who knocked. `close_transport()` now bumps a fifth governor counter, `proxy_refused`, and `audit_mcp_exposure` → `elementor.governor` reports `proxy_refused_30d` beside `log_ungoverned_30d` and the others — same hourly buckets, same `counters_as_of` window, `null` when unreadable. Both methods count; the editor's own sessions never do. Aura renders it as a detail clause on the door finding, not a new rung.
+- **Refusals at the cookie proxy are counted.** 2.19.0 closed `elementor/v1/mcp-proxy` to agents but kept no evidence of who knocked. `close_transport()` now bumps a fifth governor counter, `proxy_refused`, and `audit_mcp_exposure` → `elementor.governor` reports `proxy_refused_30d` beside `log_ungoverned_30d` and the others — same hourly buckets, same `counters_as_of` window, `null` when unreadable. It counts **authenticated** non-browser callers only (an Application Password or bearer identity — an agent), both methods; an anonymous request is refused with the same 403 but never counted, so unauthenticated traffic cannot drive a write (Codex round-2 P1 on #128). The editor's own sessions never count either. Aura renders it as a detail clause on the door finding, not a new rung.
 
 ### 2.19.0
 

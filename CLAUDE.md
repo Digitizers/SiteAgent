@@ -548,7 +548,13 @@ counter — the same hourly `aura_worker_door_c_<name>_h<hour>` buckets, prune a
 `count_30d()` as the four 2.16.0 counters — and `governor_block()` reports it as
 `proxy_refused_30d` (int, `null` when unreadable) beside them under the same
 `counters_as_of`. It is excluded from `served_identity()` for the same reason the other
-four are (Ruling S49). Both methods count; a browser session passing does not. Aura reads
+four are (Ruling S49). Both methods count, but **only for an identified caller**
+(`is_user_logged_in()`, the same positive-identity requirement `is_agent_rest_request()`
+imposes at the generic seam): `close_transport()` runs before the route's own
+`permission_callback`, so anonymous Internet traffic reaches the refusal too, and a
+write per anonymous request would be an amplifier (Codex round-2 P1 on #128). The public
+is refused with the same 403 and no write; a browser session passing is not a refusal.
+So the field is "agents turned away", never the total number of refusals. Aura reads
 the field only when present (older sites omit it) and renders it as a detail clause, never
 a rung.
 
