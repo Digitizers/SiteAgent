@@ -820,6 +820,13 @@ final class McpExposureElementorTest extends TestCase {
 			Aura_Tool_Audit_Mcp_Exposure::abspath_relative( ABSPATH . 'wp-content//plugins/x/McpAdapter.php' )
 		);
 		$this->assertSame( 'McpAdapter.php', Aura_Tool_Audit_Mcp_Exposure::abspath_relative( '/opt/elsewhere/McpAdapter.php' ) );
+		// Windows casing (Codex round-3 on #125): the same root spelled in a
+		// different case is still the root, so the directory survives.
+		$this->assertSame(
+			'wp-content/plugins/x/McpAdapter.php',
+			Aura_Tool_Audit_Mcp_Exposure::abspath_relative_from( 'c:/site/wp/wp-content/plugins/x/McpAdapter.php', 'C:\\Site\\WP/' )
+		);
+		$this->assertSame( 'McpAdapter.php', Aura_Tool_Audit_Mcp_Exposure::abspath_relative_from( 'D:/other/McpAdapter.php', 'C:\\Site\\WP/' ) );
 		$this->assertSame( 'McpAdapter.php', Aura_Tool_Audit_Mcp_Exposure::abspath_relative( 'C:\\elsewhere\\McpAdapter.php' ) );
 	}
 

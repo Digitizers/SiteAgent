@@ -1356,17 +1356,32 @@ class Aura_Tool_Audit_Mcp_Exposure extends Aura_Tool_Base {
 	 * @return string
 	 */
 	public static function abspath_relative( $file ) {
+		return static::abspath_relative_from( $file, defined( 'ABSPATH' ) ? (string) ABSPATH : '' );
+	}
+
+	/**
+	 * abspath_relative() with the root as a parameter — the seam that lets a
+	 * Windows root be exercised on any platform.
+	 *
+	 * @param string $file Absolute path.
+	 * @param string $root ABSPATH as this site spells it ('' = undefined).
+	 * @return string
+	 */
+	public static function abspath_relative_from( $file, $root ) {
 		// Both sides normalised first: ABSPATH is defined with forward slashes
 		// even on Windows (`C:\\…\\wp/`) while ReflectionClass::getFileName()
 		// answers native separators, so a byte compare would fail to match
-		// there and collapse EVERY path to a bare filename.
+		// there and collapse EVERY path to a bare filename. The prefix compare
+		// is case-insensitive for the same reason (Codex round-3 on #125):
+		// Windows paths are, and `C:/Site/WP/` versus `c:/site/wp/…` is one
+		// directory. On a case-sensitive filesystem the only cost is that a
+		// path under a differently-cased twin of the root is reported
+		// relative to it — still a path, never a bare filename.
 		$file = static::normalize_path( $file );
-		if ( defined( 'ABSPATH' ) ) {
-			$root = static::normalize_path( (string) ABSPATH );
-			$root = '' === $root ? '' : rtrim( $root, '/' ) . '/';
-			if ( '/' !== $root && '' !== $root && 0 === strpos( $file, $root ) ) {
-				return (string) substr( $file, strlen( $root ) );
-			}
+		$root = static::normalize_path( (string) $root );
+		$root = '' === $root ? '' : rtrim( $root, '/' ) . '/';
+		if ( '/' !== $root && '' !== $root && 0 === strncasecmp( $file, $root, strlen( $root ) ) ) {
+			return (string) substr( $file, strlen( $root ) );
 		}
 		return basename( $file );
 	}
