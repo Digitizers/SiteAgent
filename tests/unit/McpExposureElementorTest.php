@@ -718,6 +718,13 @@ final class McpExposureElementorTest extends TestCase {
 		// too (Codex round-7 on #125): `/mnt/srv/site/x` beside `/srv/site/`.
 		$this->assertSame( 'open(/mnt/srv/site/vendor.php)', Aura_Tool_Audit_Mcp_Exposure::without_abspath_from( 'open(/mnt/srv/site/vendor.php)', '/srv/site/' ) );
 		$this->assertSame( 'x/mnt/srv/site/vendor.php', Aura_Tool_Audit_Mcp_Exposure::without_abspath_from( 'x/mnt/srv/site/vendor.php', '/srv/site/' ) );
+		// The boundary is the message-delimiter set, not a path-character
+		// allowlist (Codex round-9 on #125): `+` is a filename byte.
+		$this->assertSame( 'open(/mnt/backup+/srv/site/vendor.php)', Aura_Tool_Audit_Mcp_Exposure::without_abspath_from( 'open(/mnt/backup+/srv/site/vendor.php)', '/srv/site/' ) );
+		$this->assertSame( 'open(/srv/site+old/vendor.php)', Aura_Tool_Audit_Mcp_Exposure::without_abspath_from( 'open(/srv/site+old/vendor.php)', '/srv/site/' ) );
+		// A stream-wrapper spelling of an in-tree path is still relativised.
+		$this->assertSame( 'open(file://vendor.php)', Aura_Tool_Audit_Mcp_Exposure::without_abspath_from( 'open(file:///srv/site/vendor.php)', '/srv/site/' ) );
+		$this->assertSame( 'path=vendor.php, root=', Aura_Tool_Audit_Mcp_Exposure::without_abspath_from( 'path=/srv/site/vendor.php, root=/srv/site', '/srv/site/' ) );
 		// A POSIX root strips byte-exactly: the differently-cased twin is not this tree.
 		$this->assertSame( 'open(/srv/site/vendor/x.php): denied', Aura_Tool_Audit_Mcp_Exposure::without_abspath_from( 'open(/srv/site/vendor/x.php): denied', '/srv/Site/' ) );
 		// ABSPATH '/' (a container): the leading slash of each path token goes,

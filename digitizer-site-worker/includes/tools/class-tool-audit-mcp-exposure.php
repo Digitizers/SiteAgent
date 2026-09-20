@@ -1500,15 +1500,22 @@ class Aura_Tool_Audit_Mcp_Exposure extends Aura_Tool_Base {
 		// name one directory; a POSIX root is stripped byte-exactly, so a
 		// message naming `/srv/site/` beside a `/srv/Site/` root is left alone
 		// — it is not this site's tree and is not under ABSPATH.
-		// Both forms are stripped only at path boundaries: not preceded by a
-		// path character (so `/mnt/srv/site/x` beside a `/srv/site/` root is a
-		// different tree — Codex round-7 on #125) and, for the bare form, not
-		// followed by one (so `/srv/site-old/x` keeps its spelling — round 6).
+		// Both forms are stripped only where a path TOKEN begins in an error
+		// message — at the start, after a message delimiter (space, quote,
+		// bracket, `=`, `:`, `,`) or after a stream-wrapper's `://` — and the
+		// bare form only where the token ends (end, or a delimiter). Anything
+		// else is a different tree that merely contains the root as text:
+		// `/mnt/srv/site/x`, `/mnt/backup+/srv/site/x`, `/srv/site-old/x`,
+		// `/srv/site+old/x` all keep their spelling (Codex rounds 6–9 on #125;
+		// a filename may hold any byte, so the boundary is the DELIMITER set,
+		// not a path-character allowlist).
 		$windows = static::is_windows_root( $bare . '/' );
 		$flags   = $windows ? 'i' : '';
-		$lead    = '(?<![\\w.-])';
+		$delim   = '\\s"\'()\\[\\]<>=:,;';
+		$lead    = '(?:(?<![^' . $delim . '])|(?<=://))';
+		$trail   = '(?![^' . $delim . '])';
 		$msg     = (string) preg_replace( '#' . $lead . preg_quote( $bare . '/', '#' ) . '#' . $flags, '', $msg );
-		$msg     = (string) preg_replace( '#' . $lead . preg_quote( $bare, '#' ) . '(?![\\w.-])#' . $flags, '', $msg );
+		$msg     = (string) preg_replace( '#' . $lead . preg_quote( $bare, '#' ) . $trail . '#' . $flags, '', $msg );
 		return $msg;
 	}
 
