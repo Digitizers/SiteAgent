@@ -1490,10 +1490,14 @@ class Aura_Tool_Audit_Mcp_Exposure extends Aura_Tool_Base {
 		// name one directory; a POSIX root is stripped byte-exactly, so a
 		// message naming `/srv/site/` beside a `/srv/Site/` root is left alone
 		// — it is not this site's tree and is not under ABSPATH.
+		// The bare directory is stripped only at a boundary — followed by a
+		// separator, the end, or a non-path character — so `/srv/site-old/x`
+		// beside a `/srv/site/` root is NOT this tree and keeps its spelling
+		// (Codex round-6 on #125). The with-separator form needs no lookahead.
 		$windows = static::is_windows_root( $bare . '/' );
-		foreach ( array( $bare . '/', $bare ) as $form ) {
-			$msg = $windows ? str_ireplace( $form, '', $msg ) : str_replace( $form, '', $msg );
-		}
+		$flags   = $windows ? 'i' : '';
+		$msg     = (string) preg_replace( '#' . preg_quote( $bare . '/', '#' ) . '#' . $flags, '', $msg );
+		$msg     = (string) preg_replace( '#' . preg_quote( $bare, '#' ) . '(?![\\w.-])#' . $flags, '', $msg );
 		return $msg;
 	}
 

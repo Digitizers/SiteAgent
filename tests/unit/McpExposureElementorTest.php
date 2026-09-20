@@ -672,6 +672,10 @@ final class McpExposureElementorTest extends TestCase {
 		$this->assertSame( 'open(vendor/x.php): denied', Aura_Tool_Audit_Mcp_Exposure::without_abspath_from( 'open(C:/site/wp\\vendor\\x.php): denied', 'C:/site/wp/' ) );
 		// …and case-insensitively, because Windows is (Codex round-2 on #125).
 		$this->assertSame( 'open(vendor/x.php): denied', Aura_Tool_Audit_Mcp_Exposure::without_abspath_from( 'open(c:/SITE/wp/vendor/x.php): denied', 'C:\\Site\\WP\\' ) );
+		// A sibling whose name merely STARTS with the root is not this tree
+		// (Codex round-6 on #125): `/srv/site-old/…` beside `/srv/site/` stays.
+		$this->assertSame( 'open(/srv/site-old/vendor.php)', Aura_Tool_Audit_Mcp_Exposure::without_abspath_from( 'open(/srv/site-old/vendor.php)', '/srv/site/' ) );
+		$this->assertSame( 'open(vendor.php) in ', Aura_Tool_Audit_Mcp_Exposure::without_abspath_from( 'open(/srv/site/vendor.php) in /srv/site', '/srv/site/' ) );
 		// A POSIX root strips byte-exactly: the differently-cased twin is not this tree.
 		$this->assertSame( 'open(/srv/site/vendor/x.php): denied', Aura_Tool_Audit_Mcp_Exposure::without_abspath_from( 'open(/srv/site/vendor/x.php): denied', '/srv/Site/' ) );
 		// ABSPATH '/' (a container): the leading slash of each path token goes,
