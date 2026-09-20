@@ -46,7 +46,9 @@ class SA_Elementor_Fake_Tool extends Aura_Tool_Audit_Mcp_Exposure {
 
 	// --- 2.19.0: the beta3 switch, and which vendored copies resolve ---------
 	/** @var mixed raw `elementor_mcp_enabled` value; null = the option is absent */
-	public $switch_option = Aura_Tool_Audit_Mcp_Exposure::OPTION_ABSENT;
+	/** @var bool the option ROW is absent (the seam answers the caller's sentinel) */
+	public $switch_absent = true;
+	public $switch_option = null;
 	/** @var array fqcn => bool */
 	public $classes = array();
 	/** @var array fqcn => string|null — what ReflectionClass::getFileName() would answer */
@@ -114,10 +116,10 @@ class SA_Elementor_Fake_Tool extends Aura_Tool_Audit_Mcp_Exposure {
 		return 'user' . (int) $uid;
 	}
 
-	protected function elementor_switch_option() {
+	protected function elementor_switch_option( $absent ) {
 		$this->maybe_throw( 'switch' );
 		++$this->switch_reads;
-		return $this->switch_option;
+		return $this->switch_absent ? $absent : $this->switch_option;
 	}
 	protected function class_present( $fqcn ) {
 		$this->throw_for_class( $fqcn );
@@ -473,9 +475,12 @@ final class McpExposureElementorTest extends TestCase {
 		// The rule McpSettingsController::is_enabled() applies at composer
 		// 1.0.13: no option ⇒ false. On an older Elementor there is no switch
 		// and no token door either, so "off" is honest there too.
-		$this->tool->switch_option = Aura_Tool_Audit_Mcp_Exposure::OPTION_ABSENT;
+		$this->tool->switch_absent = true;
 		$this->assertSame( array( 'option_present' => false, 'enabled' => false ), $this->block()['switch'] );
-		// A row whose STORED value is null is present — and off (Codex round-14 on #125).
+		// A row whose STORED value is null is present — and off (Codex round-14 on #125);
+		// the sentinel is an object compared by identity, so no stored value —
+		// not even a NUL-framed string — can read as absent (round 15).
+		$this->tool->switch_absent = false;
 		$this->tool->switch_option = null;
 		$this->assertSame( array( 'option_present' => true, 'enabled' => false ), $this->block()['switch'] );
 	}
@@ -496,6 +501,7 @@ final class McpExposureElementorTest extends TestCase {
 		foreach ( $cases as $case ) {
 			list( $raw, $expected ) = $case;
 			$tool                   = new SA_Elementor_Fake_Tool();
+			$tool->switch_absent    = false;
 			$tool->switch_option    = $raw;
 			$sw                     = $tool->execute( array() )['elementor']['switch'];
 			$this->assertTrue( $sw['option_present'], var_export( $raw, true ) );
@@ -506,6 +512,7 @@ final class McpExposureElementorTest extends TestCase {
 	public function test_the_switch_is_read_even_when_elementor_is_absent(): void {
 		// An option outlives the plugin that wrote it, like a consent row.
 		$this->tool->env           = array( 'installed' => false, 'version' => null, 'class_present' => false, 'active' => null );
+		$this->tool->switch_absent = false;
 		$this->tool->switch_option = '1';
 		$b                         = $this->block();
 		$this->assertFalse( $b['installed'] );

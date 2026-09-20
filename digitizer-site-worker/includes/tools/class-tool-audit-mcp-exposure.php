@@ -100,14 +100,6 @@ class Aura_Tool_Audit_Mcp_Exposure extends Aura_Tool_Base {
 	const ELEMENTOR_COMPOSER_JSON_MAX = 65536;
 
 	/**
-	 * What elementor_switch_option() answers for an option ROW that is not
-	 * there — distinct from a row whose stored value is null, which WordPress
-	 * can hold and which get_option() would otherwise hand back as its
-	 * default (Codex round-14 on #125). A NUL-framed string no option stores.
-	 */
-	const OPTION_ABSENT = "\0aura:option-absent\0";
-
-	/**
 	 * What a manifest read that RAISED is reported as. Never the raised
 	 * message: a site that converts warnings to exceptions (Whoops, which
 	 * Bedrock ships; any hardening plugin calling set_error_handler) turns an
@@ -468,18 +460,22 @@ class Aura_Tool_Audit_Mcp_Exposure extends Aura_Tool_Base {
 	}
 
 	/**
-	 * The raw `elementor_mcp_enabled` value, or OPTION_ABSENT when the option
-	 * ROW is absent (a stored null is a value, reported as present and off).
-	 * A seam — tests override it, since a suite cannot write the option row
-	 * of a plugin it does not have.
+	 * The raw `elementor_mcp_enabled` value, or $absent — the caller's own
+	 * identity-only sentinel, a fresh object no stored value can equal
+	 * (Codex rounds 14–15 on #125; the same device as
+	 * Aura_Worker_Snapshots::snapshot_option()) — when the option ROW is not
+	 * there. A stored null is a value: present, and off. A seam — tests
+	 * override it, since a suite cannot write the option row of a plugin it
+	 * does not have.
 	 *
 	 * Multisite: the current blog's option, like every other read this block
 	 * makes.
 	 *
+	 * @param object $absent The sentinel to answer for an absent row.
 	 * @return mixed
 	 */
-	protected function elementor_switch_option() {
-		return get_option( static::ELEMENTOR_SWITCH_OPTION, static::OPTION_ABSENT );
+	protected function elementor_switch_option( $absent ) {
+		return get_option( static::ELEMENTOR_SWITCH_OPTION, $absent );
 	}
 
 	/**
@@ -1245,8 +1241,9 @@ class Aura_Tool_Audit_Mcp_Exposure extends Aura_Tool_Base {
 	 * @return array { option_present, enabled }
 	 */
 	protected function elementor_switch() {
-		$raw     = $this->elementor_switch_option();
-		$present = static::OPTION_ABSENT !== $raw;
+		$absent  = new \stdClass();
+		$raw     = $this->elementor_switch_option( $absent );
+		$present = $absent !== $raw;
 		return array(
 			'option_present' => $present,
 			'enabled'        => $present && (bool) $raw,
