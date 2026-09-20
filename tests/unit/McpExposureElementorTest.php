@@ -917,6 +917,23 @@ final class McpExposureElementorTest extends TestCase {
 		// still be able to open `phar:///opt/pkg.phar/composer.json`.
 		$this->assertSame( 'phar:///opt/x.phar/a.php', Aura_Tool_Audit_Mcp_Exposure::normalize_path( 'phar:///opt/x.phar//a.php' ) );
 		$this->assertSame( 'phar:///opt/x.phar/src/Mcp/B.php', Aura_Tool_Audit_Mcp_Exposure::normalize_path( 'phar:///opt/x.phar\\src\\Mcp/B.php' ) );
+		// A symlinked install (Codex round-13 on #125): the class file is spelled
+		// through the canonical target while ABSPATH keeps the symlink's name.
+		$this->assertSame( 'wp-content/plugins/x/McpAdapter.php', Aura_Tool_Audit_Mcp_Exposure::abspath_relative_from( '/var/www/releases/42/wp-content/plugins/x/McpAdapter.php', '/var/www/current/', '/var/www/releases/42' ) );
+		$this->assertSame( 'wp-content/plugins/x/McpAdapter.php', Aura_Tool_Audit_Mcp_Exposure::abspath_relative_from( '/var/www/current/wp-content/plugins/x/McpAdapter.php', '/var/www/current/', '/var/www/releases/42' ) );
+		$this->assertSame( 'McpAdapter.php', Aura_Tool_Audit_Mcp_Exposure::abspath_relative_from( '/opt/elsewhere/McpAdapter.php', '/var/www/current/', '/var/www/releases/42' ) );
+		// …and through the real seam with a real symlink.
+		$base = sys_get_temp_dir() . '/sa-symlink-' . getmypid();
+		@mkdir( $base . '/releases/42/wp-content/plugins/x', 0777, true );
+		@symlink( $base . '/releases/42', $base . '/current' );
+		if ( is_link( $base . '/current' ) ) {
+			// The file as PHP reports it: through the canonical target (on macOS the
+			// temp dir is itself a symlink, so realpath() spells both sides).
+			$target = (string) realpath( $base . '/releases/42' );
+			$this->assertSame( 'wp-content/plugins/x/McpAdapter.php', Aura_Tool_Audit_Mcp_Exposure::abspath_relative_from( $target . '/wp-content/plugins/x/McpAdapter.php', $base . '/current/', (string) realpath( $base . '/current/' ) ) );
+			@unlink( $base . '/current' );
+		}
+		@rmdir( $base . '/releases/42/wp-content/plugins/x' ); @rmdir( $base . '/releases/42/wp-content/plugins' ); @rmdir( $base . '/releases/42/wp-content' ); @rmdir( $base . '/releases/42' ); @rmdir( $base . '/releases' ); @rmdir( $base );
 		// A PHAR spelling (Codex round-11 on #125): judged after its scheme.
 		$this->assertSame( 'wp-content/plugins/x.phar/src/McpAdapter.php', Aura_Tool_Audit_Mcp_Exposure::abspath_relative_from( 'phar:///srv/site/wp-content/plugins/x.phar/src/McpAdapter.php', '/srv/site/' ) );
 		$this->assertSame( 'McpAdapter.php', Aura_Tool_Audit_Mcp_Exposure::abspath_relative_from( 'phar:///opt/plugins/copy.phar/src/Mcp/McpAdapter.php', '/srv/site/' ) );

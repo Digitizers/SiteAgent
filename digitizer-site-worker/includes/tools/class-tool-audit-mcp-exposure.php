@@ -1362,18 +1362,42 @@ class Aura_Tool_Audit_Mcp_Exposure extends Aura_Tool_Base {
 	 * @return string
 	 */
 	public static function abspath_relative( $file ) {
-		return static::abspath_relative_from( $file, defined( 'ABSPATH' ) ? (string) ABSPATH : '' );
+		$root = defined( 'ABSPATH' ) ? (string) ABSPATH : '';
+		// A symlinked install (`/var/www/current/` → `/var/www/releases/42/`)
+		// spells ABSPATH one way and the loaded class file the other; the
+		// canonical root is tried as well (Codex round-13 on #125). realpath()
+		// answers false when it cannot resolve, and that is simply "no second
+		// spelling".
+		$canonical = '' !== $root ? realpath( $root ) : false;
+		return static::abspath_relative_from( $file, $root, is_string( $canonical ) ? $canonical : '' );
 	}
 
 	/**
 	 * abspath_relative() with the root as a parameter — the seam that lets a
 	 * Windows root be exercised on any platform.
 	 *
-	 * @param string $file Absolute path.
-	 * @param string $root ABSPATH as this site spells it ('' = undefined).
+	 * @param string $file      Absolute path.
+	 * @param string $root      ABSPATH as this site spells it ('' = undefined).
+	 * @param string $canonical ABSPATH's realpath, when it differs ('' = none).
 	 * @return string
 	 */
-	public static function abspath_relative_from( $file, $root ) {
+	public static function abspath_relative_from( $file, $root, $canonical = '' ) {
+		$rel = static::abspath_relative_under( $file, $root );
+		if ( '' !== $canonical && basename( static::normalize_path( $file ) ) === $rel ) {
+			// Not under the spelled root: try the canonical one.
+			$rel = static::abspath_relative_under( $file, $canonical );
+		}
+		return $rel;
+	}
+
+	/**
+	 * abspath_relative_from() for ONE spelling of the root.
+	 *
+	 * @param string $file Absolute path.
+	 * @param string $root Root ('' = undefined).
+	 * @return string
+	 */
+	private static function abspath_relative_under( $file, $root ) {
 		// Both sides normalised first: ABSPATH is defined with forward slashes
 		// even on Windows (`C:\\…\\wp/`) while ReflectionClass::getFileName()
 		// answers native separators, so a byte compare would fail to match
