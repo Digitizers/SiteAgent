@@ -1521,15 +1521,29 @@ class Aura_Tool_Audit_Mcp_Exposure extends Aura_Tool_Base {
 
 	/**
 	 * The { error } shape for a subtree that may have handled a real
-	 * filesystem path: the same contract as subtree_error(), with every form
-	 * of ABSPATH stripped from the message first.
+	 * filesystem path (`adapter`, `composer`): a FIXED literal, never the
+	 * throw's text. A message that came through a filesystem call — a
+	 * warning converted to an exception, an autoloader that names what it
+	 * opened — carries the absolute path in a spelling the scrubber has to
+	 * anticipate (drive letters, UNC shares, `file:///`, a root of `/`, a
+	 * sibling that merely contains the root, a filename byte outside the
+	 * allowlist — Codex rounds 1–10 on #125 each found one more). What
+	 * cannot leave is what is never copied: the literal names the subtree
+	 * and says "unreadable", and the manifest read's own fixed message
+	 * (MANIFEST_UNREADABLE) passes through unchanged because it is one.
+	 * without_abspath() stays as a tested helper for the relative path the
+	 * block DOES publish; it is no longer on this path.
 	 *
-	 * @param \Throwable $e The throw.
+	 * @param \Throwable $e    The throw.
+	 * @param string     $name 'adapter' | 'composer'.
 	 * @return array { error }
 	 */
-	private function path_safe_subtree_error( $e ) {
-		$msg = $e->getMessage();
-		return array( 'error' => $this->clip( static::without_abspath( '' === $msg ? get_class( $e ) : $msg ) ) );
+	private function path_safe_subtree_error( $e, $name ) {
+		$msg = (string) $e->getMessage();
+		if ( static::MANIFEST_UNREADABLE === $msg ) {
+			return array( 'error' => $msg );
+		}
+		return array( 'error' => $name . ' unreadable' );
 	}
 
 	/**
@@ -1644,12 +1658,12 @@ class Aura_Tool_Audit_Mcp_Exposure extends Aura_Tool_Base {
 		try {
 			$out['adapter'] = $this->elementor_adapter();
 		} catch ( \Throwable $e ) {
-			$out['adapter'] = $this->path_safe_subtree_error( $e );
+			$out['adapter'] = $this->path_safe_subtree_error( $e, 'adapter' );
 		}
 		try {
 			$out['composer'] = $this->elementor_composer();
 		} catch ( \Throwable $e ) {
-			$out['composer'] = $this->path_safe_subtree_error( $e );
+			$out['composer'] = $this->path_safe_subtree_error( $e, 'composer' );
 		}
 		return $out;
 	}

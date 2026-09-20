@@ -570,7 +570,7 @@ final class McpExposureElementorTest extends TestCase {
 	public function test_a_throw_inspecting_the_adapter_replaces_only_the_adapter(): void {
 		$this->tool->throw_in = array( 'adapter' );
 		$b                    = $this->block();
-		$this->assertSame( array( 'error' => 'adapter exploded' ), $b['adapter'] );
+		$this->assertSame( array( 'error' => 'adapter unreadable' ), $b['adapter'] ); // a fixed literal, never the throw's text
 		$this->assertSame( array( 'option_present' => false, 'enabled' => false ), $b['switch'] );
 		$this->assertSame( array( 'class_present' => false, 'version' => null, 'path' => null ), $b['composer'] );
 	}
@@ -635,7 +635,7 @@ final class McpExposureElementorTest extends TestCase {
 		$this->tool->class_files = array( $fqcn => ABSPATH . 'wp-content/plugins/x/src/Mcp/Server_Bootstrap.php' );
 		$this->tool->throw_in    = array( 'json' );
 		$b                       = $this->block();
-		$this->assertSame( array( 'error' => 'json exploded' ), $b['composer'] );
+		$this->assertSame( array( 'error' => 'composer unreadable' ), $b['composer'] ); // a fixed literal, never the throw's text
 		$this->assertSame( array( 'class_present' => false, 'version' => null, 'path' => null ), $b['adapter'] );
 		$this->assertSame( array( 'option_present' => false, 'enabled' => false ), $b['switch'] );
 	}
@@ -643,7 +643,7 @@ final class McpExposureElementorTest extends TestCase {
 	public function test_a_throw_inspecting_the_composer_class_replaces_only_the_composer(): void {
 		$this->tool->throw_in = array( 'composer' );
 		$b                    = $this->block();
-		$this->assertSame( array( 'error' => 'composer exploded' ), $b['composer'] );
+		$this->assertSame( array( 'error' => 'composer unreadable' ), $b['composer'] );
 		$this->assertSame( array( 'class_present' => false, 'version' => null, 'path' => null ), $b['adapter'] );
 	}
 
@@ -672,16 +672,16 @@ final class McpExposureElementorTest extends TestCase {
 		$this->tool->throw_in      = array( 'json' );
 		$this->tool->throw_message = 'file_get_contents(' . ABSPATH . 'wp-content/plugins/x/composer.json): failed to open stream';
 		$error                     = $this->block()['composer']['error'];
+		$this->assertSame( 'composer unreadable', $error ); // a fixed literal: nothing of the throw, so nothing of the path
 		$this->assertStringNotContainsString( ABSPATH, $error );
-		$this->assertStringContainsString( 'wp-content/plugins/x/composer.json', $error ); // relative-ised, not thrown away
 	}
 
 	public function test_a_throw_carrying_an_absolute_path_never_reaches_the_adapter_error(): void {
 		$this->tool->throw_in      = array( 'adapter' );
 		$this->tool->throw_message = 'autoloader died reading ' . ABSPATH . 'wp-content/plugins/emcp/vendor/autoload.php';
 		$error                     = $this->block()['adapter']['error'];
+		$this->assertSame( 'adapter unreadable', $error );
 		$this->assertStringNotContainsString( ABSPATH, $error );
-		$this->assertStringContainsString( 'wp-content/plugins/emcp/vendor/autoload.php', $error );
 	}
 
 	public function test_the_abspath_stripper_is_pure_and_handles_both_separators(): void {

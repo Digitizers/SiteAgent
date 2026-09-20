@@ -586,15 +586,7 @@ subtrees — `switch`, `adapter`, `composer` — each read in its own `try` in `
   copy would point that formula at a stranger's `composer.json`, and a wrong version in an audit
   is worse than none. Missing, oversized, non-JSON or a non-string `version` leaves
   `version: null` with the copy still reported.
-- **No path under ABSPATH leaves the audit as an absolute path — including inside an `{ error }`.** (A path outside ABSPATH — a split-root install such as Bedrock — is reported as its basename; only a throwing autoloader could put one into an error message, and that message is then the only place it could appear.) The manifest
-  read is the block's only filesystem call, and a site that converts warnings to exceptions
-  (Whoops, which Bedrock ships; any hardening plugin calling `set_error_handler`) would turn an
-  `open_basedir` or permission warning into a `Throwable` whose **message carries the absolute
-  path** — which `subtree_error()` would publish verbatim. So `read_small_json()` wraps every
-  filesystem call and converts any throw to the fixed `MANIFEST_UNREADABLE`
-  (`'composer.json unreadable'`, no `previous`), and the `adapter`/`composer` subtrees report
-  through `path_safe_subtree_error()`, which strips every form of `ABSPATH` from the message
-  first. Both halves are pinned by tests.
+- **The `adapter` / `composer` `{ error }` is a fixed literal (`adapter unreadable`, `composer unreadable`, or the manifest read's own `composer.json unreadable`), never the throw's text.** The two subtrees are the block's only filesystem-touching reads; a throw there (a warning converted to an exception, an autoloader naming what it opened) carries the absolute path in a spelling a scrubber has to anticipate — drive letters, UNC shares, `file:///`, an `ABSPATH` of `/`, a sibling that merely contains the root — and ten review rounds each found one more. What is never copied cannot leave. `abspath_relative()` / `without_abspath()` remain as tested helpers for the relative `path` the block DOES publish.
 
 Each new read sits behind its own seam (`elementor_switch_option()`, `class_present()` over the
 `class_declared( $fqcn, $autoload )` primitive, `class_file()`, `class_constant()`,
