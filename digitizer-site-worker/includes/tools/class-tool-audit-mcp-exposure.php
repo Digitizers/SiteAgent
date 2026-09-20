@@ -1445,6 +1445,13 @@ class Aura_Tool_Audit_Mcp_Exposure extends Aura_Tool_Base {
 	 */
 	public static function normalize_path( $path ) {
 		$path = str_replace( '\\', '/', (string) $path );
+		// A stream-wrapper spelling keeps its `scheme://` intact and has only
+		// the path after it normalised (`phar:///opt/x.phar//a.php` stays
+		// readable as `phar:///opt/x.phar/a.php` — Codex round-12 on #125);
+		// the manifest lookup derives its path from this and must still open.
+		if ( preg_match( '#^([a-z][a-z0-9+.-]*://)(.*)$#is', $path, $m ) ) {
+			return $m[1] . (string) preg_replace( '#(?<=.)/+#', '/', $m[2] );
+		}
 		// Doubled separators collapse EXCEPT a leading pair, which is a UNC
 		// share (`//server/share/`) — the same rule as wp_normalize_path().
 		return (string) preg_replace( '#(?<=.)/+#', '/', $path );

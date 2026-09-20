@@ -912,6 +912,11 @@ final class McpExposureElementorTest extends TestCase {
 		$this->assertTrue( Aura_Tool_Audit_Mcp_Exposure::is_windows_root( '//server/share/site/' ) );
 		// UNC root, different casing (Codex round-5 on #125): still one directory.
 		$this->assertSame( 'wp-content/plugins/x/McpAdapter.php', Aura_Tool_Audit_Mcp_Exposure::abspath_relative_from( '//SERVER/share/Site/wp-content/plugins/x/McpAdapter.php', '\\\\server\\share\\site\\' ) );
+		// normalize_path() keeps a wrapper's `scheme://` and normalises only the
+		// path after it (Codex round-12 on #125): the manifest lookup must
+		// still be able to open `phar:///opt/pkg.phar/composer.json`.
+		$this->assertSame( 'phar:///opt/x.phar/a.php', Aura_Tool_Audit_Mcp_Exposure::normalize_path( 'phar:///opt/x.phar//a.php' ) );
+		$this->assertSame( 'phar:///opt/x.phar/src/Mcp/B.php', Aura_Tool_Audit_Mcp_Exposure::normalize_path( 'phar:///opt/x.phar\\src\\Mcp/B.php' ) );
 		// A PHAR spelling (Codex round-11 on #125): judged after its scheme.
 		$this->assertSame( 'wp-content/plugins/x.phar/src/McpAdapter.php', Aura_Tool_Audit_Mcp_Exposure::abspath_relative_from( 'phar:///srv/site/wp-content/plugins/x.phar/src/McpAdapter.php', '/srv/site/' ) );
 		$this->assertSame( 'McpAdapter.php', Aura_Tool_Audit_Mcp_Exposure::abspath_relative_from( 'phar:///opt/plugins/copy.phar/src/Mcp/McpAdapter.php', '/srv/site/' ) );
