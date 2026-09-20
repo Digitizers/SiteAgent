@@ -326,6 +326,8 @@ final class McpExposureGovernorTest extends TestCase {
 	 */
 	public function test_a_proxy_refusal_is_reported_in_the_governor_block(): void {
 		$this->bringUpTheDoor();
+		$GLOBALS['_current_user_id'] = 3; // an identified, non-cookie caller: an agent
+		$GLOBALS['_logged_in']       = true;
 		$this->assertSame( 0, $this->block()['proxy_refused_30d'] );
 
 		foreach ( array( 'POST', 'GET' ) as $method ) {
@@ -335,6 +337,7 @@ final class McpExposureGovernorTest extends TestCase {
 
 		$this->assertSame( 2, Aura_Worker_Elementor_Door::count_30d( 'proxy_refused' ) );
 		$this->assertSame( 2, $this->block()['proxy_refused_30d'] );
+		$GLOBALS['_logged_in'] = false;
 	}
 
 	/** Ruling S37 applies to the fifth counter exactly as to the four: unreadable is null, never 0. */

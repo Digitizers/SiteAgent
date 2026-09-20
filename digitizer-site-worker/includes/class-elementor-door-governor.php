@@ -2829,7 +2829,19 @@ class Aura_Worker_Elementor_Door {
 			// counters use, reported as `proxy_refused_30d` by
 			// governor_block(). Bumped for both methods: a read an agent
 			// tried is the same evidence as a write.
-			self::bump_counter( 'proxy_refused' );
+			//
+			// Counted ONLY for a positively identified caller (Codex
+			// round-2 P1 on #128): this filter runs before the route's own
+			// permission_callback, so anonymous Internet traffic reaches
+			// it too, and a write per anonymous request would be a
+			// database-write amplifier an attacker can drive from outside —
+			// polluting a metric that claims to count AGENTS. The same
+			// positive-identity requirement `is_agent_rest_request()`
+			// imposes at the generic seam: an authenticated non-cookie
+			// caller is an agent; the public is refused without a write.
+			if ( is_user_logged_in() ) {
+				self::bump_counter( 'proxy_refused' );
+			}
 			return new WP_Error(
 				'aura_door_proxy_closed',
 				__( 'This transport belongs to the Elementor editor; agents reach Elementor through /elementor/mcp, which Aura governs', 'digitizer-site-worker' ),

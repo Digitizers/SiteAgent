@@ -873,15 +873,25 @@ final class ElementorDoorGovernorTest extends TestCase {
 	}
 
 	/**
-	 * 2.19.1: every refusal at the proxy bumps `proxy_refused` — both methods,
-	 * so a read an agent tried is evidence too — and nothing else does: a
-	 * browser session that passes is not counted, and neither is a request
-	 * on a site with no door (nothing was refused).
+	 * 2.19.1: every refusal of an IDENTIFIED caller at the proxy bumps
+	 * `proxy_refused` — both methods, so a read an agent tried is evidence
+	 * too — and nothing else does: a browser session that passes is not
+	 * counted, an anonymous request is refused without a write (Codex
+	 * round-2 P1 on #128: this filter runs before the route's own
+	 * permission_callback, so the public reaches it, and a write per
+	 * anonymous request is an amplifier), and no other route counts.
 	 */
-	public function test_only_a_refusal_at_the_proxy_bumps_the_proxy_refused_counter(): void {
+	public function test_only_a_refusal_of_an_identified_caller_at_the_proxy_bumps_the_proxy_refused_counter(): void {
 		$GLOBALS['_sa_force_door'] = true;
 		$this->registerAll();
 		$this->assertSame( 0, Aura_Worker_Elementor_Door::count_30d( 'proxy_refused' ) );
+
+		$GLOBALS['_logged_in']       = false; // is_user_logged_in(): the double's own switch
+		$GLOBALS['_current_user_id'] = 0;
+		$this->assertProxyRefused( 'anonymous: refused all the same' );
+		$this->assertSame( 0, Aura_Worker_Elementor_Door::count_30d( 'proxy_refused' ), 'the public is refused without a write' );
+		$GLOBALS['_logged_in']       = true;
+		$GLOBALS['_current_user_id'] = 3;
 
 		$this->assertProxyRefused( 'counted' );
 		$this->assertSame( 2, Aura_Worker_Elementor_Door::count_30d( 'proxy_refused' ), 'POST and GET, one bump each' );
@@ -894,6 +904,7 @@ final class ElementorDoorGovernorTest extends TestCase {
 		$req = new WP_REST_Request( 'POST', '/aura/mcp/tools/execute' );
 		$this->assertNull( Aura_Worker_Elementor_Door::close_transport( null, array(), $req ), 'not the proxy, not the door — untouched' );
 		$this->assertSame( 2, Aura_Worker_Elementor_Door::count_30d( 'proxy_refused' ), 'only the proxy counts here' );
+		$GLOBALS['_logged_in'] = false;
 	}
 
 	/** No Elementor MCP module, no proxy to close — exactly like the other door. */
