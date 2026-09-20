@@ -1490,14 +1490,15 @@ class Aura_Tool_Audit_Mcp_Exposure extends Aura_Tool_Base {
 		// name one directory; a POSIX root is stripped byte-exactly, so a
 		// message naming `/srv/site/` beside a `/srv/Site/` root is left alone
 		// — it is not this site's tree and is not under ABSPATH.
-		// The bare directory is stripped only at a boundary — followed by a
-		// separator, the end, or a non-path character — so `/srv/site-old/x`
-		// beside a `/srv/site/` root is NOT this tree and keeps its spelling
-		// (Codex round-6 on #125). The with-separator form needs no lookahead.
+		// Both forms are stripped only at path boundaries: not preceded by a
+		// path character (so `/mnt/srv/site/x` beside a `/srv/site/` root is a
+		// different tree — Codex round-7 on #125) and, for the bare form, not
+		// followed by one (so `/srv/site-old/x` keeps its spelling — round 6).
 		$windows = static::is_windows_root( $bare . '/' );
 		$flags   = $windows ? 'i' : '';
-		$msg     = (string) preg_replace( '#' . preg_quote( $bare . '/', '#' ) . '#' . $flags, '', $msg );
-		$msg     = (string) preg_replace( '#' . preg_quote( $bare, '#' ) . '(?![\\w.-])#' . $flags, '', $msg );
+		$lead    = '(?<![\\w.-])';
+		$msg     = (string) preg_replace( '#' . $lead . preg_quote( $bare . '/', '#' ) . '#' . $flags, '', $msg );
+		$msg     = (string) preg_replace( '#' . $lead . preg_quote( $bare, '#' ) . '(?![\\w.-])#' . $flags, '', $msg );
 		return $msg;
 	}
 
