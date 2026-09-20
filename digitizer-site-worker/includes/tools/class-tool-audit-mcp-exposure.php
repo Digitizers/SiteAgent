@@ -1372,18 +1372,45 @@ class Aura_Tool_Audit_Mcp_Exposure extends Aura_Tool_Base {
 		// even on Windows (`C:\\…\\wp/`) while ReflectionClass::getFileName()
 		// answers native separators, so a byte compare would fail to match
 		// there and collapse EVERY path to a bare filename. The prefix compare
-		// is case-insensitive for the same reason (Codex round-3 on #125):
-		// Windows paths are, and `C:/Site/WP/` versus `c:/site/wp/…` is one
-		// directory. On a case-sensitive filesystem the only cost is that a
-		// path under a differently-cased twin of the root is reported
-		// relative to it — still a path, never a bare filename.
+		// is case-insensitive ONLY for a Windows-style root (a drive letter —
+		// Codex rounds 3–4 on #125): Windows paths are, so `C:/Site/WP/` and
+		// `c:/site/wp/…` are one directory; on a POSIX host `/srv/Site/` and
+		// `/srv/site/` are two, and a file under the twin is outside WordPress
+		// and must stay a bare filename.
 		$file = static::normalize_path( $file );
 		$root = static::normalize_path( (string) $root );
 		$root = '' === $root ? '' : rtrim( $root, '/' ) . '/';
-		if ( '/' !== $root && '' !== $root && 0 === strncasecmp( $file, $root, strlen( $root ) ) ) {
+		if ( '/' !== $root && '' !== $root && static::path_prefix_matches( $file, $root ) ) {
 			return (string) substr( $file, strlen( $root ) );
 		}
 		return basename( $file );
+	}
+
+	/**
+	 * Pure: does $path start with $root — case-insensitively when $root is
+	 * Windows-style (drive letter), byte-exactly otherwise? Both already
+	 * normalised to forward slashes.
+	 *
+	 * @param string $path Path.
+	 * @param string $root Root, with its trailing slash.
+	 * @return bool
+	 */
+	public static function path_prefix_matches( $path, $root ) {
+		$len = strlen( $root );
+		if ( static::is_windows_root( $root ) ) {
+			return 0 === strncasecmp( $path, $root, $len );
+		}
+		return 0 === strncmp( $path, $root, $len );
+	}
+
+	/**
+	 * Pure: a normalised path that begins with a drive letter (`C:/`).
+	 *
+	 * @param string $path Normalised path.
+	 * @return bool
+	 */
+	public static function is_windows_root( $path ) {
+		return 1 === preg_match( '#^[A-Za-z]:/#', (string) $path );
 	}
 
 	/**
@@ -1443,12 +1470,14 @@ class Aura_Tool_Audit_Mcp_Exposure extends Aura_Tool_Base {
 		// whatever is left of the path after the longest match is relative.
 		$msg  = str_replace( '\\', '/', $msg );
 		$bare = str_replace( '\\', '/', $bare );
-		// Case-insensitively (Codex round-2 on #125): Windows paths are, so
-		// `C:\\Site\\WP\\` and `c:/site/wp/vendor.php` name one directory. On a
-		// case-sensitive filesystem this can only strip MORE than the root —
-		// text from an error message, in the safe direction.
+		// Case-insensitively only for a Windows-style root (Codex rounds 2–4
+		// on #125): Windows paths are, so `C:\\Site\\WP\\` and `c:/site/wp/x`
+		// name one directory; a POSIX root is stripped byte-exactly, so a
+		// message naming `/srv/site/` beside a `/srv/Site/` root is left alone
+		// — it is not this site's tree and is not under ABSPATH.
+		$windows = static::is_windows_root( $bare . '/' );
 		foreach ( array( $bare . '/', $bare ) as $form ) {
-			$msg = str_ireplace( $form, '', $msg );
+			$msg = $windows ? str_ireplace( $form, '', $msg ) : str_replace( $form, '', $msg );
 		}
 		return $msg;
 	}

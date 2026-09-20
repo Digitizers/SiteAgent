@@ -672,6 +672,8 @@ final class McpExposureElementorTest extends TestCase {
 		$this->assertSame( 'open(vendor/x.php): denied', Aura_Tool_Audit_Mcp_Exposure::without_abspath_from( 'open(C:/site/wp\\vendor\\x.php): denied', 'C:/site/wp/' ) );
 		// …and case-insensitively, because Windows is (Codex round-2 on #125).
 		$this->assertSame( 'open(vendor/x.php): denied', Aura_Tool_Audit_Mcp_Exposure::without_abspath_from( 'open(c:/SITE/wp/vendor/x.php): denied', 'C:\\Site\\WP\\' ) );
+		// A POSIX root strips byte-exactly: the differently-cased twin is not this tree.
+		$this->assertSame( 'open(/srv/site/vendor/x.php): denied', Aura_Tool_Audit_Mcp_Exposure::without_abspath_from( 'open(/srv/site/vendor/x.php): denied', '/srv/Site/' ) );
 	}
 
 	public function test_the_real_manifest_seam_converts_a_raising_read_to_a_fixed_message(): void {
@@ -827,6 +829,12 @@ final class McpExposureElementorTest extends TestCase {
 			Aura_Tool_Audit_Mcp_Exposure::abspath_relative_from( 'c:/site/wp/wp-content/plugins/x/McpAdapter.php', 'C:\\Site\\WP/' )
 		);
 		$this->assertSame( 'McpAdapter.php', Aura_Tool_Audit_Mcp_Exposure::abspath_relative_from( 'D:/other/McpAdapter.php', 'C:\\Site\\WP/' ) );
+		// …but a POSIX root is byte-exact (Codex round-4 on #125): `/srv/site/`
+		// is not `/srv/Site/`, so a file under the twin is outside WordPress.
+		$this->assertSame( 'McpAdapter.php', Aura_Tool_Audit_Mcp_Exposure::abspath_relative_from( '/srv/site/wp-content/plugins/foo/McpAdapter.php', '/srv/Site/' ) );
+		$this->assertSame( 'wp-content/plugins/foo/McpAdapter.php', Aura_Tool_Audit_Mcp_Exposure::abspath_relative_from( '/srv/Site/wp-content/plugins/foo/McpAdapter.php', '/srv/Site/' ) );
+		$this->assertTrue( Aura_Tool_Audit_Mcp_Exposure::is_windows_root( 'c:/x/' ) );
+		$this->assertFalse( Aura_Tool_Audit_Mcp_Exposure::is_windows_root( '/srv/x/' ) );
 		$this->assertSame( 'McpAdapter.php', Aura_Tool_Audit_Mcp_Exposure::abspath_relative( 'C:\\elsewhere\\McpAdapter.php' ) );
 	}
 
