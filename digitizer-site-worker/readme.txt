@@ -4,7 +4,7 @@ Tags: ai, automation, maintenance, updates, wordpress management
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.19.0
+Stable tag: 2.19.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -252,6 +252,9 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 7. Connections: provider connections (Cloudways, Cloudflare, Bunny, Hostinger, Vultr, xCloud) with resource counts, status, and credential-rotation reminders.
 
 == Changelog ==
+
+= 2.19.1 =
+* `audit_mcp_exposure`'s `elementor.governor` block reports `proxy_refused_30d` — how many times in the last 30 days the door governor refused a non-browser caller at Elementor's editor proxy (`403 aura_door_proxy_closed`, 2.19.0). Same hourly buckets and `counters_as_of` cutoff as the four existing counters; `null` when the count could not be read.
 
 = 2.19.0 =
 * Security: Elementor's editor-internal MCP proxy (`elementor/v1/mcp-proxy`) is closed to anything but a browser session while the Aura door governor is active — an Application Password or bearer client is answered `403 aura_door_proxy_closed` and pointed at the governed `/elementor/mcp` door. Six of the eleven governed Elementor writes were reachable there past the governor since 2.16.0; the editor's own Global Classes / Variables UI is unaffected.

@@ -17,7 +17,7 @@
   </a>
   <img src="https://img.shields.io/badge/WordPress-6.2%E2%80%937.1-21759b?logo=wordpress" alt="WordPress" />
   <img src="https://img.shields.io/badge/PHP-7.4%2B-777bb4?logo=php" alt="PHP" />
-  <img src="https://img.shields.io/badge/Stable-2.19.0-green" alt="Stable" />
+  <img src="https://img.shields.io/badge/Stable-2.19.1-green" alt="Stable" />
 </p>
 
 ---
@@ -238,6 +238,10 @@ These plug straight into **Aura's Fleet MCP Gateway**: read tools run on demand,
 ---
 
 ## Changelog
+
+### 2.19.1
+
+- **Refusals at the cookie proxy are counted.** 2.19.0 closed `elementor/v1/mcp-proxy` to agents but kept no evidence of who knocked. `close_transport()` now bumps a fifth governor counter, `proxy_refused`, and `audit_mcp_exposure` → `elementor.governor` reports `proxy_refused_30d` beside `log_ungoverned_30d` and the others — same hourly buckets, same `counters_as_of` window, `null` when unreadable. Both methods count; the editor's own sessions never do. Aura renders it as a detail clause on the door finding, not a new rung.
 
 ### 2.19.0
 

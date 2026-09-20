@@ -872,6 +872,30 @@ final class ElementorDoorGovernorTest extends TestCase {
 		}
 	}
 
+	/**
+	 * 2.19.1: every refusal at the proxy bumps `proxy_refused` — both methods,
+	 * so a read an agent tried is evidence too — and nothing else does: a
+	 * browser session that passes is not counted, and neither is a request
+	 * on a site with no door (nothing was refused).
+	 */
+	public function test_only_a_refusal_at_the_proxy_bumps_the_proxy_refused_counter(): void {
+		$GLOBALS['_sa_force_door'] = true;
+		$this->registerAll();
+		$this->assertSame( 0, Aura_Worker_Elementor_Door::count_30d( 'proxy_refused' ) );
+
+		$this->assertProxyRefused( 'counted' );
+		$this->assertSame( 2, Aura_Worker_Elementor_Door::count_30d( 'proxy_refused' ), 'POST and GET, one bump each' );
+
+		sa_cookie_session( 3 );
+		$this->assertNull( Aura_Worker_Elementor_Door::close_transport( null, array(), new WP_REST_Request( 'POST', '/elementor/v1/mcp-proxy' ) ) );
+		$this->assertSame( 2, Aura_Worker_Elementor_Door::count_30d( 'proxy_refused' ), 'the editor passing is not a refusal' );
+
+		$GLOBALS['wp_rest_auth_cookie'] = false;
+		$req = new WP_REST_Request( 'POST', '/aura/mcp/tools/execute' );
+		$this->assertNull( Aura_Worker_Elementor_Door::close_transport( null, array(), $req ), 'not the proxy, not the door — untouched' );
+		$this->assertSame( 2, Aura_Worker_Elementor_Door::count_30d( 'proxy_refused' ), 'only the proxy counts here' );
+	}
+
 	/** No Elementor MCP module, no proxy to close — exactly like the other door. */
 	public function test_the_cookie_proxy_rule_is_inert_without_a_door(): void {
 		$this->assertFalse( Aura_Worker_Elementor_Door::active() );

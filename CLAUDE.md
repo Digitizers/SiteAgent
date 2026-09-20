@@ -542,9 +542,15 @@ independent of the coverage seam: an agent is refused even when coverage is `ok`
 because coverage is exactly what this transport bypasses. A cookie session passes
 through untouched, so the editor's Global Classes / Variables UI keeps working.
 
-A refused proxy call is **not counted and not logged** — the governor's audit block has
-a strict consumer on the Aura side, and this refusal has no ability, actor or touches to
-report. Observability for it is a follow-up.
+A refused proxy call is **counted, not logged** (2.19.1): it has no ability, actor or
+touches to write a log row from, so `close_transport()` bumps the `proxy_refused`
+counter — the same hourly `aura_worker_door_c_<name>_h<hour>` buckets, prune and
+`count_30d()` as the four 2.16.0 counters — and `governor_block()` reports it as
+`proxy_refused_30d` (int, `null` when unreadable) beside them under the same
+`counters_as_of`. It is excluded from `served_identity()` for the same reason the other
+four are (Ruling S49). Both methods count; a browser session passing does not. Aura reads
+the field only when present (older sites omit it) and renders it as a detail clause, never
+a rung.
 
 ### The second door in `audit_mcp_exposure` — the `elementor` block (2.19.0)
 

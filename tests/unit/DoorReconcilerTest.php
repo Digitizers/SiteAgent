@@ -3122,6 +3122,7 @@ final class DoorReconcilerTest extends TestCase {
 			'unobserved_30d'      => 2,
 			'hook_missed_30d'     => 3,
 			'unknown_ability_30d' => 4,
+			'proxy_refused_30d'   => 5,
 			'held_unreadable'     => false,
 			'log_top_unreadable'  => false,
 		);
@@ -3132,6 +3133,7 @@ final class DoorReconcilerTest extends TestCase {
 		$changed['unobserved_30d']        = 200;
 		$changed['hook_missed_30d']       = 300;
 		$changed['unknown_ability_30d']   = 400;
+		$changed['proxy_refused_30d']     = 500;
 		$changed['held_unreadable']       = true;
 		$changed['log_top_unreadable']    = true;
 
@@ -3180,6 +3182,7 @@ final class DoorReconcilerTest extends TestCase {
 			'unobserved_30d',
 			'hook_missed_30d',
 			'unknown_ability_30d',
+			'proxy_refused_30d',
 			'held_unreadable',
 			'log_top_unreadable',
 			'log',

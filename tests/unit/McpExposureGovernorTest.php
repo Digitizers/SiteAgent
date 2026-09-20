@@ -122,6 +122,7 @@ final class McpExposureGovernorTest extends TestCase {
 				'unobserved_30d',
 				'hook_missed_30d',
 				'unknown_ability_30d',
+				'proxy_refused_30d',
 				'counters_as_of',
 				'queue_full',
 				'log_full',
@@ -159,6 +160,7 @@ final class McpExposureGovernorTest extends TestCase {
 		$this->assertSame( 0, $b['unobserved_30d'] );
 		$this->assertSame( 0, $b['hook_missed_30d'] );
 		$this->assertSame( 0, $b['unknown_ability_30d'] );
+		$this->assertSame( 0, $b['proxy_refused_30d'], '2.19.1: no agent has been refused at the cookie proxy yet' );
 		// Ruling S49 (Codex round-19 P2 on #88): the cutoff the four
 		// `_30d` fields above were computed against — not covered by
 		// `observation` (they shrink on their own as this cutoff
@@ -313,6 +315,38 @@ final class McpExposureGovernorTest extends TestCase {
 
 		$b = $this->block();
 		$this->assertSame( 1, $b['log_ungoverned_30d'] );
+	}
+
+	/**
+	 * 2.19.1: an agent refused at Elementor's cookie proxy (2.19.0's
+	 * `aura_door_proxy_closed`) is counted in the SAME hourly buckets the
+	 * other four counters use, and the audit reports the 30-day sum beside
+	 * them under the same `counters_as_of` — the only evidence a site keeps
+	 * that something other than the editor is knocking on the editor's door.
+	 */
+	public function test_a_proxy_refusal_is_reported_in_the_governor_block(): void {
+		$this->bringUpTheDoor();
+		$this->assertSame( 0, $this->block()['proxy_refused_30d'] );
+
+		foreach ( array( 'POST', 'GET' ) as $method ) {
+			$res = Aura_Worker_Elementor_Door::close_transport( null, array(), new WP_REST_Request( $method, '/elementor/v1/mcp-proxy' ) );
+			$this->assertSame( 'aura_door_proxy_closed', $res->get_error_code(), $method );
+		}
+
+		$this->assertSame( 2, Aura_Worker_Elementor_Door::count_30d( 'proxy_refused' ) );
+		$this->assertSame( 2, $this->block()['proxy_refused_30d'] );
+	}
+
+	/** Ruling S37 applies to the fifth counter exactly as to the four: unreadable is null, never 0. */
+	public function test_an_unreadable_proxy_refused_count_reports_null_rather_than_zero(): void {
+		$this->bringUpTheDoor();
+		$GLOBALS['_sa_rows_read_error'][ $GLOBALS['wpdb']->esc_like( 'aura_worker_door_c_proxy_refused_h' ) ] = true;
+
+		$b = $this->block();
+
+		$GLOBALS['_sa_rows_read_error'] = array();
+		$this->assertNull( $b['proxy_refused_30d'] );
+		$this->assertSame( 0, $b['unknown_ability_30d'], 'one counter unreadable says nothing about the others' );
 	}
 
 	/**

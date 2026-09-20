@@ -1005,12 +1005,13 @@ class Aura_Worker_Elementor_Door {
 	 *    named here anyway as the one field that could never be included
 	 *    even if it were: it IS the value this identity's own comparison
 	 *    decides, so it cannot also be an input to that decision.
-	 * - `counters_as_of` (Ruling S49) — the hourly cutoff the four `_30d`
+	 * - `counters_as_of` (Ruling S49) — the hourly cutoff the five `_30d`
 	 *    counters below are computed against; it advances on its own
 	 *    every hour with no state mutated.
 	 * - `log_ungoverned_30d`, `unobserved_30d`, `hook_missed_30d`,
-	 *    `unknown_ability_30d` (Ruling S49) — the SAME reasoning: these
-	 *    four counters SHRINK on their own as their cutoff advances, no
+	 *    `unknown_ability_30d`, `proxy_refused_30d` (Ruling S49; the fifth
+	 *    since 2.19.1) — the SAME reasoning: these
+	 *    five counters SHRINK on their own as their cutoff advances, no
 	 *    row is ever mutated when that happens, and versioning an
 	 *    hourly-driven shrink would be a FABRICATED mutation.
 	 * - `held_unreadable`, `log_top_unreadable` — THIS ATTEMPT's own read
@@ -1056,6 +1057,7 @@ class Aura_Worker_Elementor_Door {
 			'unobserved_30d',
 			'hook_missed_30d',
 			'unknown_ability_30d',
+			'proxy_refused_30d', // 2.19.1 — the fifth counter, same reasoning
 			'held_unreadable',
 			'log_top_unreadable',
 			'log',    // request-derived (Ruling S76): log_after($after)'s own cursor projection
@@ -1335,10 +1337,10 @@ class Aura_Worker_Elementor_Door {
 	 * (`observation_unsupported_reason()`/`door_write_unsupported_reason()`)
 	 * every existing caller of this shape already made unconditionally.
 	 *
-	 * Deliberately OMITS `counters_as_of` and the four `_30d` counters:
+	 * Deliberately OMITS `counters_as_of` and the five `_30d` counters:
 	 * `served_identity()` strips them regardless (Ruling S49's own
 	 * exclusion, carried over from Ruling S73), so computing them here
-	 * would cost real reads (`count_30d()` — four of them) for values the
+	 * would cost real reads (`count_30d()` — five of them) for values the
 	 * hash would throw away the moment they were handed to it.
 	 *
 	 * @param bool       $active
@@ -2821,6 +2823,13 @@ class Aura_Worker_Elementor_Door {
 			if ( Aura_Worker_Rules::cookie_authenticated() ) {
 				return $response;
 			}
+			// 2.19.1: the refusal is the only evidence this site keeps that
+			// something other than the editor is knocking on the editor's
+			// transport — counted in the same hourly buckets the other four
+			// counters use, reported as `proxy_refused_30d` by
+			// governor_block(). Bumped for both methods: a read an agent
+			// tried is the same evidence as a write.
+			self::bump_counter( 'proxy_refused' );
 			return new WP_Error(
 				'aura_door_proxy_closed',
 				__( 'This transport belongs to the Elementor editor; agents reach Elementor through /elementor/mcp, which Aura governs', 'digitizer-site-worker' ),
@@ -4826,7 +4835,7 @@ class Aura_Worker_Elementor_Door {
 	 * that missed this bucket before its first bump listed the name in core's
 	 * negative cache and would otherwise go on reading it as absent.
 	 *
-	 * @param string $name log_ungoverned|unobserved|hook_missed|unknown_ability.
+	 * @param string $name log_ungoverned|unobserved|hook_missed|unknown_ability|proxy_refused.
 	 */
 	private static function bump_counter( $name ) {
 		// Ruling S9 (Codex round-4 P2 on #88): the 30-day counter buckets are
@@ -4950,7 +4959,7 @@ class Aura_Worker_Elementor_Door {
 
 	/**
 	 * The hour-bucket floor `count_30d()` treats as the OLDEST bucket still
-	 * inside its 30-day window — shared so the four `_30d` counters
+	 * inside its 30-day window — shared so the five `_30d` counters
 	 * `governor_block()` reports and the `counters_as_of` cutoff it reports
 	 * beside them (Ruling S49, Codex round-19 P2 on #88) are provably the
 	 * SAME arithmetic on the SAME `$now`, never two separate computations
@@ -4987,7 +4996,7 @@ class Aura_Worker_Elementor_Door {
 	 * P53/P57) — this joins them rather than inventing a fourth
 	 * convention for the SAME array.
 	 *
-	 * @param string   $name log_ungoverned|unobserved|hook_missed|unknown_ability.
+	 * @param string   $name log_ungoverned|unobserved|hook_missed|unknown_ability|proxy_refused.
 	 * @param int|null $now  Unix time; injected for tests.
 	 * @return int|null Null when this count could not be read.
 	 */
@@ -5103,17 +5112,17 @@ class Aura_Worker_Elementor_Door {
 	 * by this read.
 	 *
 	 * `observation` DOES NOT COVER `log_ungoverned_30d` / `unobserved_30d` /
-	 * `hook_missed_30d` / `unknown_ability_30d` (Ruling S49, Codex round-19
-	 * P2 on #88). Those four counters shrink on their own as their hourly
+	 * `hook_missed_30d` / `unknown_ability_30d` / `proxy_refused_30d` (Ruling
+	 * S49, Codex round-19 P2 on #88; the fifth since 2.19.1). Those counters shrink on their own as their hourly
 	 * cutoff advances — no row is mutated when a bucket ages out, so there
 	 * is nothing for `sync_computed_state()` to version, and versioning an
 	 * hourly-driven shrink would be a FABRICATED mutation rather than a
-	 * real one. `counters_as_of` reports the cutoff those four fields were
+	 * real one. `counters_as_of` reports the cutoff those fields were
 	 * computed against, ISO 8601, so a caller can read the window they
 	 * describe without needing (or ever getting) a witness for it — this
 	 * block is live evidence for them, not gated by `observation`.
 	 *
-	 * @return array { active, epoch, binding, observation, observation_unsupported, door_write_unsupported, seam, door, held_count, log_unacked, log_ungoverned_30d, unobserved_30d, hook_missed_30d, unknown_ability_30d, counters_as_of, queue_full, log_full }
+	 * @return array { active, epoch, binding, observation, observation_unsupported, door_write_unsupported, seam, door, held_count, log_unacked, log_ungoverned_30d, unobserved_30d, hook_missed_30d, unknown_ability_30d, proxy_refused_30d, counters_as_of, queue_full, log_full }
 	 */
 	public static function governor_block() {
 		if ( ! self::present() ) {
@@ -5302,8 +5311,13 @@ class Aura_Worker_Elementor_Door {
 					'unobserved_30d'      => self::count_30d( 'unobserved', $now_30d ),
 					'hook_missed_30d'     => self::count_30d( 'hook_missed', $now_30d ),
 					'unknown_ability_30d' => self::count_30d( 'unknown_ability', $now_30d ),
+					// 2.19.1: agents refused at Elementor's cookie proxy
+					// (`aura_door_proxy_closed`, close_transport()) — the
+					// fifth counter, same buckets, same window, same
+					// cutoff below.
+					'proxy_refused_30d'   => self::count_30d( 'proxy_refused', $now_30d ),
 					// Ruling S49 (Codex round-19 P2 on #88): the hourly
-					// cutoff the four `_30d` fields above were just
+					// cutoff the five `_30d` fields above were just
 					// computed against, ISO 8601. These counters SHRINK
 					// on their own as the cutoff advances — no row is
 					// mutated, so `sync_computed_state()` has nothing to
