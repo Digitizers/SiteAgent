@@ -459,7 +459,7 @@ final class AgentCodeAuditTest extends TestCase {
 		$this->sandbox( array( 'd1/x.txt' => 1757400000, 'd2/y.txt' => 1757400000, 'd3/z.php' => 1757400000 ) );
 		$s = $this->emcp( array( 'store_cap' => 2 ) )['store'];
 		$this->assertTrue( $s['truncated'], 'two entries visited, a third pending — directories count toward the cap' );
-		$this->assertLessThanOrEqual( 2, $s['files'] );
+		$this->assertSame( 0, $s['files'], 'the three root entries are all directories — the cap is reached before any descent' );
 	}
 
 	public function test_an_unreadable_root_is_an_error_never_a_zero(): void {
@@ -487,6 +487,22 @@ final class AgentCodeAuditTest extends TestCase {
 		$s = $this->emcp()['store'];
 		$this->assertSame( 2, $s['files'], 'the link itself is one entry' );
 		$this->assertSame( 0, $s['executable_files'], 'evil.php behind the link is never seen' );
+	}
+
+	public function test_a_php_named_symlink_is_counted_executable_by_its_own_name_and_never_stated(): void {
+		$root    = $this->sandbox( array( 'older.txt' => 1757400000 ) );
+		$outside = WP_CONTENT_DIR . '/outside2';
+		mkdir( $outside, 0755, true );
+		$target = $outside . '/payload.php';
+		file_put_contents( $target, 'x' );
+		touch( $target, 2147483647 ); // far-future mtime on the TARGET — must never surface
+		if ( ! @symlink( $target, $root . '/shell.php' ) ) {
+			$this->markTestSkipped( 'symlinks unavailable on this filesystem' );
+		}
+		$s = $this->emcp()['store'];
+		$this->assertSame( 2, $s['files'], 'the link itself is one entry, plus older.txt' );
+		$this->assertSame( 1, $s['executable_files'], 'a symlink named shell.php is judged by its own name — pathinfo() is pure string work' );
+		$this->assertSame( gmdate( 'c', 1757400000 ), $s['newest_mtime'], 'the link is never followed and never stat\'ed — the target\'s far-future mtime must not surface' );
 	}
 
 	public function test_the_returns_declaration_names_the_new_keys(): void {

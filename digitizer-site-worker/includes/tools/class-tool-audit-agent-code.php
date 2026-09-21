@@ -545,8 +545,9 @@ class Aura_Tool_Audit_Agent_Code extends Aura_Tool_Base {
 	/**
 	 * Count what is in EMCP's sandbox store — metadata only. No file is
 	 * opened and no name leaves the site. Iterative (a deep tree cannot
-	 * exhaust the stack); symlinks are one entry each and never followed;
-	 * an unreadable root is an error, never a zero.
+	 * exhaust the stack); a link is one entry, judged by its own name,
+	 * never followed and never stat'ed; an unreadable root is an error,
+	 * never a zero.
 	 *
 	 * @since 2.19.2
 	 * @return array|null null when the directory does not exist.
@@ -590,12 +591,12 @@ class Aura_Tool_Audit_Agent_Code extends Aura_Tool_Base {
 					continue;
 				}
 				$out['files']++;
-				if ( is_link( $path ) ) {
-					continue;
-				}
 				$ext = strtolower( (string) pathinfo( $entry, PATHINFO_EXTENSION ) );
 				if ( in_array( $ext, self::STORE_EXECUTABLE_EXTENSIONS, true ) ) {
 					$out['executable_files']++;
+				}
+				if ( is_link( $path ) ) {
+					continue;
 				}
 				$mtime = @filemtime( $path );
 				if ( false !== $mtime && ( null === $newest || $mtime > $newest ) ) {
