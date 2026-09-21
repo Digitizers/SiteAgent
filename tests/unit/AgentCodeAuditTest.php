@@ -32,7 +32,14 @@ final class AgentCodeAuditTest extends TestCase {
 		}
 		foreach ( array_diff( scandir( $dir ), array( '.', '..' ) ) as $item ) {
 			$path = $dir . '/' . $item;
-			is_dir( $path ) ? $this->rrmdir( $path ) : @unlink( $path );
+			// A link is removed, never descended into — otherwise a link to a
+			// directory would delete the target's contents and survive itself,
+			// leaking a sandbox root symlink into the next test.
+			if ( is_link( $path ) || ! is_dir( $path ) ) {
+				@unlink( $path );
+				continue;
+			}
+			$this->rrmdir( $path );
 		}
 		@rmdir( $dir );
 	}
@@ -65,6 +72,9 @@ final class AgentCodeAuditTest extends TestCase {
 				return parent::snippet_rows();
 			}
 			protected function open_dir( $path ) {
+				if ( isset( $this->over['throw_on'] ) && $this->over['throw_on'] === $path ) {
+					throw new RuntimeException( 'opendir exploded' );
+				}
 				if ( isset( $this->over['unreadable'] ) && $this->over['unreadable'] === $path ) {
 					return false;
 				}
@@ -505,9 +515,35 @@ final class AgentCodeAuditTest extends TestCase {
 		$this->assertSame( gmdate( 'c', 1757400000 ), $s['newest_mtime'], 'the link is never followed and never stat\'ed — the target\'s far-future mtime must not surface' );
 	}
 
+	public function test_a_sandbox_root_that_is_itself_a_link_is_not_walked(): void {
+		// A link INSIDE the store is one entry and never followed; the root
+		// itself deserves the same rule, or one symlink turns the whole
+		// filesystem into "EMCP's sandbox store".
+		$outside = WP_CONTENT_DIR . '/outside-root';
+		mkdir( $outside, 0755, true );
+		file_put_contents( $outside . '/evil.php', 'x' );
+		if ( ! @symlink( $outside, WP_CONTENT_DIR . '/emcp-sandbox' ) ) {
+			$this->markTestSkipped( 'symlinks unavailable on this filesystem' );
+		}
+
+		$e = $this->emcp();
+
+		$this->assertTrue( $e['present'], 'a linked root is still a store on this site' );
+		$this->assertSame( array( 'error' => 'sandbox_is_link' ), $e['store'] );
+	}
+
+	public function test_a_throwing_walk_stays_inside_the_store_and_its_siblings_still_answer(): void {
+		$root = $this->sandbox( array( 'a.php' => 1757400000 ) );
+
+		$tp = $this->tool( array( 'throw_on' => $root ) )->execute( array() )['third_party'];
+
+		$this->assertSame( array( 'error' => 'sandbox_walk_failed' ), $tp['emcp_sandbox']['store'] );
+		$this->assertTrue( $tp['emcp_sandbox']['present'], 'the walk failed; the directory is still there' );
+		$this->assertSame( array( 'present' => false ), $tp['atarim_exec'], 'a throwing walk must not take the sibling subtree down with it' );
+	}
+
 	public function test_the_returns_declaration_names_the_new_keys(): void {
 		$returns = $this->tool()->get_returns();
-		$this->assertStringContainsString( 'active', $returns['third_party'] );
-		$this->assertStringContainsString( 'store', $returns['third_party'] );
+		$this->assertStringContainsString( '{ present, version, active, store }', $returns['third_party'] );
 	}
 }
