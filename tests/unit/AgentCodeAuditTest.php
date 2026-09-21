@@ -32,7 +32,14 @@ final class AgentCodeAuditTest extends TestCase {
 		}
 		foreach ( array_diff( scandir( $dir ), array( '.', '..' ) ) as $item ) {
 			$path = $dir . '/' . $item;
-			is_dir( $path ) ? $this->rrmdir( $path ) : @unlink( $path );
+			// A link is removed, never descended into — otherwise a link to a
+			// directory would delete the target's contents and survive itself,
+			// leaking a sandbox root symlink into the next test.
+			if ( is_link( $path ) || ! is_dir( $path ) ) {
+				@unlink( $path );
+				continue;
+			}
+			$this->rrmdir( $path );
 		}
 		@rmdir( $dir );
 	}
@@ -65,6 +72,9 @@ final class AgentCodeAuditTest extends TestCase {
 				return parent::snippet_rows();
 			}
 			protected function open_dir( $path ) {
+				if ( isset( $this->over['throw_on'] ) && $this->over['throw_on'] === $path ) {
+					throw new RuntimeException( 'opendir exploded' );
+				}
 				if ( isset( $this->over['unreadable'] ) && $this->over['unreadable'] === $path ) {
 					return false;
 				}
@@ -73,6 +83,7 @@ final class AgentCodeAuditTest extends TestCase {
 			protected function power_pack_env() { return $this->over['pp'] ?? parent::power_pack_env(); }
 			protected function create_publish() { return array_key_exists( 'publish', $this->over ) ? $this->over['publish'] : parent::create_publish(); }
 			protected function third_party_env() { return $this->over['tp'] ?? parent::third_party_env(); }
+			protected function emcp_store_cap() { return $this->over['store_cap'] ?? parent::emcp_store_cap(); }
 		};
 		$tool->over = $over;
 		return $tool;
@@ -386,14 +397,153 @@ final class AgentCodeAuditTest extends TestCase {
 
 	public function test_third_party_reports_emcp_and_atarim_presence(): void {
 		$tp = $this->tool( array( 'tp' => array( 'emcp_version' => '3.14.1', 'emcp_dir' => false, 'atarim' => true ) ) )->execute( array() )['third_party'];
-		$this->assertSame( array( 'present' => true, 'version' => '3.14.1' ), $tp['emcp_sandbox'] );
+		$this->assertSame( array( 'present' => true, 'version' => '3.14.1', 'active' => true, 'store' => null ), $tp['emcp_sandbox'] );
 		$this->assertSame( array( 'present' => true ), $tp['atarim_exec'] );
 
-		$tp = $this->tool( array( 'tp' => array( 'emcp_version' => '', 'emcp_dir' => true, 'atarim' => false ) ) )->execute( array() )['third_party'];
-		$this->assertSame( array( 'present' => true, 'version' => '' ), $tp['emcp_sandbox'], 'the sandbox directory alone proves presence' );
-		$this->assertSame( array( 'present' => false ), $tp['atarim_exec'] );
-
 		$tp = $this->tool()->execute( array() )['third_party'];
-		$this->assertSame( array( 'present' => false, 'version' => '' ), $tp['emcp_sandbox'] );
+		$this->assertSame( array( 'present' => false, 'version' => '', 'active' => false, 'store' => null ), $tp['emcp_sandbox'] );
+		$this->assertSame( array( 'present' => false ), $tp['atarim_exec'] );
+	}
+
+	// --- third_party.emcp_sandbox.store (P6.3 phase 1) --------------------------
+
+	private function sandbox( array $files ): string {
+		$root = WP_CONTENT_DIR . '/emcp-sandbox';
+		mkdir( $root, 0755, true );
+		foreach ( $files as $rel => $mtime ) {
+			$path = $root . '/' . $rel;
+			if ( ! is_dir( dirname( $path ) ) ) {
+				mkdir( dirname( $path ), 0755, true );
+			}
+			file_put_contents( $path, 'x' );
+			touch( $path, $mtime );
+		}
+		return $root;
+	}
+
+	private function emcp( array $over = array() ): array {
+		return $this->tool( $over )->execute( array() )['third_party']['emcp_sandbox'];
+	}
+
+	public function test_the_directory_alone_proves_presence_and_the_plugin_is_not_active(): void {
+		$this->sandbox( array() );
+		$e = $this->emcp();
+		$this->assertTrue( $e['present'] );
+		$this->assertFalse( $e['active'], 'EMCP_TOOLS_VERSION is not defined — files left behind, plugin not loaded' );
+		$this->assertSame( array( 'files' => 0, 'executable_files' => 0, 'newest_mtime' => null, 'truncated' => false, 'unreadable_dirs' => 0 ), $e['store'] );
+	}
+
+	public function test_non_executable_files_are_counted_as_files_only(): void {
+		$this->sandbox( array( 'blocks/a/block.json' => 1757400000, 'widgets/w.css' => 1757400100 ) );
+		$s = $this->emcp()['store'];
+		$this->assertSame( 2, $s['files'] );
+		$this->assertSame( 0, $s['executable_files'] );
+		$this->assertSame( gmdate( 'c', 1757400100 ), $s['newest_mtime'] );
+	}
+
+	public function test_executable_files_are_counted_at_any_depth_case_insensitively(): void {
+		$this->sandbox( array( 'snippets/s1/main.php' => 1757400000, 'widgets/deep/er/W.PHTML' => 1757400200, 'tool.phar' => 1757400050, 'readme.txt' => 1757400010 ) );
+		$s = $this->emcp()['store'];
+		$this->assertSame( 4, $s['files'] );
+		$this->assertSame( 3, $s['executable_files'] );
+		$this->assertSame( gmdate( 'c', 1757400200 ), $s['newest_mtime'] );
+		$this->assertFalse( $s['truncated'] );
+	}
+
+	public function test_htaccess_is_not_an_executable_here(): void {
+		$this->sandbox( array( '.htaccess' => 1757400000 ) );
+		$s = $this->emcp()['store'];
+		$this->assertSame( 1, $s['files'] );
+		$this->assertSame( 0, $s['executable_files'] );
+	}
+
+	public function test_the_cap_marks_the_counts_as_lower_bounds(): void {
+		$this->sandbox( array( 'a.php' => 1757400000, 'b.php' => 1757400000, 'c.php' => 1757400000, 'd.php' => 1757400000 ) );
+		$s = $this->emcp( array( 'store_cap' => 3 ) )['store'];
+		$this->assertTrue( $s['truncated'] );
+		$this->assertSame( 3, $s['files'] );
+		$this->assertSame( 3, $s['executable_files'] );
+	}
+
+	public function test_the_cap_bounds_directories_too_not_only_files(): void {
+		$this->sandbox( array( 'd1/x.txt' => 1757400000, 'd2/y.txt' => 1757400000, 'd3/z.php' => 1757400000 ) );
+		$s = $this->emcp( array( 'store_cap' => 2 ) )['store'];
+		$this->assertTrue( $s['truncated'], 'two entries visited, a third pending — directories count toward the cap' );
+		$this->assertSame( 0, $s['files'], 'the three root entries are all directories — the cap is reached before any descent' );
+	}
+
+	public function test_an_unreadable_root_is_an_error_never_a_zero(): void {
+		$root = $this->sandbox( array( 'a.php' => 1757400000 ) );
+		$e    = $this->emcp( array( 'unreadable' => $root ) );
+		$this->assertTrue( $e['present'] );
+		$this->assertSame( array( 'error' => 'sandbox_unreadable' ), $e['store'] );
+	}
+
+	public function test_an_unreadable_subdirectory_is_counted_and_the_rest_still_answers(): void {
+		$root = $this->sandbox( array( 'ok/a.php' => 1757400000, 'locked/b.php' => 1757400000 ) );
+		$s    = $this->emcp( array( 'unreadable' => $root . '/locked' ) )['store'];
+		$this->assertSame( 1, $s['unreadable_dirs'] );
+		$this->assertSame( 1, $s['executable_files'] );
+	}
+
+	public function test_a_symlink_is_counted_and_never_followed(): void {
+		$root    = $this->sandbox( array( 'a.txt' => 1757400000 ) );
+		$outside = WP_CONTENT_DIR . '/outside';
+		mkdir( $outside, 0755, true );
+		file_put_contents( $outside . '/evil.php', 'x' );
+		if ( ! @symlink( $outside, $root . '/link' ) ) {
+			$this->markTestSkipped( 'symlinks unavailable on this filesystem' );
+		}
+		$s = $this->emcp()['store'];
+		$this->assertSame( 2, $s['files'], 'the link itself is one entry' );
+		$this->assertSame( 0, $s['executable_files'], 'evil.php behind the link is never seen' );
+	}
+
+	public function test_a_php_named_symlink_is_counted_executable_by_its_own_name_and_never_stated(): void {
+		$root    = $this->sandbox( array( 'older.txt' => 1757400000 ) );
+		$outside = WP_CONTENT_DIR . '/outside2';
+		mkdir( $outside, 0755, true );
+		$target = $outside . '/payload.php';
+		file_put_contents( $target, 'x' );
+		touch( $target, 2147483647 ); // far-future mtime on the TARGET — must never surface
+		if ( ! @symlink( $target, $root . '/shell.php' ) ) {
+			$this->markTestSkipped( 'symlinks unavailable on this filesystem' );
+		}
+		$s = $this->emcp()['store'];
+		$this->assertSame( 2, $s['files'], 'the link itself is one entry, plus older.txt' );
+		$this->assertSame( 1, $s['executable_files'], 'a symlink named shell.php is judged by its own name — pathinfo() is pure string work' );
+		$this->assertSame( gmdate( 'c', 1757400000 ), $s['newest_mtime'], 'the link is never followed and never stat\'ed — the target\'s far-future mtime must not surface' );
+	}
+
+	public function test_a_sandbox_root_that_is_itself_a_link_is_not_walked(): void {
+		// A link INSIDE the store is one entry and never followed; the root
+		// itself deserves the same rule, or one symlink turns the whole
+		// filesystem into "EMCP's sandbox store".
+		$outside = WP_CONTENT_DIR . '/outside-root';
+		mkdir( $outside, 0755, true );
+		file_put_contents( $outside . '/evil.php', 'x' );
+		if ( ! @symlink( $outside, WP_CONTENT_DIR . '/emcp-sandbox' ) ) {
+			$this->markTestSkipped( 'symlinks unavailable on this filesystem' );
+		}
+
+		$e = $this->emcp();
+
+		$this->assertTrue( $e['present'], 'a linked root is still a store on this site' );
+		$this->assertSame( array( 'error' => 'sandbox_is_link' ), $e['store'] );
+	}
+
+	public function test_a_throwing_walk_stays_inside_the_store_and_its_siblings_still_answer(): void {
+		$root = $this->sandbox( array( 'a.php' => 1757400000 ) );
+
+		$tp = $this->tool( array( 'throw_on' => $root ) )->execute( array() )['third_party'];
+
+		$this->assertSame( array( 'error' => 'sandbox_walk_failed' ), $tp['emcp_sandbox']['store'] );
+		$this->assertTrue( $tp['emcp_sandbox']['present'], 'the walk failed; the directory is still there' );
+		$this->assertSame( array( 'present' => false ), $tp['atarim_exec'], 'a throwing walk must not take the sibling subtree down with it' );
+	}
+
+	public function test_the_returns_declaration_names_the_new_keys(): void {
+		$returns = $this->tool()->get_returns();
+		$this->assertStringContainsString( '{ present, version, active, store }', $returns['third_party'] );
 	}
 }
