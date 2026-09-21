@@ -40,6 +40,12 @@ class Aura_Tool_Audit_Agent_Code extends Aura_Tool_Base {
 	/** Every string the tool returns is clipped to this many characters. */
 	const STRING_MAX = 200;
 
+	/** Cap on entries visited in EMCP's sandbox store — scan_executable_files' figure. Reaching it makes every count a lower bound. */
+	const STORE_MAX_ENTRIES = 20000;
+
+	/** The extensions scan_executable_files treats as executable. `.htaccess` is an uploads concern and is not counted here. */
+	const STORE_EXECUTABLE_EXTENSIONS = array( 'php', 'php3', 'php4', 'php5', 'php7', 'phtml', 'phar', 'cgi', 'pl', 'sh', 'exe' );
+
 	const CPT            = 'angie_snippet';
 	const ARTIFACT_META  = '_angie_snippet_artifact_id';
 	const DEV_MODE_CLASS = '\\Angie\\Modules\\CodeSnippets\\Classes\\Dev_Mode_Manager';
@@ -61,7 +67,7 @@ class Aura_Tool_Audit_Agent_Code extends Aura_Tool_Base {
 		return array(
 			'angie_snippets' => 'object — { installed, version } (installed = loaded at runtime OR present in the installed-plugin inventory, so a deactivated Angie still reports its dormant rows and directories) and, when installed: module_active, total|published|drafts|agent_authored (int|null — null when the CPT read failed or hit its cap of 500), active_env ("prod"|"dev"|null — the environment Angie\'s loader includes for THIS request; null when the dev-mode API is not callable or the snippet module is inactive), deployed: { prod: { dirs, agent_authored, orphan }, dev: {…} } (int|null per environment — directories named snippet-<post_id> that contain main.php, joined to the CPT by id; orphan = no row, which the loader still includes), latest_deploy_at: { prod, dev } (ISO8601|null, per environment, never a max across both), recent: [{ id, title, status, agent_authored, environments, modified }] (newest first, cap 20; recent_truncated when cut — never bounds a count), coverage: { total_seen, returned, truncated, cap } (the DIRECTORY WALK only, 200 entries per environment). Absent Angie: { installed: false, version: "" }. A scan that threw: { error }.',
 			'power_pack'     => 'object — { installed, version, execute_php, fs_write, wp_cli, create_publish } from AURA_POWER_PACK_VERSION / AURA_POWER_EXECUTE_PHP / AURA_POWER_ALLOW_FS_WRITE / AURA_POWER_ALLOW_WP_CLI; every flag false when not installed',
-			'third_party'    => 'object — { emcp_sandbox: { present, version }, atarim_exec: { present } }',
+			'third_party'    => 'object — { emcp_sandbox: { present, version, active, store }, atarim_exec: { present } }. active = EMCP_TOOLS_VERSION is defined (the plugin is loaded). store = null when wp-content/emcp-sandbox does not exist, { error } when it cannot be read, else { files, executable_files, newest_mtime, truncated, unreadable_dirs } — a metadata walk: no file is opened and no name leaves the site; truncated = the 20000-entry cap was reached and the counts are lower bounds (since 2.19.2)',
 			'counters_as_of' => 'string — ISO8601 instant the counts were taken',
 		);
 	}
@@ -498,13 +504,15 @@ class Aura_Tool_Audit_Agent_Code extends Aura_Tool_Base {
 
 	// ---- third_party -----------------------------------------------------------
 
-	/** The third-party subtree (spec §3). */
+	/** The third-party subtree (spec 2026-09-09 §3, amended by 2026-09-21 §3.1). */
 	protected function third_party() {
 		$env = $this->third_party_env();
 		return array(
 			'emcp_sandbox' => array(
 				'present' => '' !== $env['emcp_version'] || (bool) $env['emcp_dir'],
 				'version' => $this->clip( $env['emcp_version'] ),
+				'active'  => '' !== $env['emcp_version'],
+				'store'   => $this->emcp_store(),
 			),
 			'atarim_exec'  => array( 'present' => (bool) $env['atarim'] ),
 		);
@@ -522,6 +530,82 @@ class Aura_Tool_Audit_Agent_Code extends Aura_Tool_Base {
 			'emcp_dir'     => is_dir( WP_CONTENT_DIR . '/emcp-sandbox' ),
 			'atarim'       => class_exists( 'AVCF_Abilities_ExecutePHP' ) || class_exists( 'AVCF_Abilities_WP_CLI' ),
 		);
+	}
+
+	/** Seam: where EMCP keeps its sandbox store. */
+	protected function emcp_store_dir() {
+		return WP_CONTENT_DIR . '/emcp-sandbox';
+	}
+
+	/** Seam: the walk's entry cap (a test lowers it). */
+	protected function emcp_store_cap() {
+		return self::STORE_MAX_ENTRIES;
+	}
+
+	/**
+	 * Count what is in EMCP's sandbox store — metadata only. No file is
+	 * opened and no name leaves the site. Iterative (a deep tree cannot
+	 * exhaust the stack); symlinks are one entry each and never followed;
+	 * an unreadable root is an error, never a zero.
+	 *
+	 * @since 2.19.2
+	 * @return array|null null when the directory does not exist.
+	 */
+	protected function emcp_store() {
+		$root = $this->emcp_store_dir();
+		if ( ! is_dir( $root ) ) {
+			return null;
+		}
+		$dh = $this->open_dir( $root );
+		if ( false === $dh ) {
+			return array( 'error' => 'sandbox_unreadable' );
+		}
+		closedir( $dh );
+
+		$cap    = (int) $this->emcp_store_cap();
+		$out    = array( 'files' => 0, 'executable_files' => 0, 'newest_mtime' => null, 'truncated' => false, 'unreadable_dirs' => 0 );
+		$newest = null;
+		$seen   = 0; // every entry visited, directories included — the cap bounds the WORK, not just the file count
+		$stack  = array( $root );
+		while ( $stack ) {
+			$dir = array_pop( $stack );
+			$dh  = $this->open_dir( $dir );
+			if ( false === $dh ) {
+				$out['unreadable_dirs']++;
+				continue;
+			}
+			while ( false !== ( $entry = readdir( $dh ) ) ) {
+				if ( '.' === $entry || '..' === $entry ) {
+					continue;
+				}
+				if ( $seen >= $cap ) {
+					$out['truncated'] = true;
+					closedir( $dh );
+					break 2;
+				}
+				$seen++;
+				$path = $dir . '/' . $entry;
+				if ( ! is_link( $path ) && is_dir( $path ) ) {
+					$stack[] = $path;
+					continue;
+				}
+				$out['files']++;
+				if ( is_link( $path ) ) {
+					continue;
+				}
+				$ext = strtolower( (string) pathinfo( $entry, PATHINFO_EXTENSION ) );
+				if ( in_array( $ext, self::STORE_EXECUTABLE_EXTENSIONS, true ) ) {
+					$out['executable_files']++;
+				}
+				$mtime = @filemtime( $path );
+				if ( false !== $mtime && ( null === $newest || $mtime > $newest ) ) {
+					$newest = $mtime;
+				}
+			}
+			closedir( $dh );
+		}
+		$out['newest_mtime'] = null === $newest ? null : gmdate( 'c', $newest );
+		return $out;
 	}
 
 	// ---- helpers ---------------------------------------------------------------
