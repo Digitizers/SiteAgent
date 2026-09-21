@@ -10,4 +10,8 @@
 			<directory suffix="Test.php">tests/unit</directory>
 		</testsuite>
 	</testsuites>
+	<php>
+		<!-- The full suite peaks near 150 MB; PHP's CLI default is 128M (#130). -->
+		<ini name="memory_limit" value="512M"/>
+	</php>
 </phpunit>
