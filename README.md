@@ -17,7 +17,7 @@
   </a>
   <img src="https://img.shields.io/badge/WordPress-6.2%E2%80%937.1-21759b?logo=wordpress" alt="WordPress" />
   <img src="https://img.shields.io/badge/PHP-7.4%2B-777bb4?logo=php" alt="PHP" />
-  <img src="https://img.shields.io/badge/Stable-2.19.1-green" alt="Stable" />
+  <img src="https://img.shields.io/badge/Stable-2.19.2-green" alt="Stable" />
 </p>
 
 ---
@@ -238,6 +238,10 @@ These plug straight into **Aura's Fleet MCP Gateway**: read tools run on demand,
 ---
 
 ## Changelog
+
+### 2.19.2
+
+- **The EMCP sandbox store is counted, not just noticed.** `audit_agent_code` → `third_party.emcp_sandbox` gains `active` (`EMCP_TOOLS_VERSION` is defined — the plugin is loaded) and `store`: `null` when `wp-content/emcp-sandbox` does not exist, `{ error }` (`sandbox_unreadable` / `sandbox_is_link` / `sandbox_walk_failed`) when it cannot be counted, else `{ files, executable_files, newest_mtime, truncated, unreadable_dirs }`. A metadata walk: no file is opened and no name or path leaves the site; iterative and capped at 20000 entries, directories included, so the cap bounds the work; `truncated` or `unreadable_dirs ≥ 1` makes the counts lower bounds. Links are never followed and never stat'ed — a link inside the store is one entry judged by its own name (a `*.php`-named link counts as executable), and a store root that is itself a link is not walked. A throw inside the walk stays inside this store, so `atarim_exec` still answers. `present` / `version`, `scan_executable_files` and `atarim_exec` are unchanged. Aura grades the count info / medium / high (Digitizers/Aura `docs/superpowers/specs/2026-09-21-agent-installed-packages-design.md` §3). (#129)
 
 ### 2.19.1
 
