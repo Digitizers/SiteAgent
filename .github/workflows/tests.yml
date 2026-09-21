@@ -30,6 +30,7 @@ jobs:
         with:
           php-version: ${{ matrix.php }}
           extensions: zip
+          ini-values: memory_limit=512M
           coverage: none
           tools: composer
 
