@@ -111,4 +111,77 @@ final class ElementorDoorCssTouchesTest extends TestCase {
 			$this->assertSame( array(), $this->t( $slug, array( 'operations' => array( array( 'css' => 'a{}' ) ) ) ), $slug );
 		}
 	}
+
+	/* ---- final review: fail-closed value shapes (M1, Task 3 minors) ---- */
+
+	/**
+	 * css_value(): empty array is a clearing; every other non-string,
+	 * non-null value is CSS of unknown shape — false, 0 and 0.0 included.
+	 */
+	public function test_non_string_css_values_are_unknown_except_an_empty_array(): void {
+		$this->assertSame( array(), $this->t( 'elementor/update-page-settings', array( 'settings' => array( 'custom_css' => array() ) ) ), 'array() clears' );
+		foreach ( array( 'false' => false, 'int 0' => 0, 'float 0.0' => 0.0, 'float 1.5' => 1.5, 'stdClass' => new stdClass() ) as $label => $odd ) {
+			$this->assertSame(
+				array( array( 'type' => 'custom_css', 'id' => '42' ) ),
+				$this->t( 'elementor/update-page-settings', array( 'settings' => array( 'custom_css' => $odd ) ) ),
+				'unknown shape is conservative: ' . $label
+			);
+		}
+	}
+
+	/** M1: `settings` that is not an array is CSS of unknown shape, never "no CSS". */
+	public function test_page_settings_that_are_not_an_array_are_unknown_css(): void {
+		foreach ( array( 'stdClass' => (object) array( 'custom_css' => 'body{}' ), 'string' => 'custom_css=body{}', 'int' => 7 ) as $label => $settings ) {
+			$this->assertSame(
+				array( array( 'type' => 'custom_css', 'id' => '42' ) ),
+				$this->t( 'elementor/update-page-settings', array( 'post_id' => 42, 'settings' => $settings ) ),
+				$label
+			);
+		}
+		// Null settings still declare nothing (nothing is being written).
+		$this->assertSame( array(), $this->t( 'elementor/update-page-settings', array( 'post_id' => 42, 'settings' => null ) ) );
+	}
+
+	/** M1 / Task 3 minor: an op's non-array `settings` is unknown CSS and never css_only. */
+	public function test_manage_elements_op_settings_that_are_not_an_array_are_unknown_css(): void {
+		foreach ( array( 'stdClass' => (object) array( 'custom_css' => 'x{}' ), 'string' => 'custom_css' ) as $label => $settings ) {
+			$in = array( 'operations' => array(
+				array( 'action' => 'update', 'element_id' => 'a1', 'style' => 'color:red' ),
+				array( 'action' => 'update', 'element_id' => 'b2', 'settings' => $settings ),
+			) );
+			$this->assertSame( array( array( 'type' => 'custom_css', 'id' => '42' ) ), $this->t( 'elementor/manage-elements', $in ), $label );
+		}
+	}
+
+	/* ---- final review: the CSS touch as touches_for() returns it (Task 3 minor) ---- */
+
+	public function test_touches_for_appends_a_precise_css_touch_after_the_page(): void {
+		$GLOBALS['_posts'][42] = (object) array( 'ID' => 42, 'post_type' => 'page', 'post_status' => 'draft', 'post_content' => '' );
+		$this->assertSame(
+			array(
+				array( 'type' => 'page', 'id' => '42' ),
+				array( 'type' => 'custom_css', 'id' => '42', 'precise' => true, 'css_only' => true ),
+			),
+			Aura_Worker_Elementor_Door::touches_for( 'elementor/update-page-settings', array( 'post_id' => 42, 'settings' => array( 'custom_css' => 'body{}' ) ) )
+		);
+	}
+
+	public function test_touches_for_a_component_write_is_design_system_plus_wildcard_css(): void {
+		$this->assertSame(
+			array(
+				array( 'type' => 'design_system', 'id' => '*' ),
+				array( 'type' => 'custom_css', 'id' => '*' ),
+			),
+			Aura_Worker_Elementor_Door::touches_for( 'elementor/manage-component', array( 'action' => 'create' ) )
+		);
+	}
+
+	public function test_touches_for_a_no_css_design_system_write_carries_no_css_touch(): void {
+		$touches = Aura_Worker_Elementor_Door::touches_for( 'elementor/manage-classes', array( 'operations' => array( array( 'action' => 'create', 'label' => 'foo', 'css' => 'color:red' ) ) ) );
+		$this->assertIsArray( $touches );
+		$this->assertContains( array( 'type' => 'design_system', 'id' => '*' ), $touches );
+		foreach ( $touches as $t ) {
+			$this->assertNotSame( 'custom_css', $t['type'] );
+		}
+	}
 }

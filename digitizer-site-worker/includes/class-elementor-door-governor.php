@@ -2974,13 +2974,36 @@ class Aura_Worker_Elementor_Door {
 
 	/** @since 2.20.0 @param array $schema Schema. @param string $prefix Path so far. @return string[] (may repeat — an open named container is reached twice) */
 	private static function css_capable_paths_raw( array $schema, $prefix ) {
-		$out = array();
+		$out  = array();
+		$here = '' === $prefix ? '(root)' : $prefix;
 		// The node ITSELF may be open (Codex r1 on the plan): a root, or an
 		// array item, that accepts any property can carry CSS under any name.
 		// Explicit `true` or a schema-valued `additionalProperties` counts;
-		// an absent key does not (WP schemas omit it everywhere).
+		// an absent key does not (WP schemas omit it everywhere), so a bare
+		// {type: object} stays closed (controller ruling, final review M2).
 		if ( isset( $schema['additionalProperties'] ) && ( true === $schema['additionalProperties'] || is_array( $schema['additionalProperties'] ) ) ) {
-			$out[] = '' === $prefix ? '(root)' : $prefix;
+			$out[] = $here;
+		}
+		// Shapes this walker does not read into are CSS-capable as a whole —
+		// fail closed rather than silently pass (final review, Task 4 minor):
+		// keys matched by pattern, and combinators whose branches may differ.
+		if ( ! empty( $schema['patternProperties'] ) ) {
+			$out[] = $here;
+		}
+		foreach ( array( 'anyOf', 'oneOf', 'allOf' ) as $combinator ) {
+			if ( isset( $schema[ $combinator ] ) ) {
+				$out[] = $here;
+			}
+		}
+		// Arrays: a single item schema is descended as `name[].child` (nested
+		// arrays as `name[][]…`); a tuple — a list of item schemas — is flagged.
+		if ( isset( $schema['items'] ) && is_array( $schema['items'] ) ) {
+			$items = $schema['items'];
+			if ( array() !== $items && array_keys( $items ) === range( 0, count( $items ) - 1 ) ) {
+				$out[] = $here;
+			} else {
+				$out = array_merge( $out, self::css_capable_paths_raw( $items, ( '' === $prefix ? '' : $prefix ) . '[]' ) );
+			}
 		}
 		$props = isset( $schema['properties'] ) && is_array( $schema['properties'] ) ? $schema['properties'] : array();
 		foreach ( $props as $name => $sub ) {
@@ -2992,13 +3015,7 @@ class Aura_Worker_Elementor_Door {
 				// list can still grow a CSS child (`settings.css`) the handler
 				// does not read — that child must surface as its own path.
 			}
-			if ( isset( $sub['items'] ) && is_array( $sub['items'] ) ) {
-				foreach ( self::css_capable_paths_raw( $sub['items'], '' ) as $child ) {
-					$out[] = '(root)' === $child ? $path . '[]' : $path . '[].' . $child;
-				}
-			} elseif ( isset( $sub['properties'] ) || isset( $sub['additionalProperties'] ) ) {
-				$out = array_merge( $out, self::css_capable_paths_raw( $sub, $path ) );
-			}
+			$out = array_merge( $out, self::css_capable_paths_raw( $sub, $path ) );
 		}
 		return $out;
 	}
@@ -3026,9 +3043,10 @@ class Aura_Worker_Elementor_Door {
 	}
 
 	/**
-	 * CSS value classification. `null` / whitespace string = clearing (not CSS);
-	 * a non-empty string = CSS read from the argument; anything else non-empty =
-	 * CSS of unknown shape.
+	 * CSS value classification. `null` / whitespace string / empty array =
+	 * clearing (not CSS); a non-empty string = CSS read from the argument;
+	 * every other value — false, 0, 0.0, true, numbers, non-empty arrays,
+	 * objects — is CSS of unknown shape (final review: one rule, fail closed).
 	 *
 	 * @since 2.20.0
 	 * @param mixed $v Value.
@@ -3041,7 +3059,7 @@ class Aura_Worker_Elementor_Door {
 		if ( is_string( $v ) ) {
 			return '' === trim( $v ) ? 'none' : 'css';
 		}
-		return empty( $v ) && false !== $v && 0 !== $v ? 'none' : 'unknown';
+		return array() === $v ? 'none' : 'unknown';
 	}
 
 	/**
@@ -3063,7 +3081,7 @@ class Aura_Worker_Elementor_Door {
 			// let a custom_css block rule be bypassed.
 			$schema = self::live_input_schema( $slug );
 			if ( is_array( $schema ) && array() !== array_diff( self::css_capable_paths( $schema ), self::NO_CSS[ $slug ]['exempt'] ) ) {
-				return array( array( 'type' => 'custom_css', 'id' => (string) $id ) );
+				return array( array( 'type' => 'custom_css', 'id' => $id ) );
 			}
 			return array();
 		}
@@ -3083,12 +3101,20 @@ class Aura_Worker_Elementor_Door {
 		$found    = 'none';   // none | css | unknown
 		$css_only = true;
 		if ( 'elementor/update-page-settings' === $slug ) {
-			$settings = isset( $input['settings'] ) && is_array( $input['settings'] ) ? $input['settings'] : array();
-			$found    = array_key_exists( 'custom_css', $settings ) ? self::css_value( $settings['custom_css'] ) : 'none';
-			// The WHOLE input, not just `settings` (Codex r4): any other
-			// top-level field is an effect this allow never looked at.
-			$css_only = array( 'custom_css' ) === array_keys( $settings )
-				&& array() === array_diff( array_keys( $input ), array( 'post_id', 'settings' ) );
+			if ( isset( $input['settings'] ) && ! is_array( $input['settings'] ) ) {
+				// An object or scalar `settings` (in-process PHP callers; JSON
+				// decodes to arrays) is CSS of unknown shape, never "no CSS"
+				// (final review M1).
+				$found    = 'unknown';
+				$css_only = false;
+			} else {
+				$settings = isset( $input['settings'] ) ? $input['settings'] : array();
+				$found    = array_key_exists( 'custom_css', $settings ) ? self::css_value( $settings['custom_css'] ) : 'none';
+				// The WHOLE input, not just `settings` (Codex r4): any other
+				// top-level field is an effect this allow never looked at.
+				$css_only = array( 'custom_css' ) === array_keys( $settings )
+					&& array() === array_diff( array_keys( $input ), array( 'post_id', 'settings' ) );
+			}
 		} elseif ( 'elementor/manage-elements' === $slug ) {
 			$ops = isset( $input['operations'] ) ? $input['operations'] : null;
 			if ( array() !== array_diff( array_keys( $input ), array( 'post_id', 'operations' ) ) ) {
@@ -3108,7 +3134,11 @@ class Aura_Worker_Elementor_Door {
 					$op_css = self::css_value( $op['style'] );
 				}
 				$settings = isset( $op['settings'] ) && is_array( $op['settings'] ) ? $op['settings'] : array();
-				if ( array_key_exists( 'custom_css', $settings ) ) {
+				if ( isset( $op['settings'] ) && ! is_array( $op['settings'] ) ) {
+					// Not an array: CSS of unknown shape (final review M1).
+					$op_css   = 'unknown';
+					$css_only = false;
+				} elseif ( array_key_exists( 'custom_css', $settings ) ) {
 					$s      = self::css_value( $settings['custom_css'] );
 					$op_css = 'unknown' === $s || 'unknown' === $op_css ? 'unknown' : ( 'css' === $s ? 'css' : $op_css );
 				}

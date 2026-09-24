@@ -137,4 +137,109 @@ final class ElementorDoorCssClassificationTest extends TestCase {
 		$this->assertContains( array( 'type' => 'design_system', 'id' => '*' ), $result );
 		$this->assertContains( array( 'type' => 'custom_css', 'id' => '*' ), $result );
 	}
+
+	/* ---- final review: fail-closed schema shapes (Task 4 minors) ---- */
+
+	public function test_a_tuple_items_list_is_css_capable(): void {
+		$this->assertSame(
+			array( 'pair' ),
+			Aura_Worker_Elementor_Door::css_capable_paths( array( 'type' => 'object', 'properties' => array( 'pair' => array( 'type' => 'array', 'items' => array( array( 'type' => 'string' ), array( 'type' => 'integer' ) ) ) ) ) )
+		);
+	}
+
+	public function test_a_combinator_is_css_capable(): void {
+		foreach ( array( 'anyOf', 'oneOf', 'allOf' ) as $k ) {
+			$this->assertSame(
+				array( 'value' ),
+				Aura_Worker_Elementor_Door::css_capable_paths( array( 'type' => 'object', 'properties' => array( 'value' => array( $k => array( array( 'type' => 'string' ), array( 'type' => 'integer' ) ) ) ) ) ),
+				$k
+			);
+			$this->assertSame( array( '(root)' ), Aura_Worker_Elementor_Door::css_capable_paths( array( $k => array( array( 'type' => 'object' ) ) ) ), "{$k} at the root" );
+		}
+	}
+
+	public function test_pattern_properties_are_css_capable(): void {
+		$this->assertSame( array( '(root)' ), Aura_Worker_Elementor_Door::css_capable_paths( array( 'type' => 'object', 'patternProperties' => array( '^x_' => array( 'type' => 'string' ) ) ) ) );
+		$this->assertSame(
+			array( 'meta' ),
+			Aura_Worker_Elementor_Door::css_capable_paths( array( 'type' => 'object', 'properties' => array( 'meta' => array( 'type' => 'object', 'patternProperties' => array( '.*' => array( 'type' => 'string' ) ) ) ) ) )
+		);
+	}
+
+	public function test_nested_arrays_are_descended(): void {
+		$this->assertSame(
+			array( 'grid[][].css' ),
+			Aura_Worker_Elementor_Door::css_capable_paths( array( 'type' => 'object', 'properties' => array( 'grid' => array( 'type' => 'array', 'items' => array( 'type' => 'array', 'items' => array( 'type' => 'object', 'properties' => array( 'css' => array( 'type' => 'string' ), 'n' => array( 'type' => 'integer' ) ) ) ) ) ) ) )
+		);
+		$this->assertSame(
+			array( 'grid[][]' ),
+			Aura_Worker_Elementor_Door::css_capable_paths( array( 'type' => 'object', 'properties' => array( 'grid' => array( 'type' => 'array', 'items' => array( 'type' => 'array', 'items' => array( 'type' => 'object', 'additionalProperties' => true ) ) ) ) ) )
+		);
+	}
+
+	/** Controller ruling (final review M2): a bare {type: object} stays CLOSED. */
+	public function test_a_bare_object_stays_closed(): void {
+		$this->assertSame( array(), Aura_Worker_Elementor_Door::css_capable_paths( array( 'type' => 'object', 'properties' => array( 'interactions' => array( 'type' => 'array', 'items' => array( 'type' => 'object' ) ), 'meta' => array( 'type' => 'object' ) ) ) ) );
+		$this->assertSame( array(), Aura_Worker_Elementor_Door::css_capable_paths( array( 'type' => 'object' ) ) );
+	}
+
+	/** Task 4 minor: the precise-producer guard, on manage-elements. */
+	public function test_manage_elements_whose_schema_grew_extra_css_turns_conservative(): void {
+		$schema = $this->schemas()['elementor/manage-elements'];
+		$this->assertArrayHasKey( 'operations', $schema['properties'] );
+		$schema['properties']['operations']['items']['properties']['extra_css'] = array( 'type' => 'string' );
+		Aura_Worker_Elementor_Door::_set_schema_reader_for_tests( function ( $slug ) use ( $schema ) {
+			return 'elementor/manage-elements' === $slug ? $schema : null;
+		} );
+		$in = array( 'post_id' => 42, 'operations' => array( array( 'action' => 'update', 'element_id' => 'a1', 'style' => 'color:red' ) ) );
+		$this->assertSame( array( array( 'type' => 'custom_css', 'id' => '42' ) ), Aura_Worker_Elementor_Door::css_touches_for( 'elementor/manage-elements', $in, '42' ) );
+	}
+
+	/** Task 4 minor: the 4.3 schema itself leaves manage-elements precise. */
+	public function test_manage_elements_with_its_fixture_schema_stays_precise(): void {
+		$schema = $this->schemas()['elementor/manage-elements'];
+		Aura_Worker_Elementor_Door::_set_schema_reader_for_tests( function () use ( $schema ) {
+			return $schema;
+		} );
+		$in = array( 'post_id' => 42, 'operations' => array( array( 'action' => 'update', 'element_id' => 'a1', 'style' => 'color:red' ) ) );
+		$this->assertSame( array( array( 'type' => 'custom_css', 'id' => '42', 'precise' => true, 'css_only' => true ) ), Aura_Worker_Elementor_Door::css_touches_for( 'elementor/manage-elements', $in, '42' ) );
+	}
+
+	/** Task 4 minor: an unreadable (null) live schema leaves a precise producer precise. */
+	public function test_a_null_live_schema_leaves_a_precise_producer_precise(): void {
+		Aura_Worker_Elementor_Door::_set_schema_reader_for_tests( function () {
+			return null;
+		} );
+		$this->assertSame(
+			array( array( 'type' => 'custom_css', 'id' => '42', 'precise' => true, 'css_only' => true ) ),
+			Aura_Worker_Elementor_Door::css_touches_for( 'elementor/update-page-settings', array( 'post_id' => 42, 'settings' => array( 'custom_css' => 'a{}' ) ), '42' )
+		);
+		$this->assertSame(
+			array( array( 'type' => 'custom_css', 'id' => '42', 'precise' => true, 'css_only' => true ) ),
+			Aura_Worker_Elementor_Door::css_touches_for( 'elementor/manage-elements', array( 'operations' => array( array( 'action' => 'update', 'element_id' => 'a1', 'style' => 'x' ) ) ), '42' )
+		);
+	}
+
+	/**
+	 * Task 4 minor: the PRODUCTION read (no seam) goes through
+	 * wp_get_ability()->get_input_schema(). An ability whose registered
+	 * schema is open makes a NO_CSS slug conservative.
+	 */
+	public function test_the_production_schema_read_uses_the_registered_ability(): void {
+		sa_register_ability( 'elementor/publish-document', array(
+			'execute_callback' => function () {
+				return true;
+			},
+			'input_schema'     => array( 'type' => 'object', 'additionalProperties' => true ),
+		) );
+		$this->assertSame( array( array( 'type' => 'custom_css', 'id' => '42' ) ), Aura_Worker_Elementor_Door::css_touches_for( 'elementor/publish-document', array( 'post_id' => 42 ), '42' ) );
+		// And a closed one does not.
+		sa_register_ability( 'elementor/create-preview-link', array(
+			'execute_callback' => function () {
+				return true;
+			},
+			'input_schema'     => array( 'type' => 'object', 'properties' => array( 'post_id' => array( 'type' => 'integer' ) ) ),
+		) );
+		$this->assertSame( array(), Aura_Worker_Elementor_Door::css_touches_for( 'elementor/create-preview-link', array( 'post_id' => 42 ), '42' ) );
+	}
 }
