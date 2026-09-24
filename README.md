@@ -17,7 +17,7 @@
   </a>
   <img src="https://img.shields.io/badge/WordPress-6.2%E2%80%937.1-21759b?logo=wordpress" alt="WordPress" />
   <img src="https://img.shields.io/badge/PHP-7.4%2B-777bb4?logo=php" alt="PHP" />
-  <img src="https://img.shields.io/badge/Stable-2.19.2-green" alt="Stable" />
+  <img src="https://img.shields.io/badge/Stable-2.19.3-green" alt="Stable" />
 </p>
 
 ---
@@ -238,6 +238,10 @@ These plug straight into **Aura's Fleet MCP Gateway**: read tools run on demand,
 ---
 
 ## Changelog
+
+### 2.19.3
+
+- **A sandbox root that is a link is reported as one, even when its target is gone.** `third_party.emcp_sandbox` probed `is_dir()` before `is_link()`; `is_dir()` follows a link, so a `wp-content/emcp-sandbox` link to a missing target read as `present: false, store: null`, and a healthy link was resolved before the no-follow rule applied. The link test now comes first in both places: presence counts the link itself, and `store` answers `sandbox_is_link` without resolving anything. (#133)
 
 ### 2.19.2
 

@@ -4,7 +4,7 @@ Tags: ai, automation, maintenance, updates, wordpress management
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.19.2
+Stable tag: 2.19.3
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -252,6 +252,9 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 7. Connections: provider connections (Cloudways, Cloudflare, Bunny, Hostinger, Vultr, xCloud) with resource counts, status, and credential-rotation reminders.
 
 == Changelog ==
+
+= 2.19.3 =
+* A third-party sandbox directory that is a link to a missing or unreachable location is now reported as a link, not as "no sandbox here". The audit checks for a link before it looks at what the link points to. Read-only; nothing changes on the site.
 
 = 2.19.2 =
 * `audit_agent_code` now counts what is in a third-party agent tool's sandbox store (`wp-content/emcp-sandbox`): `third_party.emcp_sandbox` gains `active` (the plugin is loaded) and `store` — how many files, how many with an executable extension, and the newest modification date. Until now an empty directory and one holding forty PHP files looked the same to a fleet audit. Counts only: no file is opened and no file name leaves the site. Links are never followed; a sandbox directory that is itself a link is reported as such and not walked. A directory that cannot be read is reported as unreadable, never as empty. Read-only, no settings, nothing changes on the site.
