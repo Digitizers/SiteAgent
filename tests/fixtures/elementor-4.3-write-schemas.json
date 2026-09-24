@@ -1,0 +1,195 @@
+{
+  "source": "Elementor 4.3.0-beta3 (Digitizers/references elementor-core-mcp), input schemas",
+  "files": {
+    "elementor/publish-document": "publish-document-ability.php",
+    "elementor/manage-elements": "manage-elements-ability.php",
+    "elementor/update-page-settings": "update-settings-ability.php",
+    "elementor/build-composition": "build-composition-ability.php",
+    "elementor/create-preview-link": "create-preview-link-ability.php",
+    "elementor/manage-component": "manage-component-ability.php",
+    "elementor/manage-default-styles": "manage-default-styles-ability.php",
+    "elementor/manage-classes": "manage-classes-ability.php",
+    "elementor/reorder-classes": "reorder-classes-ability.php",
+    "elementor/manage-global-variable": "manage-variable-ability.php",
+    "elementor/create-page": "create-page-ability.php"
+  },
+  "schemas": {
+    "elementor/publish-document": {
+      "type": "object",
+      "required": ["post_id"],
+      "properties": {
+        "post_id": { "type": "integer" }
+      }
+    },
+    "elementor/manage-elements": {
+      "type": "object",
+      "required": ["post_id", "operations"],
+      "properties": {
+        "post_id": { "type": "integer" },
+        "operations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["action", "element_id"],
+            "properties": {
+              "action": { "type": "string", "enum": ["update", "delete", "move", "duplicate"] },
+              "element_id": { "type": "string" },
+              "settings": { "type": "object" },
+              "style": { "type": "string" },
+              "style_apply_mode": { "type": "string", "enum": ["patch", "replace"] },
+              "classes": { "type": "array", "items": { "type": "string" } },
+              "interactions": { "type": "array", "items": { "type": "object" } },
+              "new_parent_id": { "type": "string" },
+              "index": { "type": ["integer", "null"] }
+            }
+          }
+        }
+      }
+    },
+    "elementor/update-page-settings": {
+      "type": "object",
+      "required": ["post_id", "settings"],
+      "properties": {
+        "post_id": { "type": "integer" },
+        "settings": { "type": "object", "additionalProperties": true }
+      }
+    },
+    "elementor/build-composition": {
+      "type": "object",
+      "required": ["post_id", "xml_structure"],
+      "properties": {
+        "post_id": { "type": "integer" },
+        "xml_structure": { "type": "string" },
+        "element_config": { "type": "object" },
+        "style": { "type": "object", "additionalProperties": { "type": "string" } },
+        "classes": {
+          "type": "object",
+          "additionalProperties": { "type": "array", "items": { "type": "string" } }
+        },
+        "interactions": {
+          "type": "object",
+          "additionalProperties": { "type": "array", "items": { "type": "object" } }
+        },
+        "parent_id": { "type": "string" },
+        "dry_run": { "type": "boolean" },
+        "mode": { "type": "string", "enum": ["append", "replace_children"] }
+      }
+    },
+    "elementor/create-preview-link": {
+      "type": "object",
+      "required": ["post_id"],
+      "properties": {
+        "post_id": { "type": "integer" }
+      }
+    },
+    "elementor/manage-component": {
+      "type": "object",
+      "required": ["action"],
+      "properties": {
+        "action": { "type": "string", "enum": ["create", "update", "rename", "archive", "publish"] },
+        "title": { "type": "string" },
+        "source_post_id": { "type": "integer" },
+        "element_id": { "type": "string" },
+        "xml_structure": { "type": "string" },
+        "element_config": { "type": "object" },
+        "classes": { "type": "object" },
+        "style": { "type": "object" },
+        "interactions": { "type": "object" },
+        "overridable_props": { "type": "object" },
+        "publish_status": { "type": "string", "enum": ["publish", "draft"] },
+        "component_id": { "type": "integer" },
+        "component_ids": { "type": "array", "items": { "type": "integer" } }
+      }
+    },
+    "elementor/manage-default-styles": {
+      "type": "object",
+      "required": ["operations"],
+      "properties": {
+        "operations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["action", "tag"],
+            "properties": {
+              "action": { "type": "string", "enum": ["update", "delete"] },
+              "tag": { "type": "string" },
+              "css": { "type": "string" },
+              "mode": { "type": "string", "enum": ["patch", "replace"] }
+            }
+          }
+        }
+      }
+    },
+    "elementor/manage-classes": {
+      "type": "object",
+      "required": ["operations"],
+      "properties": {
+        "operations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["action"],
+            "properties": {
+              "action": { "type": "string", "enum": ["create", "update", "delete"] },
+              "id": { "type": "string" },
+              "label": { "type": "string" },
+              "css": { "type": "string" },
+              "mode": { "type": "string", "enum": ["patch", "replace"] }
+            }
+          }
+        }
+      }
+    },
+    "elementor/reorder-classes": {
+      "type": "object",
+      "properties": {
+        "moves": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "position"],
+            "properties": {
+              "id": { "type": "string" },
+              "position": { "type": "string", "enum": ["before", "after", "start", "end"] },
+              "ref": { "type": "string" }
+            }
+          }
+        },
+        "order": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "elementor/manage-global-variable": {
+      "type": "object",
+      "required": ["operations"],
+      "properties": {
+        "operations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["action"],
+            "properties": {
+              "action": { "type": "string", "enum": ["create", "update", "delete"] },
+              "id": { "type": "string" },
+              "type": {
+                "type": "string",
+                "enum": ["global-color-variable", "global-font-variable", "global-size-variable", "global-custom-size-variable"]
+              },
+              "label": { "type": "string" },
+              "value": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "elementor/create-page": {
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "post_type": { "type": "string" }
+      }
+    }
+  }
+}

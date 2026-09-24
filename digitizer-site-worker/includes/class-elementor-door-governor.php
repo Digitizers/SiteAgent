@@ -202,6 +202,7 @@ class Aura_Worker_Elementor_Door {
 		self::$request             = null;
 		self::$active              = null;
 		self::$seq_lease           = null;
+		self::$schema_reader       = null;
 		Aura_Worker_Door_Log::forget_live_identity();
 		// $GLOBALS['_sa_force_door'] — active()'s test override, standing in
 		// for the module class this suite cannot define — is reset by
@@ -2931,6 +2932,99 @@ class Aura_Worker_Elementor_Door {
 		'elementor/manage-global-variable' => array( 'reason' => 'a variable value, not a stylesheet', 'exempt' => array() ),
 	);
 
+	/** CSS-capable property names (spec §4.1 guard). @since 2.20.0 */
+	const CSS_PROPERTY_NAMES = array( 'custom_css', 'css', 'style', 'settings', 'page_settings', 'elements', 'structure', 'xml_structure', 'element_config' );
+
+	/** Forwarded opaque strings — markup or code that may embed a stylesheet (Codex r3). @since 2.20.0 */
+	const OPAQUE_PROPERTY_PATTERN = '/css|style|content|html|markup|template|code/i'; // also CSS-named variants: extra_css, inline_style (Codex r5)
+
+	/**
+	 * The input paths each precise producer's handler actually reads for CSS
+	 * (Codex r3). A live schema that grows any OTHER CSS-capable path makes the
+	 * producer conservative until the handler learns it.
+	 *
+	 * @since 2.20.0
+	 */
+	const PRODUCER_HANDLED_PATHS = array(
+		'elementor/update-page-settings' => array( 'settings' ),
+		'elementor/manage-elements'      => array( 'operations[].settings', 'operations[].style', 'operations[].style_apply_mode' ), // style_apply_mode is the patch|replace merge mode, matched by the name net's "style" substring — never CSS text (controller ruling).
+	);
+
+	/** @var callable|null test seam: fn( string $slug ): ?array @since 2.20.0 */
+	private static $schema_reader = null;
+
+	/** @since 2.20.0 */
+	public static function _set_schema_reader_for_tests( $fn ) {
+		self::$schema_reader = $fn;
+	}
+
+	/**
+	 * Paths through which a JSON schema can carry CSS: a property with a
+	 * CSS-capable name, or an object open to any property. Arrays recurse
+	 * into `items` as `name[].child`.
+	 *
+	 * @since 2.20.0
+	 * @param array  $schema Schema.
+	 * @param string $prefix Path so far.
+	 * @return string[]
+	 */
+	public static function css_capable_paths( array $schema, $prefix = '' ) {
+		return array_values( array_unique( self::css_capable_paths_raw( $schema, $prefix ) ) );
+	}
+
+	/** @since 2.20.0 @param array $schema Schema. @param string $prefix Path so far. @return string[] (may repeat — an open named container is reached twice) */
+	private static function css_capable_paths_raw( array $schema, $prefix ) {
+		$out = array();
+		// The node ITSELF may be open (Codex r1 on the plan): a root, or an
+		// array item, that accepts any property can carry CSS under any name.
+		// Explicit `true` or a schema-valued `additionalProperties` counts;
+		// an absent key does not (WP schemas omit it everywhere).
+		if ( isset( $schema['additionalProperties'] ) && ( true === $schema['additionalProperties'] || is_array( $schema['additionalProperties'] ) ) ) {
+			$out[] = '' === $prefix ? '(root)' : $prefix;
+		}
+		$props = isset( $schema['properties'] ) && is_array( $schema['properties'] ) ? $schema['properties'] : array();
+		foreach ( $props as $name => $sub ) {
+			$path = '' === $prefix ? (string) $name : $prefix . '.' . $name;
+			$sub  = is_array( $sub ) ? $sub : array();
+			if ( in_array( (string) $name, self::CSS_PROPERTY_NAMES, true ) || preg_match( self::OPAQUE_PROPERTY_PATTERN, (string) $name ) ) {
+				$out[] = $path;
+				// Keep descending (Codex r4): a container already on a handled
+				// list can still grow a CSS child (`settings.css`) the handler
+				// does not read — that child must surface as its own path.
+			}
+			if ( isset( $sub['items'] ) && is_array( $sub['items'] ) ) {
+				foreach ( self::css_capable_paths_raw( $sub['items'], '' ) as $child ) {
+					$out[] = '(root)' === $child ? $path . '[]' : $path . '[].' . $child;
+				}
+			} elseif ( isset( $sub['properties'] ) || isset( $sub['additionalProperties'] ) ) {
+				$out = array_merge( $out, self::css_capable_paths_raw( $sub, $path ) );
+			}
+		}
+		return $out;
+	}
+
+	/**
+	 * The ability's live input schema, or null when unreadable.
+	 *
+	 * @since 2.20.0
+	 * @param string $slug Ability.
+	 * @return array|null
+	 */
+	private static function live_input_schema( $slug ) {
+		if ( null !== self::$schema_reader ) {
+			return call_user_func( self::$schema_reader, $slug );
+		}
+		if ( ! function_exists( 'wp_get_ability' ) ) {
+			return null;
+		}
+		$ability = wp_get_ability( $slug );
+		if ( ! $ability || ! method_exists( $ability, 'get_input_schema' ) ) {
+			return null;
+		}
+		$schema = $ability->get_input_schema();
+		return is_array( $schema ) ? $schema : null;
+	}
+
 	/**
 	 * CSS value classification. `null` / whitespace string = clearing (not CSS);
 	 * a non-empty string = CSS read from the argument; anything else non-empty =
@@ -2961,12 +3055,29 @@ class Aura_Worker_Elementor_Door {
 	 * @return array
 	 */
 	public static function css_touches_for( $slug, array $input, $id ) {
-		$id   = (string) $id;
+		$id = (string) $id;
+		if ( isset( self::NO_CSS[ $slug ] ) ) {
+			// A NO_CSS entry is checked, not trusted: if the LIVE schema grew a
+			// CSS-capable property beyond the recorded exemptions (an Elementor
+			// release after 4.3.0-beta3), declare conservatively rather than
+			// let a custom_css block rule be bypassed.
+			$schema = self::live_input_schema( $slug );
+			if ( is_array( $schema ) && array() !== array_diff( self::css_capable_paths( $schema ), self::NO_CSS[ $slug ]['exempt'] ) ) {
+				return array( array( 'type' => 'custom_css', 'id' => (string) $id ) );
+			}
+			return array();
+		}
 		$kind = isset( self::CSS_PRODUCERS[ $slug ] ) ? self::CSS_PRODUCERS[ $slug ] : null;
 		if ( null === $kind ) {
 			return array();
 		}
 		if ( 'conservative' === $kind ) {
+			return array( array( 'type' => 'custom_css', 'id' => $id ) );
+		}
+		// A precise producer whose LIVE schema grew a CSS-capable path its
+		// handler does not read is conservative until it does (Codex r3).
+		$live = self::live_input_schema( $slug );
+		if ( is_array( $live ) && array() !== array_diff( self::css_capable_paths( $live ), isset( self::PRODUCER_HANDLED_PATHS[ $slug ] ) ? self::PRODUCER_HANDLED_PATHS[ $slug ] : array() ) ) {
 			return array( array( 'type' => 'custom_css', 'id' => $id ) );
 		}
 		$found    = 'none';   // none | css | unknown

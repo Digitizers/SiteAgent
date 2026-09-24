@@ -13,6 +13,13 @@ final class ElementorDoorCssTouchesTest extends TestCase {
 	protected function setUp(): void {
 		sa_reset_state();
 		require_once dirname( __DIR__, 2 ) . '/digitizer-site-worker/includes/class-elementor-door-governor.php';
+		// This is a pure producer-classification test: the runtime schema
+		// guard (Task 4) has its own suite. Pin the reader to "unreadable" so
+		// a bootstrap wp_get_ability() stub never makes a NO_CSS/precise-
+		// producer case here start exercising that guard instead.
+		Aura_Worker_Elementor_Door::_set_schema_reader_for_tests( function () {
+			return null;
+		} );
 	}
 
 	private function t( string $slug, array $input, string $id = '42' ): array {
