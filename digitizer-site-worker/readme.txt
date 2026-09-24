@@ -4,7 +4,7 @@ Tags: ai, automation, maintenance, updates, wordpress management
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.19.2
+Stable tag: 2.19.3
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -253,6 +253,9 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 
 == Changelog ==
 
+= 2.19.3 =
+* A third-party sandbox directory that is a link to a missing or unreachable location is now reported as a link, not as "no sandbox here". The audit checks for a link before it looks at what the link points to. Read-only; nothing changes on the site.
+
 = 2.19.2 =
 * `audit_agent_code` now counts what is in a third-party agent tool's sandbox store (`wp-content/emcp-sandbox`): `third_party.emcp_sandbox` gains `active` (the plugin is loaded) and `store` — how many files, how many with an executable extension, and the newest modification date. Until now an empty directory and one holding forty PHP files looked the same to a fleet audit. Counts only: no file is opened and no file name leaves the site. Links are never followed; a sandbox directory that is itself a link is reported as such and not walked. A directory that cannot be read is reported as unreadable, never as empty. Read-only, no settings, nothing changes on the site.
 
@@ -446,24 +449,10 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 * Compatibility: a 2.13 site that is never sent a disconnect behaves exactly
   as 2.12 did. Nothing on the site changes until Aura asks for one.
 
-= 2.12.0 =
-* Feature: **a rule can now apply to some of a client's sites instead of all
-  of them.** Aura's signed ruleset names the site each document was issued
-  for, SiteAgent stores that identity, and a rule that lists the sites it
-  applies to is enforced only where it belongs. Rules that name no sites are
-  client-wide exactly as before.
-* Safety: a site that cannot prove its own identity — an older record, a
-  document issued before this field existed — enforces EVERY rule rather than
-  skipping the ones it cannot place. Scoping only ever narrows on proof.
-* Upgrade: the identity is recovered offline from the ruleset already stored,
-  by re-verifying its signature locally. No new network traffic, and a site
-  whose ruleset has not changed since the upgrade is repaired on its next
-  request rather than waiting for the next push.
-
-= 2.11.0 and earlier =
+= 2.12.0 and earlier =
 
 * WordPress.org truncates a Changelog over 5,000 words, and this plugin's history is longer than that.
-  The entries for 2.11.0 and every release before it were moved out of this file verbatim and are kept in full at:
+  The entries for 2.12.0 and every release before it were moved out of this file verbatim and are kept in full at:
   https://github.com/Digitizers/SiteAgent/blob/main/docs/changelog-archive.md
 
 == Upgrade Notice ==
