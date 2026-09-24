@@ -230,8 +230,19 @@ class Aura_Worker_Rules {
 		return $sum;
 	}
 
-	/** The only resource types a rule may name. Anything else never matches. */
-	const TYPES = array( 'site', 'page', 'post', 'plugin', 'design_system', 'page_create' );
+	/** The only resource types a rule may name. Anything else never matches. `custom_css` since 2.20.0. */
+	const TYPES = array( 'site', 'page', 'post', 'plugin', 'design_system', 'page_create', 'custom_css' );
+
+	/**
+	 * Normalised-set key prefix for a `custom_css` touch that carries BOTH
+	 * evidence fields as literal `true` on a concrete (digits) id — the only
+	 * touch an `allow custom_css` rule may match (spec 2026-09-24 §3). Not a
+	 * type: an operator can never name it, and nothing outside this class
+	 * reads it.
+	 *
+	 * @since 2.20.0
+	 */
+	const CSS_EXACT_PREFIX = 'custom_css!exact:';
 
 	/** Target types that carry no id — a rule on them names the whole category. */
 	const ID_LESS_TYPES = array( 'site', 'design_system', 'page_create' );
@@ -438,6 +449,16 @@ class Aura_Worker_Rules {
 				continue;
 			}
 			$set[ $type . ':' . $id ] = true;
+			// Evidence fields (2.20.0): on a custom_css touch only, each only
+			// as the literal true, and only on a concrete id. Anything else is
+			// read as absent — the conservative reading (spec §3).
+			if ( 'custom_css' === $type
+				&& ctype_digit( $id )
+				&& isset( $t['precise'], $t['css_only'] )
+				&& true === $t['precise']
+				&& true === $t['css_only'] ) {
+				$set[ self::CSS_EXACT_PREFIX . $id ] = true;
+			}
 		}
 		if ( empty( $set ) ) {
 			// A declaration that survives normalisation as nothing — `[]`,
@@ -462,6 +483,9 @@ class Aura_Worker_Rules {
 		if ( ! in_array( $type, self::TYPES, true ) ) {
 			return false;
 		}
+		if ( 'custom_css' === $type ) {
+			return self::css_rule_touches( $rule, $touched );
+		}
 		if ( isset( $touched[ self::UNKNOWN . ':*' ] ) ) {
 			return true; // Undeclared: every live rule applies.
 		}
@@ -484,6 +508,54 @@ class Aura_Worker_Rules {
 			return false;
 		}
 		return isset( $touched[ $type . ':' . $id ] );
+	}
+
+	/**
+	 * The custom_css arm (spec 2026-09-24 §3). Effect-aware, because
+	 * conservative matching exists to over-BLOCK: an `allow` that matched a
+	 * wildcard, a conservative declaration or `unknown:*` would over-PERMIT.
+	 *
+	 * @since 2.20.0
+	 *
+	 * @param array              $rule    Rule (type already known to be custom_css).
+	 * @param array<string,true> $touched Normalised set.
+	 * @return bool
+	 */
+	private static function css_rule_touches( array $rule, array $touched ) {
+		$target = isset( $rule['target'] ) && is_array( $rule['target'] ) ? $rule['target'] : array();
+		$raw    = array_key_exists( 'id', $target ) ? $target['id'] : null;
+		$any    = ( null === $raw || '*' === $raw );
+		$id     = $any ? '' : (string) $raw;
+		if ( ! $any && '' === $id ) {
+			return false; // an empty id names nothing — never site-wide
+		}
+		$effect = isset( $rule['effect'] ) ? (string) $rule['effect'] : '';
+
+		if ( 'allow' === $effect ) {
+			if ( ! $any ) {
+				return isset( $touched[ self::CSS_EXACT_PREFIX . $id ] );
+			}
+			foreach ( $touched as $key => $unused ) {
+				if ( 0 === strpos( $key, self::CSS_EXACT_PREFIX ) ) {
+					return true;
+				}
+			}
+			return false;
+		}
+
+		// block / warn: evidence fields do not matter; silence over-blocks.
+		if ( isset( $touched[ self::UNKNOWN . ':*' ] ) ) {
+			return true;
+		}
+		if ( $any ) {
+			foreach ( $touched as $key => $unused ) {
+				if ( 0 === strpos( $key, 'custom_css:' ) ) {
+					return true;
+				}
+			}
+			return false;
+		}
+		return isset( $touched[ 'custom_css:' . $id ] ) || isset( $touched['custom_css:*'] );
 	}
 
 	/* ------------------------------------------------------------------ */
