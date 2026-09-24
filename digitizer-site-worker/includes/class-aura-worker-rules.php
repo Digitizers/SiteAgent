@@ -571,6 +571,68 @@ class Aura_Worker_Rules {
 		return isset( $touched[ 'custom_css:' . $id ] ) || isset( $touched['custom_css:*'] );
 	}
 
+	/** Test seam: null = read the real constant; false = fork absent; string = that version. @var null|false|string */
+	private static $fork_version_for_tests = null;
+
+	/**
+	 * @since 2.20.0
+	 * @param null|false|string $version See the property.
+	 */
+	public static function _set_fork_version_for_tests( $version ) {
+		self::$fork_version_for_tests = $version;
+	}
+
+	/**
+	 * Can the loaded elementor-mcp say whether a write carries CSS?
+	 * `precise` — 1.37.0 or newer (css_touches); `widened` — an older or
+	 * unreadable version, so its page writes count as possible CSS;
+	 * `absent` — no fork. Reported on /status as css_rules.fork.
+	 *
+	 * @since 2.20.0
+	 * @return string
+	 */
+	public static function fork_css_state() {
+		$v = self::$fork_version_for_tests;
+		if ( null === $v ) {
+			$v = defined( 'ELEMENTOR_MCP_VERSION' ) ? (string) ELEMENTOR_MCP_VERSION : false;
+		}
+		if ( false === $v ) {
+			return 'absent';
+		}
+		if ( ! preg_match( '/^\d+\.\d+\.\d+$/', (string) $v ) ) {
+			return 'widened';
+		}
+		return version_compare( (string) $v, '1.37.0', '>=' ) ? 'precise' : 'widened';
+	}
+
+	/**
+	 * An old fork's page writes, read as possible CSS (spec §4.2). Only the
+	 * fork's own abilities; never evidence fields, so no allow can use them.
+	 *
+	 * @since 2.20.0
+	 * @param array  $touches   Declared touches.
+	 * @param string $tool_name Calling tool.
+	 * @return array
+	 */
+	private static function widen_for_old_fork( array $touches, $tool_name ) {
+		if ( 0 !== strpos( (string) $tool_name, 'elementor-mcp/' ) || 'widened' !== self::fork_css_state() ) {
+			return $touches;
+		}
+		$extra = array();
+		foreach ( $touches as $t ) {
+			if ( ! is_array( $t ) || ! isset( $t['type'], $t['id'] ) ) {
+				continue;
+			}
+			$type = (string) $t['type'];
+			if ( 'page' === $type || 'post' === $type ) {
+				$extra[ (string) $t['id'] ] = array( 'type' => 'custom_css', 'id' => (string) $t['id'] );
+			} elseif ( 'site' === $type ) {
+				$extra['*'] = array( 'type' => 'custom_css', 'id' => '*' );
+			}
+		}
+		return array_merge( $touches, array_values( $extra ) );
+	}
+
 	/* ------------------------------------------------------------------ */
 	/* The store — option-backed, signed, monotonic                        */
 	/* ------------------------------------------------------------------ */
@@ -2427,7 +2489,8 @@ class Aura_Worker_Rules {
 		// the preview path asks the same question of the same record, so the
 		// two can never disagree). The fork inherits this through enforce(),
 		// so its governance wrapper needs no change of its own.
-		$rule = self::enforceable_match( $touches, self::rules(), $now, self::site_ref() );
+		$touches = self::widen_for_old_fork( $touches, $tool_name );
+		$rule    = self::enforceable_match( $touches, self::rules(), $now, self::site_ref() );
 		if ( null === $rule ) {
 			return array( 'effect' => null );
 		}
