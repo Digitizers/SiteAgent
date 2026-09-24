@@ -142,7 +142,7 @@ final class ElementorDoorCssClassificationTest extends TestCase {
 
 	public function test_a_tuple_items_list_is_css_capable(): void {
 		$this->assertSame(
-			array( 'pair' ),
+			array( 'pair{unresolved}' ),
 			Aura_Worker_Elementor_Door::css_capable_paths( array( 'type' => 'object', 'properties' => array( 'pair' => array( 'type' => 'array', 'items' => array( array( 'type' => 'string' ), array( 'type' => 'integer' ) ) ) ) ) )
 		);
 	}
@@ -150,18 +150,18 @@ final class ElementorDoorCssClassificationTest extends TestCase {
 	public function test_a_combinator_is_css_capable(): void {
 		foreach ( array( 'anyOf', 'oneOf', 'allOf' ) as $k ) {
 			$this->assertSame(
-				array( 'value' ),
+				array( 'value{unresolved}' ),
 				Aura_Worker_Elementor_Door::css_capable_paths( array( 'type' => 'object', 'properties' => array( 'value' => array( $k => array( array( 'type' => 'string' ), array( 'type' => 'integer' ) ) ) ) ) ),
 				$k
 			);
-			$this->assertSame( array( '(root)' ), Aura_Worker_Elementor_Door::css_capable_paths( array( $k => array( array( 'type' => 'object' ) ) ) ), "{$k} at the root" );
+			$this->assertSame( array( '(root){unresolved}' ), Aura_Worker_Elementor_Door::css_capable_paths( array( $k => array( array( 'type' => 'object' ) ) ) ), "{$k} at the root" );
 		}
 	}
 
 	public function test_pattern_properties_are_css_capable(): void {
-		$this->assertSame( array( '(root)' ), Aura_Worker_Elementor_Door::css_capable_paths( array( 'type' => 'object', 'patternProperties' => array( '^x_' => array( 'type' => 'string' ) ) ) ) );
+		$this->assertSame( array( '(root){unresolved}' ), Aura_Worker_Elementor_Door::css_capable_paths( array( 'type' => 'object', 'patternProperties' => array( '^x_' => array( 'type' => 'string' ) ) ) ) );
 		$this->assertSame(
-			array( 'meta' ),
+			array( 'meta{unresolved}' ),
 			Aura_Worker_Elementor_Door::css_capable_paths( array( 'type' => 'object', 'properties' => array( 'meta' => array( 'type' => 'object', 'patternProperties' => array( '.*' => array( 'type' => 'string' ) ) ) ) ) )
 		);
 	}
@@ -241,5 +241,43 @@ final class ElementorDoorCssClassificationTest extends TestCase {
 			'input_schema'     => array( 'type' => 'object', 'properties' => array( 'post_id' => array( 'type' => 'integer' ) ) ),
 		) );
 		$this->assertSame( array(), Aura_Worker_Elementor_Door::css_touches_for( 'elementor/create-preview-link', array( 'post_id' => 42 ), '42' ) );
+	}
+
+	/**
+	 * Codex r1 on #135: an unresolved shape at a path that is ALREADY handled
+	 * or exempt must not be satisfied by that entry — it surfaces as a
+	 * distinct `{unresolved}` path no list names.
+	 */
+	public function test_an_unresolved_shape_on_a_handled_path_is_not_handled(): void {
+		$this->assertEqualsCanonicalizing(
+			array( 'settings', 'settings{unresolved}' ),
+			Aura_Worker_Elementor_Door::css_capable_paths( array( 'type' => 'object', 'properties' => array( 'settings' => array( 'oneOf' => array( array( 'type' => 'object' ), array( 'type' => 'object', 'properties' => array( 'extra_css' => array( 'type' => 'string' ) ) ) ) ) ) ) )
+		);
+		$this->assertEqualsCanonicalizing(
+			array( 'ops[]{unresolved}' ),
+			Aura_Worker_Elementor_Door::css_capable_paths( array( 'type' => 'object', 'properties' => array( 'ops' => array( 'type' => 'array', 'items' => array( 'type' => 'object', 'patternProperties' => array( '.*' => array( 'type' => 'string' ) ) ) ) ) ) )
+		);
+	}
+
+	public function test_a_producer_whose_handled_settings_became_one_of_is_conservative(): void {
+		$schema = $this->schemas()['elementor/update-page-settings'];
+		$schema['properties']['settings'] = array( 'oneOf' => array( array( 'type' => 'object' ), array( 'type' => 'object', 'properties' => array( 'extra_css' => array( 'type' => 'string' ) ) ) ) );
+		Aura_Worker_Elementor_Door::_set_schema_reader_for_tests( function ( $slug ) use ( $schema ) {
+			return 'elementor/update-page-settings' === $slug ? $schema : null;
+		} );
+		$this->assertSame(
+			array( array( 'type' => 'custom_css', 'id' => '42' ) ),
+			Aura_Worker_Elementor_Door::css_touches_for( 'elementor/update-page-settings', array( 'post_id' => 42, 'settings' => array( 'custom_css' => 'a{}' ) ), '42' )
+		);
+	}
+
+	public function test_a_no_css_slug_whose_exempt_path_became_any_of_is_conservative(): void {
+		$schema = $this->schemas()['elementor/manage-classes'];
+		$this->assertArrayHasKey( 'css', $schema['properties']['operations']['items']['properties'] );
+		$schema['properties']['operations']['items']['properties']['css'] = array( 'anyOf' => array( array( 'type' => 'string' ), array( 'type' => 'object' ) ) );
+		Aura_Worker_Elementor_Door::_set_schema_reader_for_tests( function ( $slug ) use ( $schema ) {
+			return 'elementor/manage-classes' === $slug ? $schema : null;
+		} );
+		$this->assertSame( array( array( 'type' => 'custom_css', 'id' => '*' ) ), Aura_Worker_Elementor_Door::css_touches_for( 'elementor/manage-classes', array(), '*' ) );
 	}
 }

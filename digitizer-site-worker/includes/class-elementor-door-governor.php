@@ -2950,6 +2950,16 @@ class Aura_Worker_Elementor_Door {
 		'elementor/manage-elements'      => array( 'operations[].settings', 'operations[].style', 'operations[].style_apply_mode' ), // style_apply_mode is the patch|replace merge mode, matched by the name net's "style" substring — never CSS text (controller ruling).
 	);
 
+	/**
+	 * Suffix for a node whose shape the walker does not resolve (combinator,
+	 * patternProperties, tuple items). No handled or exempt list names it, so
+	 * such a node always fails the drift check — even at a path that is
+	 * itself handled or exempt (Codex r1 on #135).
+	 *
+	 * @since 2.20.0
+	 */
+	const UNRESOLVED_SUFFIX = '{unresolved}';
+
 	/** @var callable|null test seam: fn( string $slug ): ?array @since 2.20.0 */
 	private static $schema_reader = null;
 
@@ -2987,12 +2997,15 @@ class Aura_Worker_Elementor_Door {
 		// Shapes this walker does not read into are CSS-capable as a whole —
 		// fail closed rather than silently pass (final review, Task 4 minor):
 		// keys matched by pattern, and combinators whose branches may differ.
+		// They surface under a distinct marker, never the plain path, so a
+		// handled or exempt entry for that path cannot absorb them (Codex r1
+		// on #135). Branches are not descended: the marker is the answer.
 		if ( ! empty( $schema['patternProperties'] ) ) {
-			$out[] = $here;
+			$out[] = $here . self::UNRESOLVED_SUFFIX;
 		}
 		foreach ( array( 'anyOf', 'oneOf', 'allOf' ) as $combinator ) {
 			if ( isset( $schema[ $combinator ] ) ) {
-				$out[] = $here;
+				$out[] = $here . self::UNRESOLVED_SUFFIX;
 			}
 		}
 		// Arrays: a single item schema is descended as `name[].child` (nested
@@ -3000,7 +3013,7 @@ class Aura_Worker_Elementor_Door {
 		if ( isset( $schema['items'] ) && is_array( $schema['items'] ) ) {
 			$items = $schema['items'];
 			if ( array() !== $items && array_keys( $items ) === range( 0, count( $items ) - 1 ) ) {
-				$out[] = $here;
+				$out[] = $here . self::UNRESOLVED_SUFFIX;
 			} else {
 				$out = array_merge( $out, self::css_capable_paths_raw( $items, ( '' === $prefix ? '' : $prefix ) . '[]' ) );
 			}
