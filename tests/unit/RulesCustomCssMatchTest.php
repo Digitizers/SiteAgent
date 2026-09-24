@@ -156,4 +156,31 @@ final class RulesCustomCssMatchTest extends TestCase {
 		$rule = $this->rule( 'allow', '42' );
 		$this->assertNull( Aura_Worker_Rules::enforceable_match( array( $this->exact( '42' ) ), array( $rule ) ) );
 	}
+
+	/**
+	 * Codex r1 on #135: exactness is per id and needs EVERY touch on that id.
+	 * A conservative twin on the same id must not be erased by an exact one,
+	 * in either order.
+	 */
+	public function test_an_exact_and_a_conservative_touch_on_the_same_id_is_not_exact(): void {
+		foreach ( array( array( $this->exact( '42' ), $this->css( '42' ) ), array( $this->css( '42' ), $this->exact( '42' ) ) ) as $i => $touches ) {
+			$this->assertNull( Aura_Worker_Rules::match( $touches, array( $this->rule( 'allow', '42' ) ) ), "id rule, order {$i}" );
+			$this->assertNull( Aura_Worker_Rules::match( $touches, array( $this->rule( 'allow' ) ) ), "id-less rule, order {$i}" );
+			$this->assertSame( 'block', Aura_Worker_Rules::match( $touches, array( $this->rule( 'block', '42' ) ) )['effect'], "block, order {$i}" );
+		}
+		// Evidence that is not literal true counts as inexact too.
+		$touches = array( $this->exact( '42' ), $this->css( '42', array( 'precise' => true, 'css_only' => 'yes' ) ) );
+		$this->assertNull( Aura_Worker_Rules::match( $touches, array( $this->rule( 'allow', '42' ) ) ) );
+	}
+
+	public function test_two_exact_touches_on_the_same_id_stay_exact(): void {
+		$touches = array( $this->exact( '42' ), $this->exact( '42' ) );
+		$this->assertSame( 'allow', Aura_Worker_Rules::match( $touches, array( $this->rule( 'allow', '42' ) ) )['effect'] );
+		$this->assertSame( 'allow', Aura_Worker_Rules::match( $touches, array( $this->rule( 'allow' ) ) )['effect'] );
+	}
+
+	public function test_exact_on_one_id_and_conservative_on_another_is_still_refused(): void {
+		$touches = array( $this->exact( '42' ), $this->css( '43' ) );
+		$this->assertNull( Aura_Worker_Rules::match( $touches, array( $this->rule( 'allow', '42' ) ) ) );
+	}
 }

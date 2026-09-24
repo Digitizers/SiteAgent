@@ -422,7 +422,8 @@ class Aura_Worker_Rules {
 	 * @return array<string,true> Set of "type:id".
 	 */
 	private static function normalize_touches( array $touches ) {
-		$set = array();
+		$set     = array();
+		$inexact = array(); // custom_css ids with at least one touch lacking evidence.
 		foreach ( $touches as $t ) {
 			if ( ! is_array( $t ) || ! isset( $t['type'], $t['id'] ) ) {
 				continue;
@@ -452,13 +453,22 @@ class Aura_Worker_Rules {
 			// Evidence fields (2.20.0): on a custom_css touch only, each only
 			// as the literal true, and only on a concrete id. Anything else is
 			// read as absent — the conservative reading (spec §3).
-			if ( 'custom_css' === $type
-				&& ctype_digit( $id )
-				&& isset( $t['precise'], $t['css_only'] )
-				&& true === $t['precise']
-				&& true === $t['css_only'] ) {
-				$set[ self::CSS_EXACT_PREFIX . $id ] = true;
+			if ( 'custom_css' === $type ) {
+				if ( ctype_digit( $id )
+					&& isset( $t['precise'], $t['css_only'] )
+					&& true === $t['precise']
+					&& true === $t['css_only'] ) {
+					$set[ self::CSS_EXACT_PREFIX . $id ] = true;
+				} else {
+					$inexact[ $id ] = true;
+				}
 			}
+		}
+		// Exactness is per id and needs EVERY touch on that id (Codex r1 on
+		// #135): one conservative touch on 42 beside an exact one must not be
+		// erased by it, or `allow custom_css:42` would admit the call.
+		foreach ( $inexact as $id => $unused ) {
+			unset( $set[ self::CSS_EXACT_PREFIX . $id ] );
 		}
 		if ( empty( $set ) ) {
 			// A declaration that survives normalisation as nothing — `[]`,
