@@ -17,7 +17,7 @@
   </a>
   <img src="https://img.shields.io/badge/WordPress-6.2%E2%80%937.1-21759b?logo=wordpress" alt="WordPress" />
   <img src="https://img.shields.io/badge/PHP-7.4%2B-777bb4?logo=php" alt="PHP" />
-  <img src="https://img.shields.io/badge/Stable-2.19.3-green" alt="Stable" />
+  <img src="https://img.shields.io/badge/Stable-2.20.0-green" alt="Stable" />
 </p>
 
 ---
@@ -238,6 +238,12 @@ These plug straight into **Aura's Fleet MCP Gateway**: read tools run on demand,
 ---
 
 ## Changelog
+
+### 2.20.0
+
+- **A rule can target custom CSS.** New rule target type `custom_css` (Digitizers/Aura#576): id = a post id, or id-less / `*` = every page, element and kit custom CSS. `block` / `warn` over-block — a `custom_css:<id>` rule matches a touch on that id or `custom_css:*`, an id-less rule matches any, and `unknown:*` matches every live CSS block/warn. `allow` is strict: it needs a touch with `precise: true` and `css_only: true`, and it fails closed for the whole call if anything else in it is unaccounted CSS. Clearing (`null` / whitespace) is not CSS. (#135)
+- **Elementor's own door declares CSS.** Every write ability is classified: `update-page-settings` and `manage-elements` are precise (CSS read from named arguments; any other field makes the call mixed; a CSS-named key other than `custom_css` in an open `settings` is CSS of unknown shape), `build-composition` and `manage-component` are conservative, global-class and tag-default CSS stay `design_system`. A write whose live input schema grew a CSS-capable path the classification does not handle declares conservatively. (#135)
+- **Older elementor-mcp forks are widened.** An `elementor-mcp/…` write from a fork that cannot declare CSS (below 1.37.0, or without `Elementor_MCP_Rules::css_touches()`) also counts as `custom_css` on its page (or `*` for site-wide) for block/warn — never for allow. `/status` reports `css_rules: { fork: precise | widened | absent }`. (#135)
 
 ### 2.19.3
 

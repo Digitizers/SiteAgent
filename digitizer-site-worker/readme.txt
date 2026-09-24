@@ -4,7 +4,7 @@ Tags: ai, automation, maintenance, updates, wordpress management
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.19.3
+Stable tag: 2.20.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -252,6 +252,9 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 7. Connections: provider connections (Cloudways, Cloudflare, Bunny, Hostinger, Vultr, xCloud) with resource counts, status, and credential-rotation reminders.
 
 == Changelog ==
+
+= 2.20.0 =
+* Rules can now target custom CSS: a rule of type `custom_css` blocks, warns about or allows writes that change a page's, an element's or the site kit's custom CSS, on one page or everywhere. Blocking is cautious: a write that might carry CSS counts. Allowing is strict: only a write the plugin can prove does nothing but set CSS is let through. No new settings; a ruleset without such rules behaves exactly as before.
 
 = 2.19.3 =
 * A third-party sandbox directory that is a link to a missing or unreachable location is now reported as a link, not as "no sandbox here". The audit checks for a link before it looks at what the link points to. Read-only; nothing changes on the site.
