@@ -40,10 +40,38 @@ final class RulesOldForkWideningTest extends TestCase {
 		$this->assertSame( 'absent', Aura_Worker_Rules::fork_css_state() );
 		Aura_Worker_Rules::_set_fork_version_for_tests( '1.36.1' );
 		$this->assertSame( 'widened', Aura_Worker_Rules::fork_css_state() );
-		Aura_Worker_Rules::_set_fork_version_for_tests( '1.37.0' );
+		Aura_Worker_Rules::_set_fork_version_for_tests( '1.37.0', true );
 		$this->assertSame( 'precise', Aura_Worker_Rules::fork_css_state() );
-		Aura_Worker_Rules::_set_fork_version_for_tests( 'not-a-version' );
+		Aura_Worker_Rules::_set_fork_version_for_tests( 'not-a-version', true );
 		$this->assertSame( 'widened', Aura_Worker_Rules::fork_css_state(), 'unreadable counts as old' );
+	}
+
+	/**
+	 * Final review I1: `precise` needs the capability, not just the number.
+	 * A 1.37.0 that ships no Elementor_MCP_Rules::css_touches() is widened;
+	 * so is an older fork that somehow has it.
+	 */
+	public function test_precise_needs_css_touches_as_well_as_the_version(): void {
+		Aura_Worker_Rules::_set_fork_version_for_tests( '1.37.0', false );
+		$this->assertSame( 'widened', Aura_Worker_Rules::fork_css_state() );
+		Aura_Worker_Rules::_set_fork_version_for_tests( '1.36.1', true );
+		$this->assertSame( 'widened', Aura_Worker_Rules::fork_css_state() );
+		Aura_Worker_Rules::_set_fork_version_for_tests( '1.38.0', true );
+		$this->assertSame( 'precise', Aura_Worker_Rules::fork_css_state() );
+	}
+
+	public function test_absent_capability_derives_from_the_loaded_code(): void {
+		// null = ask method_exists(); this process defines no Elementor_MCP_Rules.
+		$this->assertFalse( class_exists( 'Elementor_MCP_Rules', false ) );
+		Aura_Worker_Rules::_set_fork_version_for_tests( '1.37.0' );
+		$this->assertSame( 'widened', Aura_Worker_Rules::fork_css_state() );
+	}
+
+	public function test_a_1_37_fork_without_css_touches_is_still_widened(): void {
+		Aura_Worker_Rules::_set_fork_version_for_tests( '1.37.0', false );
+		$this->store( array( $this->css_rule( 'block', '42' ) ) );
+		$v = Aura_Worker_Rules::enforce( array( array( 'type' => 'page', 'id' => '42' ) ), 'elementor-mcp/update-element' );
+		$this->assertSame( 'block', $v['effect'] );
 	}
 
 	public function test_an_old_fork_page_edit_is_blocked_by_a_css_block(): void {
@@ -61,7 +89,7 @@ final class RulesOldForkWideningTest extends TestCase {
 	}
 
 	public function test_a_current_fork_is_not_widened(): void {
-		Aura_Worker_Rules::_set_fork_version_for_tests( '1.37.0' );
+		Aura_Worker_Rules::_set_fork_version_for_tests( '1.37.0', true );
 		$this->store( array( $this->css_rule( 'block', '42' ) ) );
 		$v = Aura_Worker_Rules::enforce( array( array( 'type' => 'page', 'id' => '42' ) ), 'elementor-mcp/update-element' );
 		$this->assertNull( $v['effect'] );

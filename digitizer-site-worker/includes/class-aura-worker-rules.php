@@ -575,18 +575,38 @@ class Aura_Worker_Rules {
 	private static $fork_version_for_tests = null;
 
 	/**
+	 * Test seam: null = ask the loaded code (method_exists); bool = pretend
+	 * Elementor_MCP_Rules::css_touches() is (true) or is not (false) there.
+	 *
 	 * @since 2.20.0
-	 * @param null|false|string $version See the property.
+	 * @var null|bool
 	 */
-	public static function _set_fork_version_for_tests( $version ) {
-		self::$fork_version_for_tests = $version;
+	private static $fork_css_touches_for_tests = null;
+
+	/**
+	 * @since 2.20.0
+	 * @param null|false|string $version         See the property.
+	 * @param null|bool         $has_css_touches See $fork_css_touches_for_tests.
+	 */
+	public static function _set_fork_version_for_tests( $version, $has_css_touches = null ) {
+		self::$fork_version_for_tests     = $version;
+		self::$fork_css_touches_for_tests = $has_css_touches;
 	}
 
 	/**
 	 * Can the loaded elementor-mcp say whether a write carries CSS?
-	 * `precise` — 1.37.0 or newer (css_touches); `widened` — an older or
-	 * unreadable version, so its page writes count as possible CSS;
-	 * `absent` — no fork. Reported on /status as css_rules.fork.
+	 * `precise` — 1.37.0 or newer AND it ships Elementor_MCP_Rules::css_touches();
+	 * `widened` — the fork is loaded but fails either test, so its page
+	 * writes count as possible CSS; `absent` — no fork. Reported on /status
+	 * as css_rules.fork.
+	 *
+	 * Why both: a version number is not a capability (final review I1). The
+	 * 1.37.0 floor assumes that release is the one Plan B ships with the
+	 * public static Elementor_MCP_Rules::css_touches(); if any other change
+	 * went out as 1.37.0 first, a version-only check would stop widening a
+	 * fork that declares no custom_css touches, and every `block custom_css`
+	 * would silently stop matching its writes. Requiring the method too
+	 * fails toward over-blocking, never under.
 	 *
 	 * @since 2.20.0
 	 * @return string
@@ -602,7 +622,14 @@ class Aura_Worker_Rules {
 		if ( ! preg_match( '/^\d+\.\d+\.\d+$/', (string) $v ) ) {
 			return 'widened';
 		}
-		return version_compare( (string) $v, '1.37.0', '>=' ) ? 'precise' : 'widened';
+		if ( ! version_compare( (string) $v, '1.37.0', '>=' ) ) {
+			return 'widened';
+		}
+		$capable = self::$fork_css_touches_for_tests;
+		if ( null === $capable ) {
+			$capable = class_exists( 'Elementor_MCP_Rules' ) && method_exists( 'Elementor_MCP_Rules', 'css_touches' );
+		}
+		return true === $capable ? 'precise' : 'widened';
 	}
 
 	/**
