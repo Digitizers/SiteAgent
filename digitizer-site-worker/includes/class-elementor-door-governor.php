@@ -2898,11 +2898,164 @@ class Aura_Worker_Elementor_Door {
 	}
 
 	/**
+	 * How each WRITE_TABLE slug relates to custom CSS (spec 2026-09-24 §4.2,
+	 * plan rulings R1/R2). `precise` — CSS is read from named arguments;
+	 * `conservative` — CSS may be inside content this class does not parse.
+	 * Every WRITE_TABLE slug is in exactly one of CSS_PRODUCERS / NO_CSS
+	 * (ElementorDoorCssClassificationTest).
+	 *
+	 * @since 2.20.0
+	 */
+	const CSS_PRODUCERS = array(
+		'elementor/update-page-settings' => 'precise',
+		'elementor/manage-elements'      => 'precise',
+		'elementor/build-composition'    => 'conservative',
+		'elementor/manage-component'     => 'conservative',
+	);
+
+	/**
+	 * Writes that carry no custom CSS, each with the reason. A `css`-named
+	 * property listed under `exempt` is design-system CSS (global classes,
+	 * tag defaults) — plan ruling R1 — and is the ONLY CSS-capable property
+	 * the schema guard tolerates for that slug.
+	 *
+	 * @since 2.20.0
+	 */
+	const NO_CSS = array(
+		'elementor/publish-document'       => array( 'reason' => 'promotes an already-judged autosave', 'exempt' => array() ),
+		'elementor/create-preview-link'    => array( 'reason' => 'mints a preview URL; writes no content', 'exempt' => array() ),
+		'elementor/create-page'            => array( 'reason' => 'creates an empty document', 'exempt' => array() ),
+		'elementor/manage-classes'         => array( 'reason' => 'global-class CSS — design_system (R1)', 'exempt' => array( 'operations[].css' ) ),
+		'elementor/manage-default-styles'  => array( 'reason' => 'tag default styles — design_system (R1)', 'exempt' => array( 'operations[].css' ) ),
+		'elementor/reorder-classes'        => array( 'reason' => 'reorders class ids; no style content', 'exempt' => array() ),
+		'elementor/manage-global-variable' => array( 'reason' => 'a variable value, not a stylesheet', 'exempt' => array() ),
+	);
+
+	/**
+	 * CSS value classification. `null` / whitespace string = clearing (not CSS);
+	 * a non-empty string = CSS read from the argument; anything else non-empty =
+	 * CSS of unknown shape.
+	 *
+	 * @since 2.20.0
+	 * @param mixed $v Value.
+	 * @return string 'none'|'css'|'unknown'
+	 */
+	private static function css_value( $v ) {
+		if ( null === $v ) {
+			return 'none';
+		}
+		if ( is_string( $v ) ) {
+			return '' === trim( $v ) ? 'none' : 'css';
+		}
+		return empty( $v ) && false !== $v && 0 !== $v ? 'none' : 'unknown';
+	}
+
+	/**
+	 * The custom_css touches a door write declares, in addition to its
+	 * page/post/design_system ones. Pure.
+	 *
+	 * @since 2.20.0
+	 * @param string $slug  Ability.
+	 * @param array  $input Input.
+	 * @param string $id    Resolved post id, or '*'.
+	 * @return array
+	 */
+	public static function css_touches_for( $slug, array $input, $id ) {
+		$id   = (string) $id;
+		$kind = isset( self::CSS_PRODUCERS[ $slug ] ) ? self::CSS_PRODUCERS[ $slug ] : null;
+		if ( null === $kind ) {
+			return array();
+		}
+		if ( 'conservative' === $kind ) {
+			return array( array( 'type' => 'custom_css', 'id' => $id ) );
+		}
+		$found    = 'none';   // none | css | unknown
+		$css_only = true;
+		if ( 'elementor/update-page-settings' === $slug ) {
+			$settings = isset( $input['settings'] ) && is_array( $input['settings'] ) ? $input['settings'] : array();
+			$found    = array_key_exists( 'custom_css', $settings ) ? self::css_value( $settings['custom_css'] ) : 'none';
+			// The WHOLE input, not just `settings` (Codex r4): any other
+			// top-level field is an effect this allow never looked at.
+			$css_only = array( 'custom_css' ) === array_keys( $settings )
+				&& array() === array_diff( array_keys( $input ), array( 'post_id', 'settings' ) );
+		} elseif ( 'elementor/manage-elements' === $slug ) {
+			$ops = isset( $input['operations'] ) ? $input['operations'] : null;
+			if ( array() !== array_diff( array_keys( $input ), array( 'post_id', 'operations' ) ) ) {
+				$css_only = false; // an unknown top-level field is an unreviewed effect (Codex r4)
+			}
+			if ( ! is_array( $ops ) ) {
+				return array( array( 'type' => 'custom_css', 'id' => $id ) );
+			}
+			foreach ( $ops as $op ) {
+				if ( ! is_array( $op ) ) {
+					$found    = 'unknown';
+					$css_only = false;
+					continue;
+				}
+				$op_css = 'none';
+				if ( array_key_exists( 'style', $op ) ) {
+					$op_css = self::css_value( $op['style'] );
+				}
+				$settings = isset( $op['settings'] ) && is_array( $op['settings'] ) ? $op['settings'] : array();
+				if ( array_key_exists( 'custom_css', $settings ) ) {
+					$s      = self::css_value( $settings['custom_css'] );
+					$op_css = 'unknown' === $s || 'unknown' === $op_css ? 'unknown' : ( 'css' === $s ? 'css' : $op_css );
+				}
+				if ( 'unknown' === $op_css || ( 'css' === $op_css && 'unknown' !== $found ) ) {
+					$found = 'unknown' === $op_css ? 'unknown' : 'css';
+				}
+				$only_css_keys = ( isset( $op['action'] ) && 'update' === $op['action'] )
+					&& array() === array_diff( array_keys( $op ), array( 'action', 'element_id', 'style', 'style_apply_mode', 'settings' ) )
+					&& array() === array_diff( array_keys( $settings ), array( 'custom_css' ) )
+					&& 'none' !== $op_css;
+				if ( ! $only_css_keys ) {
+					$css_only = false;
+				}
+			}
+		}
+		if ( 'none' === $found ) {
+			return array();
+		}
+		$touch = array( 'type' => 'custom_css', 'id' => $id );
+		if ( 'css' === $found && ctype_digit( $id ) ) {
+			$touch['precise'] = true;
+			if ( $css_only ) {
+				$touch['css_only'] = true;
+			}
+		}
+		return array( $touch );
+	}
+
+	/**
 	 * @param string $slug  Ability.
 	 * @param array  $input Input.
 	 * @return array|WP_Error touches, or aura_target_unattributed.
 	 */
 	public static function touches_for( $slug, array $input ) {
+		$base = self::base_touches_for( $slug, $input );
+		if ( is_wp_error( $base ) ) {
+			return $base;
+		}
+		// The CSS declaration rides EVERY kind (spec 2026-09-24 §4.2): a
+		// `page`-kind write names its post (the FIRST touch base_touches_for()
+		// returns for that kind); every other kind is site-wide — including a
+		// class deletion, whose extra page touches are collateral, not the
+		// write's own target.
+		$kind = isset( self::WRITE_TABLE[ $slug ] ) ? self::WRITE_TABLE[ $slug ] : null;
+		$id   = ( 'page' === $kind && isset( $base[0]['id'] ) ) ? (string) $base[0]['id'] : '*';
+		return array_merge( $base, self::css_touches_for( $slug, $input, $id ) );
+	}
+
+	/**
+	 * The target/collateral touches for a governed write, before the CSS
+	 * declaration `touches_for()` appends (spec 2026-09-24 §4.2).
+	 *
+	 * @since 2.20.0
+	 * @param string $slug  Ability.
+	 * @param array  $input Input.
+	 * @return array|WP_Error touches, or aura_target_unattributed.
+	 */
+	private static function base_touches_for( $slug, array $input ) {
 		$kind = isset( self::WRITE_TABLE[ $slug ] ) ? self::WRITE_TABLE[ $slug ] : null;
 		switch ( $kind ) {
 			case 'page':
