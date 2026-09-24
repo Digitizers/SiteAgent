@@ -16,6 +16,20 @@ the judgement call this file exists to avoid.
 
 Newest first, continuing exactly where `readme.txt`'s Changelog stops.
 
+= 2.12.0 =
+* Feature: **a rule can now apply to some of a client's sites instead of all
+  of them.** Aura's signed ruleset names the site each document was issued
+  for, SiteAgent stores that identity, and a rule that lists the sites it
+  applies to is enforced only where it belongs. Rules that name no sites are
+  client-wide exactly as before.
+* Safety: a site that cannot prove its own identity — an older record, a
+  document issued before this field existed — enforces EVERY rule rather than
+  skipping the ones it cannot place. Scoping only ever narrows on proof.
+* Upgrade: the identity is recovered offline from the ruleset already stored,
+  by re-verifying its signature locally. No new network traffic, and a site
+  whose ruleset has not changed since the upgrade is repaired on its next
+  request rather than waiting for the next push.
+
 = 2.11.0 =
 * Feature: **the magic-link connect now mints an Application Password for
   the dashboard.** A magic-link connection could run SiteAgent's own tools
