@@ -184,4 +184,28 @@ final class ElementorDoorCssTouchesTest extends TestCase {
 			$this->assertNotSame( 'custom_css', $t['type'] );
 		}
 	}
+
+	/* ---- Codex r2 on #135: CSS-named keys in an open settings container ---- */
+
+	public function test_a_css_named_page_setting_is_css_of_unknown_shape(): void {
+		$conservative = array( array( 'type' => 'custom_css', 'id' => '42' ) );
+		$this->assertSame( $conservative, $this->t( 'elementor/update-page-settings', array( 'post_id' => 42, 'settings' => array( 'extra_css' => 'a{}' ) ) ) );
+		$this->assertSame( $conservative, $this->t( 'elementor/update-page-settings', array( 'post_id' => 42, 'settings' => array( 'custom_css' => 'a{}', 'extra_css' => 'b{}' ) ) ), 'no precise evidence' );
+		$this->assertSame( $conservative, $this->t( 'elementor/update-page-settings', array( 'post_id' => 42, 'settings' => array( 'Page_CSS' => array( 'a' => 'b' ) ) ) ), 'case-insensitive, any non-empty shape' );
+	}
+
+	public function test_css_named_exceptions_and_clearing_declare_nothing(): void {
+		foreach ( array( array( '_css_classes' => 'x' ), array( 'css_filters_blur' => 3 ), array( 'css_filters_css_filter' => 'custom' ), array( 'extra_css' => '  ' ), array( 'extra_css' => null ), array( 'button_style' => 'a{}' ) ) as $settings ) {
+			$this->assertSame( array(), $this->t( 'elementor/update-page-settings', array( 'post_id' => 42, 'settings' => $settings ) ), wp_json_encode( $settings ) );
+		}
+	}
+
+	public function test_a_css_named_op_setting_is_css_of_unknown_shape(): void {
+		$in = array( 'operations' => array( array( 'action' => 'update', 'element_id' => 'a1', 'settings' => array( 'my_css' => 'a{}' ) ) ) );
+		$this->assertSame( array( array( 'type' => 'custom_css', 'id' => '42' ) ), $this->t( 'elementor/manage-elements', $in ) );
+		$in = array( 'operations' => array( array( 'action' => 'update', 'element_id' => 'a1', 'style' => 'color:red', 'settings' => array( 'my_css' => 'a{}' ) ) ) );
+		$this->assertSame( array( array( 'type' => 'custom_css', 'id' => '42' ) ), $this->t( 'elementor/manage-elements', $in ), 'beside precise CSS' );
+		$in = array( 'operations' => array( array( 'action' => 'update', 'element_id' => 'a1', 'settings' => array( '_css_classes' => 'x', 'css_filters_blur' => 2 ) ) ) );
+		$this->assertSame( array(), $this->t( 'elementor/manage-elements', $in ), 'exceptions' );
+	}
 }

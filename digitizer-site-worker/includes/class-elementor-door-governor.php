@@ -2951,6 +2951,36 @@ class Aura_Worker_Elementor_Door {
 	);
 
 	/**
+	 * A key inside an open `settings` container (update-page-settings, and
+	 * each manage-elements op) whose name matches this is CSS of unknown
+	 * shape, unless it is `custom_css` itself (read precisely) or one of the
+	 * exceptions below (Codex r2 on #135). The 4.3 schema declares page
+	 * `settings` with additionalProperties: true, so Elementor could start
+	 * honouring e.g. `extra_css` there with no schema change the drift check
+	 * would see. `style` is deliberately NOT matched: element settings are
+	 * full of `*_style` controls, and matching them would over-block.
+	 *
+	 * @since 2.20.0
+	 */
+	const SETTINGS_CSS_KEY_PATTERN = '/css/i';
+
+	/**
+	 * CSS-named settings keys that are ordinary controls, not stylesheets:
+	 * `_css_classes` holds class names. They only make a call mixed.
+	 *
+	 * @since 2.20.0
+	 */
+	const SETTINGS_CSS_KEY_EXCEPTIONS = array( '_css_classes' );
+
+	/**
+	 * Prefix of Elementor's CSS-filter control group (`css_filters_blur`,
+	 * …): structured controls, not custom CSS.
+	 *
+	 * @since 2.20.0
+	 */
+	const SETTINGS_CSS_KEY_EXCEPTION_PREFIX = 'css_filters';
+
+	/**
 	 * Suffix for a node whose shape the walker does not resolve (combinator,
 	 * patternProperties, tuple items). No handled or exempt list names it, so
 	 * such a node always fails the drift check — even at a path that is
@@ -3076,6 +3106,32 @@ class Aura_Worker_Elementor_Door {
 	}
 
 	/**
+	 * 'unknown' when a settings container carries a non-empty CSS-named key
+	 * other than `custom_css` (see SETTINGS_CSS_KEY_PATTERN); else 'none'.
+	 * The value is read like custom_css: null / whitespace / empty array
+	 * clears and declares nothing.
+	 *
+	 * @since 2.20.0
+	 * @param array $settings Settings container.
+	 * @return string 'none'|'unknown'
+	 */
+	private static function other_css_keys( array $settings ) {
+		foreach ( $settings as $key => $value ) {
+			$key = (string) $key;
+			if ( 'custom_css' === $key
+				|| in_array( $key, self::SETTINGS_CSS_KEY_EXCEPTIONS, true )
+				|| 0 === strpos( $key, self::SETTINGS_CSS_KEY_EXCEPTION_PREFIX )
+				|| ! preg_match( self::SETTINGS_CSS_KEY_PATTERN, $key ) ) {
+				continue;
+			}
+			if ( 'none' !== self::css_value( $value ) ) {
+				return 'unknown';
+			}
+		}
+		return 'none';
+	}
+
+	/**
 	 * The custom_css touches a door write declares, in addition to its
 	 * page/post/design_system ones. Pure.
 	 *
@@ -3127,6 +3183,11 @@ class Aura_Worker_Elementor_Door {
 				// top-level field is an effect this allow never looked at.
 				$css_only = array( 'custom_css' ) === array_keys( $settings )
 					&& array() === array_diff( array_keys( $input ), array( 'post_id', 'settings' ) );
+				// Another CSS-named key: CSS this handler does not read (Codex r2).
+				if ( 'unknown' === self::other_css_keys( $settings ) ) {
+					$found    = 'unknown';
+					$css_only = false;
+				}
 			}
 		} elseif ( 'elementor/manage-elements' === $slug ) {
 			$ops = isset( $input['operations'] ) ? $input['operations'] : null;
@@ -3154,6 +3215,11 @@ class Aura_Worker_Elementor_Door {
 				} elseif ( array_key_exists( 'custom_css', $settings ) ) {
 					$s      = self::css_value( $settings['custom_css'] );
 					$op_css = 'unknown' === $s || 'unknown' === $op_css ? 'unknown' : ( 'css' === $s ? 'css' : $op_css );
+				}
+				if ( 'unknown' === self::other_css_keys( $settings ) ) {
+					// Another CSS-named key: CSS this handler does not read (Codex r2).
+					$op_css   = 'unknown';
+					$css_only = false;
 				}
 				if ( 'unknown' === $op_css || ( 'css' === $op_css && 'unknown' !== $found ) ) {
 					$found = 'unknown' === $op_css ? 'unknown' : 'css';
