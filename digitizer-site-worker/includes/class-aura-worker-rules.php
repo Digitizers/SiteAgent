@@ -242,7 +242,7 @@ class Aura_Worker_Rules {
 	 *
 	 * @since 2.20.0
 	 */
-	const CSS_EXACT_PREFIX = 'custom_css!exact:';
+	private const CSS_EXACT_PREFIX = 'custom_css!exact:';
 
 	/** Target types that carry no id — a rule on them names the whole category. */
 	const ID_LESS_TYPES = array( 'site', 'design_system', 'page_create' );
@@ -532,6 +532,19 @@ class Aura_Worker_Rules {
 		$effect = isset( $rule['effect'] ) ? (string) $rule['effect'] : '';
 
 		if ( 'allow' === $effect ) {
+			// Fail closed at the SET level (review #1): an allow admits a call
+			// only when EVERY custom_css touch it declared is precise. One
+			// exact touch riding alongside a conservative, create-time or
+			// unknown declaration must not buy the whole call an allow.
+			if ( isset( $touched[ self::UNKNOWN . ':*' ] ) || isset( $touched['custom_css:*'] ) ) {
+				return false;
+			}
+			foreach ( $touched as $key => $unused ) {
+				if ( 0 === strpos( $key, 'custom_css:' )
+					&& ! isset( $touched[ self::CSS_EXACT_PREFIX . substr( $key, strlen( 'custom_css:' ) ) ] ) ) {
+					return false;
+				}
+			}
 			if ( ! $any ) {
 				return isset( $touched[ self::CSS_EXACT_PREFIX . $id ] );
 			}

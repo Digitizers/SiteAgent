@@ -110,4 +110,50 @@ final class RulesCustomCssMatchTest extends TestCase {
 		$freeze = array( 'key' => 'rule/freeze', 'effect' => 'block', 'target' => array( 'type' => 'site', 'id' => null ), 'reason' => 'x', 'until' => null );
 		$this->assertNotNull( Aura_Worker_Rules::match( array( $this->exact( '42' ) ), array( $freeze ) ) );
 	}
+
+	// Review round 1, Important #1 (controller ruling): an allow admits a
+	// call only when EVERY custom_css touch it declared is precise — one
+	// exact touch riding alongside a conservative, create-time or unknown
+	// declaration must not buy the whole call an allow.
+
+	public function test_allow_never_admits_a_set_that_also_carries_the_create_wildcard(): void {
+		$touches = array( $this->exact( '42' ), $this->css( '*' ) );
+		$this->assertNull( Aura_Worker_Rules::match( $touches, array( $this->rule( 'allow', '42' ) ) ), 'id rule' );
+		$this->assertNull( Aura_Worker_Rules::match( $touches, array( $this->rule( 'allow' ) ) ), 'id-less rule' );
+	}
+
+	public function test_allow_never_admits_a_set_that_also_carries_a_conservative_touch_on_another_id(): void {
+		$touches = array( $this->exact( '42' ), $this->css( '43' ) );
+		$this->assertNull( Aura_Worker_Rules::match( $touches, array( $this->rule( 'allow', '42' ) ) ), 'id rule' );
+		$this->assertNull( Aura_Worker_Rules::match( $touches, array( $this->rule( 'allow' ) ) ), 'id-less rule' );
+	}
+
+	public function test_allow_never_admits_a_set_that_also_carries_unknown(): void {
+		$touches = array( $this->exact( '42' ), array( 'type' => 'unknown', 'id' => '*' ) );
+		$this->assertNull( Aura_Worker_Rules::match( $touches, array( $this->rule( 'allow', '42' ) ) ), 'id rule' );
+		$this->assertNull( Aura_Worker_Rules::match( $touches, array( $this->rule( 'allow' ) ) ), 'id-less rule' );
+	}
+
+	public function test_allow_still_admits_a_precise_css_touch_alongside_its_own_page_and_post_touches(): void {
+		$touches = array( $this->exact( '42' ), array( 'type' => 'page', 'id' => '42' ), array( 'type' => 'post', 'id' => '42' ) );
+		$this->assertNotNull( Aura_Worker_Rules::match( $touches, array( $this->rule( 'allow', '42' ) ) ) );
+	}
+
+	// Review round 1, Minor #3.
+
+	public function test_a_rule_target_with_no_id_key_at_all_behaves_as_id_less(): void {
+		$rule = array(
+			'key'    => 'rule/css',
+			'effect' => 'warn',
+			'target' => array( 'type' => 'custom_css' ), // no 'id' key at all
+			'reason' => 'x',
+			'until'  => null,
+		);
+		$this->assertNotNull( Aura_Worker_Rules::match( array( $this->css( '42' ) ), array( $rule ) ) );
+	}
+
+	public function test_enforceable_match_treats_a_css_allow_winner_as_no_rule(): void {
+		$rule = $this->rule( 'allow', '42' );
+		$this->assertNull( Aura_Worker_Rules::enforceable_match( array( $this->exact( '42' ) ), array( $rule ) ) );
+	}
 }
