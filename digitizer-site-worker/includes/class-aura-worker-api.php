@@ -663,6 +663,10 @@ class Aura_Worker_API {
 			);
 		}
 
+		// Whether this site's elementor-mcp can say a write carried CSS (2.20.0,
+		// Aura spec 2026-09-24 §4.2). An OBJECT on the wire, like `unbound`.
+		$status['css_rules'] = (object) array( 'fork' => Aura_Worker_Rules::fork_css_state() );
+
 		return rest_ensure_response( $status );
 	}
 
