@@ -528,7 +528,9 @@ class Aura_Tool_Audit_Agent_Code extends Aura_Tool_Base {
 	protected function third_party_env() {
 		return array(
 			'emcp_version' => defined( 'EMCP_TOOLS_VERSION' ) ? (string) EMCP_TOOLS_VERSION : '',
-			'emcp_dir'     => is_dir( $this->emcp_store_dir() ),
+			// is_link() first: is_dir() follows a link, so a dangling one read
+			// as "no store" and a live one was resolved (2.19.3).
+			'emcp_dir'     => is_link( $this->emcp_store_dir() ) || is_dir( $this->emcp_store_dir() ),
 			'atarim'       => class_exists( 'AVCF_Abilities_ExecutePHP' ) || class_exists( 'AVCF_Abilities_WP_CLI' ),
 		);
 	}
@@ -564,11 +566,13 @@ class Aura_Tool_Audit_Agent_Code extends Aura_Tool_Base {
 	protected function emcp_store() {
 		try {
 			$root = $this->emcp_store_dir();
-			if ( ! is_dir( $root ) ) {
-				return null;
-			}
+			// The link test comes first: is_dir() resolves a link, so a root
+			// link whose target is missing would read as "no store" (2.19.3).
 			if ( is_link( $root ) ) {
 				return array( 'error' => 'sandbox_is_link' );
+			}
+			if ( ! is_dir( $root ) ) {
+				return null;
 			}
 
 			$cap    = (int) $this->emcp_store_cap();

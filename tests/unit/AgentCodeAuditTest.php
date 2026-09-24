@@ -532,6 +532,20 @@ final class AgentCodeAuditTest extends TestCase {
 		$this->assertSame( array( 'error' => 'sandbox_is_link' ), $e['store'] );
 	}
 
+	public function test_a_dangling_sandbox_root_link_is_present_and_reported_as_a_link(): void {
+		// Codex r1 on #129: is_dir() follows the link, so a root link whose
+		// target is missing read as "no store at all". The link itself is the
+		// presence, judged before anything resolves it.
+		if ( ! @symlink( WP_CONTENT_DIR . '/no-such-target', WP_CONTENT_DIR . '/emcp-sandbox' ) ) {
+			$this->markTestSkipped( 'symlinks unavailable on this filesystem' );
+		}
+
+		$e = $this->emcp();
+
+		$this->assertTrue( $e['present'], 'a dangling link at the sandbox path is still a store on this site' );
+		$this->assertSame( array( 'error' => 'sandbox_is_link' ), $e['store'] );
+	}
+
 	public function test_a_throwing_walk_stays_inside_the_store_and_its_siblings_still_answer(): void {
 		$root = $this->sandbox( array( 'a.php' => 1757400000 ) );
 
