@@ -112,6 +112,9 @@ final class RulesOldForkWideningTest extends TestCase {
 	public function test_widening_never_speaks_for_allow(): void {
 		Aura_Worker_Rules::_set_fork_version_for_tests( '1.36.1' );
 		$widen   = new ReflectionMethod( 'Aura_Worker_Rules', 'widen_for_old_fork' );
+		if ( PHP_VERSION_ID < 80100 ) {
+			$widen->setAccessible( true ); // a no-op since 8.1, deprecated in 8.5
+		}
 		$widened = $widen->invoke( null, array( array( 'type' => 'page', 'id' => '42' ) ), 'elementor-mcp/update-element' );
 		$this->assertContains( array( 'type' => 'custom_css', 'id' => '42' ), $widened, 'the old fork IS widened' );
 
