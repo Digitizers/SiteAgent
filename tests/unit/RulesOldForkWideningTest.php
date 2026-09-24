@@ -104,10 +104,30 @@ final class RulesOldForkWideningTest extends TestCase {
 		}
 	}
 
+	/**
+	 * Non-vacuous (Task 2 review minor 1): enforce() drops every allow
+	 * winner anyway, so this asks match() itself — the matcher the door
+	 * uses for allow. The widened touch set is the one enforce() builds.
+	 */
 	public function test_widening_never_speaks_for_allow(): void {
 		Aura_Worker_Rules::_set_fork_version_for_tests( '1.36.1' );
-		$this->store( array( $this->css_rule( 'allow', '42' ) ) );
+		$widen   = new ReflectionMethod( 'Aura_Worker_Rules', 'widen_for_old_fork' );
+		$widened = $widen->invoke( null, array( array( 'type' => 'page', 'id' => '42' ) ), 'elementor-mcp/update-element' );
+		$this->assertContains( array( 'type' => 'custom_css', 'id' => '42' ), $widened, 'the old fork IS widened' );
+
+		$allow = array( $this->css_rule( 'allow', '42' ) );
+		// Control: a precise CSS-only touch does satisfy this allow…
+		$this->assertSame( 'allow', Aura_Worker_Rules::match( array( array( 'type' => 'page', 'id' => '42' ), array( 'type' => 'custom_css', 'id' => '42', 'precise' => true, 'css_only' => true ) ), $allow )['effect'] );
+		// …the widened touch never does.
+		$this->assertNull( Aura_Worker_Rules::match( $widened, $allow ) );
+
+		// Paired with a warn: the widened touch reaches the warn, never the allow.
+		$this->store( array( $this->css_rule( 'allow', '42' ), array( 'key' => 'rule/css-warn', 'effect' => 'warn', 'target' => array( 'type' => 'custom_css', 'id' => '42' ), 'reason' => 'careful', 'until' => null ) ) );
 		$v = Aura_Worker_Rules::enforce( array( array( 'type' => 'page', 'id' => '42' ) ), 'elementor-mcp/update-element' );
-		$this->assertNull( $v['effect'] );
+		$this->assertSame( 'warn', $v['effect'] );
+		$this->assertSame( 'rule/css-warn', $v['rule']['key'] );
+		Aura_Worker_Rules::reset_records();
+		Aura_Worker_Rules::_set_fork_version_for_tests( '1.37.0', true );
+		$this->assertNull( Aura_Worker_Rules::enforce( array( array( 'type' => 'page', 'id' => '42' ) ), 'elementor-mcp/update-element' )['effect'], 'a current fork declares nothing here' );
 	}
 }

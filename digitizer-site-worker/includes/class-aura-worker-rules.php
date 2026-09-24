@@ -571,7 +571,12 @@ class Aura_Worker_Rules {
 		return isset( $touched[ 'custom_css:' . $id ] ) || isset( $touched['custom_css:*'] );
 	}
 
-	/** Test seam: null = read the real constant; false = fork absent; string = that version. @var null|false|string */
+	/**
+	 * Test seam: null = read the real constant; false = fork absent; string = that version.
+	 *
+	 * @since 2.20.0
+	 * @var null|false|string
+	 */
 	private static $fork_version_for_tests = null;
 
 	/**
