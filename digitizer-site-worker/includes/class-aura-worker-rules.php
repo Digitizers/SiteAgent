@@ -230,8 +230,19 @@ class Aura_Worker_Rules {
 		return $sum;
 	}
 
-	/** The only resource types a rule may name. Anything else never matches. */
-	const TYPES = array( 'site', 'page', 'post', 'plugin', 'design_system', 'page_create' );
+	/** The only resource types a rule may name. Anything else never matches. `custom_css` since 2.20.0. */
+	const TYPES = array( 'site', 'page', 'post', 'plugin', 'design_system', 'page_create', 'custom_css' );
+
+	/**
+	 * Normalised-set key prefix for a `custom_css` touch that carries BOTH
+	 * evidence fields as literal `true` on a concrete (digits) id — the only
+	 * touch an `allow custom_css` rule may match (spec 2026-09-24 §3). Not a
+	 * type: an operator can never name it, and nothing outside this class
+	 * reads it.
+	 *
+	 * @since 2.20.0
+	 */
+	private const CSS_EXACT_PREFIX = 'custom_css!exact:';
 
 	/** Target types that carry no id — a rule on them names the whole category. */
 	const ID_LESS_TYPES = array( 'site', 'design_system', 'page_create' );
@@ -411,7 +422,8 @@ class Aura_Worker_Rules {
 	 * @return array<string,true> Set of "type:id".
 	 */
 	private static function normalize_touches( array $touches ) {
-		$set = array();
+		$set     = array();
+		$inexact = array(); // custom_css ids with at least one touch lacking evidence.
 		foreach ( $touches as $t ) {
 			if ( ! is_array( $t ) || ! isset( $t['type'], $t['id'] ) ) {
 				continue;
@@ -438,6 +450,25 @@ class Aura_Worker_Rules {
 				continue;
 			}
 			$set[ $type . ':' . $id ] = true;
+			// Evidence fields (2.20.0): on a custom_css touch only, each only
+			// as the literal true, and only on a concrete id. Anything else is
+			// read as absent — the conservative reading (spec §3).
+			if ( 'custom_css' === $type ) {
+				if ( ctype_digit( $id )
+					&& isset( $t['precise'], $t['css_only'] )
+					&& true === $t['precise']
+					&& true === $t['css_only'] ) {
+					$set[ self::CSS_EXACT_PREFIX . $id ] = true;
+				} else {
+					$inexact[ $id ] = true;
+				}
+			}
+		}
+		// Exactness is per id and needs EVERY touch on that id (Codex r1 on
+		// #135): one conservative touch on 42 beside an exact one must not be
+		// erased by it, or `allow custom_css:42` would admit the call.
+		foreach ( $inexact as $id => $unused ) {
+			unset( $set[ self::CSS_EXACT_PREFIX . $id ] );
 		}
 		if ( empty( $set ) ) {
 			// A declaration that survives normalisation as nothing — `[]`,
@@ -462,6 +493,9 @@ class Aura_Worker_Rules {
 		if ( ! in_array( $type, self::TYPES, true ) ) {
 			return false;
 		}
+		if ( 'custom_css' === $type ) {
+			return self::css_rule_touches( $rule, $touched );
+		}
 		if ( isset( $touched[ self::UNKNOWN . ':*' ] ) ) {
 			return true; // Undeclared: every live rule applies.
 		}
@@ -484,6 +518,161 @@ class Aura_Worker_Rules {
 			return false;
 		}
 		return isset( $touched[ $type . ':' . $id ] );
+	}
+
+	/**
+	 * The custom_css arm (spec 2026-09-24 §3). Effect-aware, because
+	 * conservative matching exists to over-BLOCK: an `allow` that matched a
+	 * wildcard, a conservative declaration or `unknown:*` would over-PERMIT.
+	 *
+	 * @since 2.20.0
+	 *
+	 * @param array              $rule    Rule (type already known to be custom_css).
+	 * @param array<string,true> $touched Normalised set.
+	 * @return bool
+	 */
+	private static function css_rule_touches( array $rule, array $touched ) {
+		$target = isset( $rule['target'] ) && is_array( $rule['target'] ) ? $rule['target'] : array();
+		$raw    = array_key_exists( 'id', $target ) ? $target['id'] : null;
+		$any    = ( null === $raw || '*' === $raw );
+		$id     = $any ? '' : (string) $raw;
+		if ( ! $any && '' === $id ) {
+			return false; // an empty id names nothing — never site-wide
+		}
+		$effect = isset( $rule['effect'] ) ? (string) $rule['effect'] : '';
+
+		if ( 'allow' === $effect ) {
+			// Fail closed at the SET level (review #1): an allow admits a call
+			// only when EVERY custom_css touch it declared is precise. One
+			// exact touch riding alongside a conservative, create-time or
+			// unknown declaration must not buy the whole call an allow.
+			if ( isset( $touched[ self::UNKNOWN . ':*' ] ) || isset( $touched['custom_css:*'] ) ) {
+				return false;
+			}
+			foreach ( $touched as $key => $unused ) {
+				if ( 0 === strpos( $key, 'custom_css:' )
+					&& ! isset( $touched[ self::CSS_EXACT_PREFIX . substr( $key, strlen( 'custom_css:' ) ) ] ) ) {
+					return false;
+				}
+			}
+			if ( ! $any ) {
+				return isset( $touched[ self::CSS_EXACT_PREFIX . $id ] );
+			}
+			foreach ( $touched as $key => $unused ) {
+				if ( 0 === strpos( $key, self::CSS_EXACT_PREFIX ) ) {
+					return true;
+				}
+			}
+			return false;
+		}
+
+		// block / warn: evidence fields do not matter; silence over-blocks.
+		if ( isset( $touched[ self::UNKNOWN . ':*' ] ) ) {
+			return true;
+		}
+		if ( $any ) {
+			foreach ( $touched as $key => $unused ) {
+				if ( 0 === strpos( $key, 'custom_css:' ) ) {
+					return true;
+				}
+			}
+			return false;
+		}
+		return isset( $touched[ 'custom_css:' . $id ] ) || isset( $touched['custom_css:*'] );
+	}
+
+	/**
+	 * Test seam: null = read the real constant; false = fork absent; string = that version.
+	 *
+	 * @since 2.20.0
+	 * @var null|false|string
+	 */
+	private static $fork_version_for_tests = null;
+
+	/**
+	 * Test seam: null = ask the loaded code (method_exists); bool = pretend
+	 * Elementor_MCP_Rules::css_touches() is (true) or is not (false) there.
+	 *
+	 * @since 2.20.0
+	 * @var null|bool
+	 */
+	private static $fork_css_touches_for_tests = null;
+
+	/**
+	 * @since 2.20.0
+	 * @param null|false|string $version         See the property.
+	 * @param null|bool         $has_css_touches See $fork_css_touches_for_tests.
+	 */
+	public static function _set_fork_version_for_tests( $version, $has_css_touches = null ) {
+		self::$fork_version_for_tests     = $version;
+		self::$fork_css_touches_for_tests = $has_css_touches;
+	}
+
+	/**
+	 * Can the loaded elementor-mcp say whether a write carries CSS?
+	 * `precise` — 1.37.0 or newer AND it ships Elementor_MCP_Rules::css_touches();
+	 * `widened` — the fork is loaded but fails either test, so its page
+	 * writes count as possible CSS; `absent` — no fork. Reported on /status
+	 * as css_rules.fork.
+	 *
+	 * Why both: a version number is not a capability (final review I1). The
+	 * 1.37.0 floor assumes that release is the one Plan B ships with the
+	 * public static Elementor_MCP_Rules::css_touches(); if any other change
+	 * went out as 1.37.0 first, a version-only check would stop widening a
+	 * fork that declares no custom_css touches, and every `block custom_css`
+	 * would silently stop matching its writes. Requiring the method too
+	 * fails toward over-blocking, never under.
+	 *
+	 * @since 2.20.0
+	 * @return string
+	 */
+	public static function fork_css_state() {
+		$v = self::$fork_version_for_tests;
+		if ( null === $v ) {
+			$v = defined( 'ELEMENTOR_MCP_VERSION' ) ? (string) ELEMENTOR_MCP_VERSION : false;
+		}
+		if ( false === $v ) {
+			return 'absent';
+		}
+		if ( ! preg_match( '/^\d+\.\d+\.\d+$/', (string) $v ) ) {
+			return 'widened';
+		}
+		if ( ! version_compare( (string) $v, '1.37.0', '>=' ) ) {
+			return 'widened';
+		}
+		$capable = self::$fork_css_touches_for_tests;
+		if ( null === $capable ) {
+			$capable = class_exists( 'Elementor_MCP_Rules' ) && method_exists( 'Elementor_MCP_Rules', 'css_touches' );
+		}
+		return true === $capable ? 'precise' : 'widened';
+	}
+
+	/**
+	 * An old fork's page writes, read as possible CSS (spec §4.2). Only the
+	 * fork's own abilities; never evidence fields, so no allow can use them.
+	 *
+	 * @since 2.20.0
+	 * @param array  $touches   Declared touches.
+	 * @param string $tool_name Calling tool.
+	 * @return array
+	 */
+	private static function widen_for_old_fork( array $touches, $tool_name ) {
+		if ( 0 !== strpos( (string) $tool_name, 'elementor-mcp/' ) || 'widened' !== self::fork_css_state() ) {
+			return $touches;
+		}
+		$extra = array();
+		foreach ( $touches as $t ) {
+			if ( ! is_array( $t ) || ! isset( $t['type'], $t['id'] ) ) {
+				continue;
+			}
+			$type = (string) $t['type'];
+			if ( 'page' === $type || 'post' === $type ) {
+				$extra[ (string) $t['id'] ] = array( 'type' => 'custom_css', 'id' => (string) $t['id'] );
+			} elseif ( 'site' === $type ) {
+				$extra['*'] = array( 'type' => 'custom_css', 'id' => '*' );
+			}
+		}
+		return array_merge( $touches, array_values( $extra ) );
 	}
 
 	/* ------------------------------------------------------------------ */
@@ -2342,7 +2531,8 @@ class Aura_Worker_Rules {
 		// the preview path asks the same question of the same record, so the
 		// two can never disagree). The fork inherits this through enforce(),
 		// so its governance wrapper needs no change of its own.
-		$rule = self::enforceable_match( $touches, self::rules(), $now, self::site_ref() );
+		$touches = self::widen_for_old_fork( $touches, $tool_name );
+		$rule    = self::enforceable_match( $touches, self::rules(), $now, self::site_ref() );
 		if ( null === $rule ) {
 			return array( 'effect' => null );
 		}

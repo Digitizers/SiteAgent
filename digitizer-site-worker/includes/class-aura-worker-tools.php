@@ -220,6 +220,15 @@ class Aura_Worker_Tools {
 	 * verdict, planned command, file diff, SQL) at approval time. Tools that do
 	 * not declare supports_preview return `supported: false` with a null preview.
 	 *
+	 * Old-fork CSS widening (2.20.0) is NOT applied here: it lives in
+	 * Aura_Worker_Rules::enforce(), which widens an `elementor-mcp/*`
+	 * ability's page/site touches into custom_css ones before matching,
+	 * while this preview asks enforceable_match() directly. That is safe
+	 * today because only SiteAgent's own tools reach preview_tool() and none
+	 * is named `elementor-mcp/…`, so widening would be a no-op here. If a
+	 * fork ability ever reaches this path, widen here too, or the preview
+	 * and enforce() disagree about the same call.
+	 *
 	 * @param string $name   Tool name.
 	 * @param array  $params Parameters to preview.
 	 * @return array { success: bool, supported?: bool, preview?: mixed, error?: string, errors?: string[] }

@@ -202,6 +202,7 @@ class Aura_Worker_Elementor_Door {
 		self::$request             = null;
 		self::$active              = null;
 		self::$seq_lease           = null;
+		self::$schema_reader       = null;
 		Aura_Worker_Door_Log::forget_live_identity();
 		// $GLOBALS['_sa_force_door'] — active()'s test override, standing in
 		// for the module class this suite cannot define — is reset by
@@ -2898,11 +2899,383 @@ class Aura_Worker_Elementor_Door {
 	}
 
 	/**
+	 * How each WRITE_TABLE slug relates to custom CSS (spec 2026-09-24 §4.2,
+	 * plan rulings R1/R2). `precise` — CSS is read from named arguments;
+	 * `conservative` — CSS may be inside content this class does not parse.
+	 * Every WRITE_TABLE slug is in exactly one of CSS_PRODUCERS / NO_CSS
+	 * (ElementorDoorCssClassificationTest).
+	 *
+	 * @since 2.20.0
+	 */
+	const CSS_PRODUCERS = array(
+		'elementor/update-page-settings' => 'precise',
+		'elementor/manage-elements'      => 'precise',
+		'elementor/build-composition'    => 'conservative',
+		'elementor/manage-component'     => 'conservative',
+	);
+
+	/**
+	 * Writes that carry no custom CSS, each with the reason. A `css`-named
+	 * property listed under `exempt` is design-system CSS (global classes,
+	 * tag defaults) — plan ruling R1 — and is the ONLY CSS-capable property
+	 * the schema guard tolerates for that slug.
+	 *
+	 * @since 2.20.0
+	 */
+	const NO_CSS = array(
+		'elementor/publish-document'       => array( 'reason' => 'promotes an already-judged autosave', 'exempt' => array() ),
+		'elementor/create-preview-link'    => array( 'reason' => 'mints a preview URL; writes no content', 'exempt' => array() ),
+		'elementor/create-page'            => array( 'reason' => 'creates an empty document', 'exempt' => array() ),
+		'elementor/manage-classes'         => array( 'reason' => 'global-class CSS — design_system (R1)', 'exempt' => array( 'operations[].css' ) ),
+		'elementor/manage-default-styles'  => array( 'reason' => 'tag default styles — design_system (R1)', 'exempt' => array( 'operations[].css' ) ),
+		'elementor/reorder-classes'        => array( 'reason' => 'reorders class ids; no style content', 'exempt' => array() ),
+		'elementor/manage-global-variable' => array( 'reason' => 'a variable value, not a stylesheet', 'exempt' => array() ),
+	);
+
+	/** CSS-capable property names (spec §4.1 guard). @since 2.20.0 */
+	const CSS_PROPERTY_NAMES = array( 'custom_css', 'css', 'style', 'settings', 'page_settings', 'elements', 'structure', 'xml_structure', 'element_config' );
+
+	/** Forwarded opaque strings — markup or code that may embed a stylesheet (Codex r3). @since 2.20.0 */
+	const OPAQUE_PROPERTY_PATTERN = '/css|style|content|html|markup|template|code/i'; // also CSS-named variants: extra_css, inline_style (Codex r5)
+
+	/**
+	 * The input paths each precise producer's handler actually reads for CSS
+	 * (Codex r3). A live schema that grows any OTHER CSS-capable path makes the
+	 * producer conservative until the handler learns it.
+	 *
+	 * @since 2.20.0
+	 */
+	const PRODUCER_HANDLED_PATHS = array(
+		'elementor/update-page-settings' => array( 'settings' ),
+		'elementor/manage-elements'      => array( 'operations[].settings', 'operations[].style', 'operations[].style_apply_mode' ), // style_apply_mode is the patch|replace merge mode, matched by the name net's "style" substring — never CSS text (controller ruling).
+	);
+
+	/**
+	 * A key inside an open `settings` container (update-page-settings, and
+	 * each manage-elements op) whose name matches this is CSS of unknown
+	 * shape, unless it is `custom_css` itself (read precisely) or one of the
+	 * exceptions below (Codex r2 on #135). The 4.3 schema declares page
+	 * `settings` with additionalProperties: true, so Elementor could start
+	 * honouring e.g. `extra_css` there with no schema change the drift check
+	 * would see. `style` is deliberately NOT matched: element settings are
+	 * full of `*_style` controls, and matching them would over-block.
+	 *
+	 * @since 2.20.0
+	 */
+	const SETTINGS_CSS_KEY_PATTERN = '/css/i';
+
+	/**
+	 * CSS-named settings keys that are ordinary controls, not stylesheets:
+	 * `_css_classes` holds class names. They only make a call mixed.
+	 *
+	 * @since 2.20.0
+	 */
+	const SETTINGS_CSS_KEY_EXCEPTIONS = array( '_css_classes' );
+
+	/**
+	 * Prefix of Elementor's CSS-filter control group (`css_filters_blur`,
+	 * …): structured controls, not custom CSS.
+	 *
+	 * @since 2.20.0
+	 */
+	const SETTINGS_CSS_KEY_EXCEPTION_PREFIX = 'css_filters';
+
+	/**
+	 * Suffix for a node whose shape the walker does not resolve (combinator,
+	 * patternProperties, tuple items). No handled or exempt list names it, so
+	 * such a node always fails the drift check — even at a path that is
+	 * itself handled or exempt (Codex r1 on #135).
+	 *
+	 * @since 2.20.0
+	 */
+	const UNRESOLVED_SUFFIX = '{unresolved}';
+
+	/** @var callable|null test seam: fn( string $slug ): ?array @since 2.20.0 */
+	private static $schema_reader = null;
+
+	/** @since 2.20.0 */
+	public static function _set_schema_reader_for_tests( $fn ) {
+		self::$schema_reader = $fn;
+	}
+
+	/**
+	 * Paths through which a JSON schema can carry CSS: a property with a
+	 * CSS-capable name, or an object open to any property. Arrays recurse
+	 * into `items` as `name[].child`.
+	 *
+	 * @since 2.20.0
+	 * @param array  $schema Schema.
+	 * @param string $prefix Path so far.
+	 * @return string[]
+	 */
+	public static function css_capable_paths( array $schema, $prefix = '' ) {
+		return array_values( array_unique( self::css_capable_paths_raw( $schema, $prefix ) ) );
+	}
+
+	/** @since 2.20.0 @param array $schema Schema. @param string $prefix Path so far. @return string[] (may repeat — an open named container is reached twice) */
+	private static function css_capable_paths_raw( array $schema, $prefix ) {
+		$out  = array();
+		$here = '' === $prefix ? '(root)' : $prefix;
+		// The node ITSELF may be open (Codex r1 on the plan): a root, or an
+		// array item, that accepts any property can carry CSS under any name.
+		// Explicit `true` or a schema-valued `additionalProperties` counts;
+		// an absent key does not (WP schemas omit it everywhere), so a bare
+		// {type: object} stays closed (controller ruling, final review M2).
+		if ( isset( $schema['additionalProperties'] ) && ( true === $schema['additionalProperties'] || is_array( $schema['additionalProperties'] ) ) ) {
+			$out[] = $here;
+		}
+		// Shapes this walker does not read into are CSS-capable as a whole —
+		// fail closed rather than silently pass (final review, Task 4 minor):
+		// keys matched by pattern, and combinators whose branches may differ.
+		// They surface under a distinct marker, never the plain path, so a
+		// handled or exempt entry for that path cannot absorb them (Codex r1
+		// on #135). Branches are not descended: the marker is the answer.
+		if ( ! empty( $schema['patternProperties'] ) ) {
+			$out[] = $here . self::UNRESOLVED_SUFFIX;
+		}
+		foreach ( array( 'anyOf', 'oneOf', 'allOf' ) as $combinator ) {
+			if ( isset( $schema[ $combinator ] ) ) {
+				$out[] = $here . self::UNRESOLVED_SUFFIX;
+			}
+		}
+		// Arrays: a single item schema is descended as `name[].child` (nested
+		// arrays as `name[][]…`); a tuple — a list of item schemas — is flagged.
+		if ( isset( $schema['items'] ) && is_array( $schema['items'] ) ) {
+			$items = $schema['items'];
+			if ( array() !== $items && array_keys( $items ) === range( 0, count( $items ) - 1 ) ) {
+				$out[] = $here . self::UNRESOLVED_SUFFIX;
+			} else {
+				$out = array_merge( $out, self::css_capable_paths_raw( $items, ( '' === $prefix ? '' : $prefix ) . '[]' ) );
+			}
+		}
+		$props = isset( $schema['properties'] ) && is_array( $schema['properties'] ) ? $schema['properties'] : array();
+		foreach ( $props as $name => $sub ) {
+			$path = '' === $prefix ? (string) $name : $prefix . '.' . $name;
+			$sub  = is_array( $sub ) ? $sub : array();
+			if ( in_array( (string) $name, self::CSS_PROPERTY_NAMES, true ) || preg_match( self::OPAQUE_PROPERTY_PATTERN, (string) $name ) ) {
+				$out[] = $path;
+				// Keep descending (Codex r4): a container already on a handled
+				// list can still grow a CSS child (`settings.css`) the handler
+				// does not read — that child must surface as its own path.
+			}
+			$out = array_merge( $out, self::css_capable_paths_raw( $sub, $path ) );
+		}
+		return $out;
+	}
+
+	/**
+	 * The ability's live input schema, or null when unreadable.
+	 *
+	 * @since 2.20.0
+	 * @param string $slug Ability.
+	 * @return array|null
+	 */
+	private static function live_input_schema( $slug ) {
+		if ( null !== self::$schema_reader ) {
+			return call_user_func( self::$schema_reader, $slug );
+		}
+		if ( ! function_exists( 'wp_get_ability' ) ) {
+			return null;
+		}
+		$ability = wp_get_ability( $slug );
+		if ( ! $ability || ! method_exists( $ability, 'get_input_schema' ) ) {
+			return null;
+		}
+		$schema = $ability->get_input_schema();
+		return is_array( $schema ) ? $schema : null;
+	}
+
+	/**
+	 * CSS value classification. `null` / whitespace string / empty array =
+	 * clearing (not CSS); a non-empty string = CSS read from the argument;
+	 * every other value — false, 0, 0.0, true, numbers, non-empty arrays,
+	 * objects — is CSS of unknown shape (final review: one rule, fail closed).
+	 *
+	 * @since 2.20.0
+	 * @param mixed $v Value.
+	 * @return string 'none'|'css'|'unknown'
+	 */
+	private static function css_value( $v ) {
+		if ( null === $v ) {
+			return 'none';
+		}
+		if ( is_string( $v ) ) {
+			return '' === trim( $v ) ? 'none' : 'css';
+		}
+		return array() === $v ? 'none' : 'unknown';
+	}
+
+	/**
+	 * 'unknown' when a settings container carries a non-empty CSS-named key
+	 * other than `custom_css` (see SETTINGS_CSS_KEY_PATTERN); else 'none'.
+	 * The value is read like custom_css: null / whitespace / empty array
+	 * clears and declares nothing.
+	 *
+	 * @since 2.20.0
+	 * @param array $settings Settings container.
+	 * @return string 'none'|'unknown'
+	 */
+	private static function other_css_keys( array $settings ) {
+		foreach ( $settings as $key => $value ) {
+			$key = (string) $key;
+			if ( 'custom_css' === $key
+				|| in_array( $key, self::SETTINGS_CSS_KEY_EXCEPTIONS, true )
+				|| 0 === strpos( $key, self::SETTINGS_CSS_KEY_EXCEPTION_PREFIX )
+				|| ! preg_match( self::SETTINGS_CSS_KEY_PATTERN, $key ) ) {
+				continue;
+			}
+			if ( 'none' !== self::css_value( $value ) ) {
+				return 'unknown';
+			}
+		}
+		return 'none';
+	}
+
+	/**
+	 * The custom_css touches a door write declares, in addition to its
+	 * page/post/design_system ones. Pure.
+	 *
+	 * @since 2.20.0
+	 * @param string $slug  Ability.
+	 * @param array  $input Input.
+	 * @param string $id    Resolved post id, or '*'.
+	 * @return array
+	 */
+	public static function css_touches_for( $slug, array $input, $id ) {
+		$id = (string) $id;
+		if ( isset( self::NO_CSS[ $slug ] ) ) {
+			// A NO_CSS entry is checked, not trusted: if the LIVE schema grew a
+			// CSS-capable property beyond the recorded exemptions (an Elementor
+			// release after 4.3.0-beta3), declare conservatively rather than
+			// let a custom_css block rule be bypassed.
+			$schema = self::live_input_schema( $slug );
+			if ( is_array( $schema ) && array() !== array_diff( self::css_capable_paths( $schema ), self::NO_CSS[ $slug ]['exempt'] ) ) {
+				return array( array( 'type' => 'custom_css', 'id' => $id ) );
+			}
+			return array();
+		}
+		$kind = isset( self::CSS_PRODUCERS[ $slug ] ) ? self::CSS_PRODUCERS[ $slug ] : null;
+		if ( null === $kind ) {
+			return array();
+		}
+		if ( 'conservative' === $kind ) {
+			return array( array( 'type' => 'custom_css', 'id' => $id ) );
+		}
+		// A precise producer whose LIVE schema grew a CSS-capable path its
+		// handler does not read is conservative until it does (Codex r3).
+		$live = self::live_input_schema( $slug );
+		if ( is_array( $live ) && array() !== array_diff( self::css_capable_paths( $live ), isset( self::PRODUCER_HANDLED_PATHS[ $slug ] ) ? self::PRODUCER_HANDLED_PATHS[ $slug ] : array() ) ) {
+			return array( array( 'type' => 'custom_css', 'id' => $id ) );
+		}
+		$found    = 'none';   // none | css | unknown
+		$css_only = true;
+		if ( 'elementor/update-page-settings' === $slug ) {
+			if ( isset( $input['settings'] ) && ! is_array( $input['settings'] ) ) {
+				// An object or scalar `settings` (in-process PHP callers; JSON
+				// decodes to arrays) is CSS of unknown shape, never "no CSS"
+				// (final review M1).
+				$found    = 'unknown';
+				$css_only = false;
+			} else {
+				$settings = isset( $input['settings'] ) ? $input['settings'] : array();
+				$found    = array_key_exists( 'custom_css', $settings ) ? self::css_value( $settings['custom_css'] ) : 'none';
+				// The WHOLE input, not just `settings` (Codex r4): any other
+				// top-level field is an effect this allow never looked at.
+				$css_only = array( 'custom_css' ) === array_keys( $settings )
+					&& array() === array_diff( array_keys( $input ), array( 'post_id', 'settings' ) );
+				// Another CSS-named key: CSS this handler does not read (Codex r2).
+				if ( 'unknown' === self::other_css_keys( $settings ) ) {
+					$found    = 'unknown';
+					$css_only = false;
+				}
+			}
+		} elseif ( 'elementor/manage-elements' === $slug ) {
+			$ops = isset( $input['operations'] ) ? $input['operations'] : null;
+			if ( array() !== array_diff( array_keys( $input ), array( 'post_id', 'operations' ) ) ) {
+				$css_only = false; // an unknown top-level field is an unreviewed effect (Codex r4)
+			}
+			if ( ! is_array( $ops ) ) {
+				return array( array( 'type' => 'custom_css', 'id' => $id ) );
+			}
+			foreach ( $ops as $op ) {
+				if ( ! is_array( $op ) ) {
+					$found    = 'unknown';
+					$css_only = false;
+					continue;
+				}
+				$op_css = 'none';
+				if ( array_key_exists( 'style', $op ) ) {
+					$op_css = self::css_value( $op['style'] );
+				}
+				$settings = isset( $op['settings'] ) && is_array( $op['settings'] ) ? $op['settings'] : array();
+				if ( isset( $op['settings'] ) && ! is_array( $op['settings'] ) ) {
+					// Not an array: CSS of unknown shape (final review M1).
+					$op_css   = 'unknown';
+					$css_only = false;
+				} elseif ( array_key_exists( 'custom_css', $settings ) ) {
+					$s      = self::css_value( $settings['custom_css'] );
+					$op_css = 'unknown' === $s || 'unknown' === $op_css ? 'unknown' : ( 'css' === $s ? 'css' : $op_css );
+				}
+				if ( 'unknown' === self::other_css_keys( $settings ) ) {
+					// Another CSS-named key: CSS this handler does not read (Codex r2).
+					$op_css   = 'unknown';
+					$css_only = false;
+				}
+				if ( 'unknown' === $op_css || ( 'css' === $op_css && 'unknown' !== $found ) ) {
+					$found = 'unknown' === $op_css ? 'unknown' : 'css';
+				}
+				$only_css_keys = ( isset( $op['action'] ) && 'update' === $op['action'] )
+					&& array() === array_diff( array_keys( $op ), array( 'action', 'element_id', 'style', 'style_apply_mode', 'settings' ) )
+					&& array() === array_diff( array_keys( $settings ), array( 'custom_css' ) )
+					&& 'none' !== $op_css;
+				if ( ! $only_css_keys ) {
+					$css_only = false;
+				}
+			}
+		}
+		if ( 'none' === $found ) {
+			return array();
+		}
+		$touch = array( 'type' => 'custom_css', 'id' => $id );
+		if ( 'css' === $found && ctype_digit( $id ) ) {
+			$touch['precise'] = true;
+			if ( $css_only ) {
+				$touch['css_only'] = true;
+			}
+		}
+		return array( $touch );
+	}
+
+	/**
 	 * @param string $slug  Ability.
 	 * @param array  $input Input.
 	 * @return array|WP_Error touches, or aura_target_unattributed.
 	 */
 	public static function touches_for( $slug, array $input ) {
+		$base = self::base_touches_for( $slug, $input );
+		if ( is_wp_error( $base ) ) {
+			return $base;
+		}
+		// The CSS declaration rides EVERY kind (spec 2026-09-24 §4.2): a
+		// `page`-kind write names its post (the FIRST touch base_touches_for()
+		// returns for that kind); every other kind is site-wide — including a
+		// class deletion, whose extra page touches are collateral, not the
+		// write's own target.
+		$kind = isset( self::WRITE_TABLE[ $slug ] ) ? self::WRITE_TABLE[ $slug ] : null;
+		$id   = ( 'page' === $kind && isset( $base[0]['id'] ) ) ? (string) $base[0]['id'] : '*';
+		return array_merge( $base, self::css_touches_for( $slug, $input, $id ) );
+	}
+
+	/**
+	 * The target/collateral touches for a governed write, before the CSS
+	 * declaration `touches_for()` appends (spec 2026-09-24 §4.2).
+	 *
+	 * @since 2.20.0
+	 * @param string $slug  Ability.
+	 * @param array  $input Input.
+	 * @return array|WP_Error touches, or aura_target_unattributed.
+	 */
+	private static function base_touches_for( $slug, array $input ) {
 		$kind = isset( self::WRITE_TABLE[ $slug ] ) ? self::WRITE_TABLE[ $slug ] : null;
 		switch ( $kind ) {
 			case 'page':

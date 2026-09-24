@@ -4714,14 +4714,19 @@ if ( ! class_exists( 'WP_Ability' ) ) {
 		protected $execute_callback;
 		protected $permission_callback;
 		protected $meta = array();
+		/** Set via $args['input_schema']; null (unreadable) when not given, so existing tests see no schema. */
+		protected $input_schema = null;
 		public function __construct( string $name, array $args ) {
 			$this->name                = $name;
 			$this->execute_callback    = $args['execute_callback'] ?? null;
 			$this->permission_callback = $args['permission_callback'] ?? null;
 			$this->meta                = is_array( $args['meta'] ?? null ) ? $args['meta'] : array();
+			$this->input_schema        = $args['input_schema'] ?? null;
 		}
 		public function get_name(): string { return $this->name; }
 		public function get_meta(): array { return $this->meta; }
+		/** Core's getter (class-wp-ability.php), reduced: the door's live CSS schema guard reads it. */
+		public function get_input_schema() { return $this->input_schema; }
 		public function execute( $input = null ) {
 			if ( ! is_callable( $this->execute_callback ) ) {
 				return new WP_Error( 'ability_invalid_execute_callback', 'no callback' );
@@ -5392,6 +5397,7 @@ function sa_reset_state(): void {
 		// than failing the test that actually left it set.
 		Aura_Worker_Rules::$rest_request_override = null;
 		Aura_Worker_Rules::$cookie_auth_override  = null;
+		Aura_Worker_Rules::_set_fork_version_for_tests( null );
 	}
 	if ( class_exists( 'Aura_Worker_Door_Log' ) ) {
 		// Ruling S7's test seam: a test that fakes a 32-bit build and forgets
