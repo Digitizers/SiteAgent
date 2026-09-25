@@ -473,11 +473,13 @@ final class AuditRulesTest extends TestCase {
 		// The call site itself — a preview that dropped the argument would
 		// silently fall back to the unknown identity and warn about blocks
 		// that never fire — and it goes through the accessor enforce() judges
-		// by, never match() directly, or an `allow` winner enforcement
-		// discards would be shown to the operator as a verdict.
+		// by (2.21.0: Aura_Worker_Rules::preview_match(), which threads the
+		// identity through enforceable_match() itself), never match()
+		// directly, or an `allow` winner enforcement discards would be shown
+		// to the operator as a verdict.
 		$src = file_get_contents( __DIR__ . '/../../digitizer-site-worker/includes/class-aura-worker-tools.php' );
 		$this->assertStringContainsString(
-			'Aura_Worker_Rules::enforceable_match( $touches, Aura_Worker_Rules::rules(), null, Aura_Worker_Rules::site_ref() )',
+			'Aura_Worker_Rules::preview_match( $touches, $name )',
 			$src
 		);
 		$this->assertStringNotContainsString( 'Aura_Worker_Rules::match(', $src, 'the preview never asks match() for itself' );

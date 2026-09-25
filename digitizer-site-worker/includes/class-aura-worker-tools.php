@@ -21,6 +21,15 @@ class Aura_Worker_Tools {
 	private $tools = array();
 
 	/**
+	 * Test-only override of the fork's touch declarer: null = real detection,
+	 * false = no fork, a callable = the fork (see fork_declarer()).
+	 *
+	 * @since 2.21.0
+	 * @var null|false|callable
+	 */
+	private static $fork_declarer_for_tests = null;
+
+	/**
 	 * Constructor — loads the base class and all tool files, then registers them.
 	 */
 	public function __construct() {
@@ -220,14 +229,10 @@ class Aura_Worker_Tools {
 	 * verdict, planned command, file diff, SQL) at approval time. Tools that do
 	 * not declare supports_preview return `supported: false` with a null preview.
 	 *
-	 * Old-fork CSS widening (2.20.0) is NOT applied here: it lives in
-	 * Aura_Worker_Rules::enforce(), which widens an `elementor-mcp/*`
-	 * ability's page/site touches into custom_css ones before matching,
-	 * while this preview asks enforceable_match() directly. That is safe
-	 * today because only SiteAgent's own tools reach preview_tool() and none
-	 * is named `elementor-mcp/…`, so widening would be a no-op here. If a
-	 * fork ability ever reaches this path, widen here too, or the preview
-	 * and enforce() disagree about the same call.
+	 * Both paths — SiteAgent's own tools and the elementor-mcp fork's
+	 * abilities (2.21.0, preview_fork_tool()) — decide through
+	 * Aura_Worker_Rules::preview_match(), the function enforce() decides
+	 * through, so the preview and the call it previews cannot disagree.
 	 *
 	 * @param string $name   Tool name.
 	 * @param array  $params Parameters to preview.
@@ -237,6 +242,10 @@ class Aura_Worker_Tools {
 		$tool = $this->get_tool( $name );
 
 		if ( null === $tool ) {
+			$fork = $this->preview_fork_tool( (string) $name, is_array( $params ) ? $params : array() );
+			if ( null !== $fork ) {
+				return $fork;
+			}
 			return array(
 				'success' => false,
 				'error'   => "Unknown tool: $name",
@@ -267,7 +276,7 @@ class Aura_Worker_Tools {
 		// tools path already defaults to the approval queue — was reported as
 		// a verdict the very next request never applies. Either way the two
 		// disagree about the same call.
-		$rule        = empty( $touches ) ? null : Aura_Worker_Rules::enforceable_match( $touches, Aura_Worker_Rules::rules(), null, Aura_Worker_Rules::site_ref() );
+		$rule        = empty( $touches ) ? null : Aura_Worker_Rules::preview_match( $touches, $name );
 		$rule_match  = null === $rule ? null : array(
 			'key'    => isset( $rule['key'] ) ? (string) $rule['key'] : 'rule/?',
 			'effect' => (string) $rule['effect'],
@@ -298,5 +307,113 @@ class Aura_Worker_Tools {
 				'error'   => $e->getMessage(),
 			);
 		}
+	}
+
+	/**
+	 * A queued elementor-mcp fork write, previewed by the fork itself (Aura
+	 * spec 2026-09-25 §5). The fork's abilities are not in this registry;
+	 * Elementor_MCP_Governance::declare_touches() (elementor-mcp 1.38.0)
+	 * answers with exactly the touches its early rules gate judges, and the
+	 * rule is decided here the way enforce() decides the fork's run.
+	 *
+	 * Null means "not the fork's either" — the caller answers Unknown tool,
+	 * exactly as before: no fork, an older fork, a name the fork does not
+	 * govern, a throw, or anything malformed (never a partial list).
+	 *
+	 * @since 2.21.0
+	 * @param string $name   The published MCP tool name.
+	 * @param array  $params The call's params, as queued.
+	 * @return array|null
+	 */
+	private function preview_fork_tool( $name, array $params ) {
+		$declarer = self::fork_declarer();
+		if ( null === $declarer ) {
+			return null;
+		}
+		// Aura's routing key; its executor strips it before the fork sees the
+		// input, so the fork must not declare from it here either.
+		unset( $params['_mcpPath'] );
+		try {
+			$answer = call_user_func( $declarer, $name, $params );
+		} catch ( \Throwable $e ) {
+			return null;
+		}
+		if ( ! is_array( $answer ) || ! isset( $answer['ability'], $answer['touches'] ) || ! is_string( $answer['ability'] ) || ! is_array( $answer['touches'] ) ) {
+			return null;
+		}
+		$touches = self::validate_fork_touches( $answer['touches'] );
+		if ( null === $touches ) {
+			return null;
+		}
+		$rule = empty( $touches ) ? null : Aura_Worker_Rules::preview_match( $touches, $answer['ability'] );
+		return array(
+			'success'    => true,
+			'supported'  => false,
+			'preview'    => null,
+			'touches'    => $touches,
+			'rule_match' => null === $rule ? null : array(
+				'key'    => isset( $rule['key'] ) ? (string) $rule['key'] : 'rule/?',
+				'effect' => (string) $rule['effect'],
+				'reason' => isset( $rule['reason'] ) ? (string) $rule['reason'] : '',
+			),
+		);
+	}
+
+	/**
+	 * Every touch `{type: string, id: string}`; `precise` / `css_only` kept
+	 * only as the literal true and only on custom_css (the evidence an allow
+	 * may use — spec 2026-09-24 §3). One malformed touch → null.
+	 *
+	 * @since 2.21.0
+	 * @param array $touches The fork's touches.
+	 * @return array|null
+	 */
+	private static function validate_fork_touches( array $touches ) {
+		$out = array();
+		foreach ( $touches as $t ) {
+			if ( ! is_array( $t ) || ! isset( $t['type'], $t['id'] ) || ! is_string( $t['type'] ) || ! is_string( $t['id'] ) ) {
+				return null;
+			}
+			$clean = array( 'type' => $t['type'], 'id' => $t['id'] );
+			if ( 'custom_css' === $t['type'] ) {
+				if ( isset( $t['precise'] ) && true === $t['precise'] ) {
+					$clean['precise'] = true;
+				}
+				if ( isset( $t['css_only'] ) && true === $t['css_only'] ) {
+					$clean['css_only'] = true;
+				}
+			}
+			$out[] = $clean;
+		}
+		return $out;
+	}
+
+	/**
+	 * The fork's touch declarer, or null when there is none.
+	 *
+	 * @since 2.21.0
+	 * @return callable|null
+	 */
+	private static function fork_declarer() {
+		if ( false === self::$fork_declarer_for_tests ) {
+			return null;
+		}
+		if ( null !== self::$fork_declarer_for_tests ) {
+			return self::$fork_declarer_for_tests;
+		}
+		if ( class_exists( 'Elementor_MCP_Governance' ) && method_exists( 'Elementor_MCP_Governance', 'declare_touches' ) ) {
+			return array( 'Elementor_MCP_Governance', 'declare_touches' );
+		}
+		return null;
+	}
+
+	/**
+	 * Test-only: override fork detection.
+	 *
+	 * @since 2.21.0
+	 * @param null|false|callable $declarer See $fork_declarer_for_tests.
+	 */
+	public static function _set_fork_declarer_for_tests( $declarer ) {
+		self::$fork_declarer_for_tests = $declarer;
 	}
 }
