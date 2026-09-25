@@ -58,7 +58,7 @@ final class PreviewForkTest extends TestCase {
 		$this->assertSame( array( 'success' => false, 'error' => 'Unknown tool: elementor-mcp-update-page-settings' ), $res );
 	}
 
-	public function effects(): array {
+	public static function effects(): array {
 		return array( 'block' => array( 'block' ), 'warn' => array( 'warn' ) );
 	}
 
@@ -129,7 +129,7 @@ final class PreviewForkTest extends TestCase {
 		);
 	}
 
-	public function malformed(): array {
+	public static function malformed(): array {
 		return array(
 			'null'               => array( null ),
 			'not an array'       => array( 'yes' ),

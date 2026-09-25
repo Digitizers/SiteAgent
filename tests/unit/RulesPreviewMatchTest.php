@@ -32,7 +32,7 @@ final class RulesPreviewMatchTest extends TestCase {
 		return array( array( 'type' => 'post', 'id' => '7' ), array( 'type' => 'page', 'id' => '7' ) );
 	}
 
-	public function effects(): array {
+	public static function effects(): array {
 		return array(
 			'block' => array( 'block' ),
 			'warn'  => array( 'warn' ),

@@ -268,7 +268,7 @@ class Aura_Worker_Tools {
 		$annotations = $tool->get_annotations();
 		$touches     = Aura_Worker_Call_Context::tool_needs_grant( $annotations ) ? $tool->touches( $params ) : array();
 		// In THIS site's identity (2.12.0), through the SAME accessor
-		// Aura_Worker_Rules::enforce() judges by (`enforceable_match()`): the
+		// Aura_Worker_Rules::enforce() judges by (`preview_match()`): the
 		// preview is what the gateway shows before approval, so it must name
 		// the rule enforcement would actually apply. Without the identity
 		// every scoped rule reads as applying here; without the shared

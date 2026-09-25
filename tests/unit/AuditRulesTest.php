@@ -455,14 +455,14 @@ final class AuditRulesTest extends TestCase {
 
 	public function test_the_preview_and_enforcement_agree_about_a_foreign_scoped_rule(): void {
 		// The preview path is `Aura_Worker_Tools::preview_tool()`, which calls
-		// `enforceable_match()` — the accessor enforce() judges by. Asserted
-		// at the seam the two share: the same rules, the same identity, the
-		// same verdict.
+		// `Aura_Worker_Rules::preview_match()` — the accessor enforce() judges
+		// by. Asserted at the seam the two share: the same rules, the same
+		// identity, the same verdict.
 		$rules = array( array( 'key' => 'rule/elsewhere', 'effect' => 'block', 'target' => array( 'type' => 'site' ), 'reason' => 'r', 'sites' => array( 'res_A' ) ) );
 		$this->store_record( $rules, 'res_B' );
 		$touches = array( array( 'type' => 'post', 'id' => '7' ) );
 
-		$previewed = Aura_Worker_Rules::enforceable_match( $touches, Aura_Worker_Rules::rules(), null, Aura_Worker_Rules::site_ref() );
+		$previewed = Aura_Worker_Rules::preview_match( $touches, 'x' );
 		$enforced  = Aura_Worker_Rules::enforce( $touches, 'x', 1800000000 );
 
 		$this->assertNull( $previewed, 'the preview reported a rule enforcement skips' );
