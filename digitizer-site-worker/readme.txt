@@ -4,7 +4,7 @@ Tags: ai, automation, maintenance, updates, wordpress management
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.20.0
+Stable tag: 2.21.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -253,6 +253,9 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 
 == Changelog ==
 
+= 2.21.0 =
+* The Aura approval queue now shows whether an operator rule would block or warn about an Elementor design change made through the elementor-mcp plugin (1.38.0 or later), before anyone approves it. Nothing runs when the queue asks. No new settings.
+
 = 2.20.0 =
 * Rules can now target custom CSS: a rule of type `custom_css` blocks, warns about or allows writes that change a page's, an element's or the site kit's custom CSS, on one page or everywhere. Blocking is cautious: a write that might carry CSS counts. Allowing is strict: only a write the plugin can prove does nothing but set CSS is let through. No new settings; a ruleset without such rules behaves exactly as before.
 
@@ -384,78 +387,10 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
   the old build's. Backup filenames carry a per-operation suffix, so two
   backups started in the same second never overwrite each other.
 
-= 2.13.0 =
-* Feature: **Aura can now disconnect a site in two phases, and the site
-  refuses changes the moment it is told to.** When Aura sends a disconnect,
-  SiteAgent records it and every mutation on the site — SiteAgent's own write
-  endpoints, MCP write tools, grant-signed calls, and any WordPress REST write
-  made with the Application Password or site token of the departing connection
-  — is answered `403 aura_site_unbound` until the site is reconnected. Reads
-  keep working, `/status` keeps answering, and Aura's own ruleset endpoint
-  stays reachable so the disconnect can be finished or retried.
-* Feature: **a departing connection's Application Password stops working
-  everywhere, not just on the REST API.** WordPress authenticates Application
-  Passwords on XML-RPC as well, so a credential the disconnect could not revoke
-  is now refused where WordPress decides whether it authenticates at all. Your
-  own Application Passwords are untouched, and so is admin login.
-* Feature: **the cleanup is proven, not assumed.** SiteAgent revokes the
-  Application Password(s) Aura minted, clears the stored ruleset and the
-  gateway public key, forgets the connect bookkeeping, and deletes the site
-  token LAST — and only when Aura says the disconnect is final. Every step is
-  idempotent, runs in one fixed order, and continues past a step that failed.
-  An interrupted disconnect finishes itself on the site's next page load
-  (throttled, at most once every five minutes), so a site Aura can no longer
-  reach still converges.
-* Feature: the answer to a disconnect now names what is still owed:
-  `leftovers` lists the credentials or stores this site could not prove it had
-  released (`app_passwords`, `options`, `ruleset`, `grant_pubkey`), alongside
-  `cleanup_complete`. An empty list means only the shared site token was still
-  outstanding; a non-empty one means Aura must keep waiting.
-* Feature: **the settings screen tells you when Aura disconnected the site**
-  ("Disconnected by Aura at …") and offers **Remove remaining Aura data** — an
-  admin-initiated teardown that runs the same proven cleanup, and only clears
-  the disconnect record once everything it names, the site token included, is
-  gone.
-* Feature: manually connected sites (those with no gateway public key, which
-  therefore cannot verify a signed document) can be disconnected with a bare
-  `{ "unbind": true, … }` body on `POST /wp-json/aura/v2/rules`, authenticated
-  by the site token alone. A site that DOES hold a gateway key refuses the
-  bare form and requires the signed envelope.
-* Safety: every ruleset push now runs under the site-wide claim the connect
-  flow already used, so a push, a disconnect and a reconnect can no longer
-  interleave. A site already busy answers `503 aura_site_busy`, which is
-  retryable. A claim left behind by a killed request is taken over after two
-  minutes rather than blocking the site indefinitely.
-* Safety: reconnecting (magic link) and **Regenerate Token** now settle the
-  previous connection's outstanding cleanup BEFORE installing a new token, and
-  release the disconnect record only after the replacement connection is
-  installed and read back — so a reconnect that fails halfway leaves the site
-  still refusing the departed connection instead of quietly reviving it.
-* Fix: a disconnect record damaged in the database is now REPAIRED — rebuilt
-  from the site's own state, under the claim — and then torn down through the
-  ordinary path. Previously a damaged record was a permanent dead end: the
-  site refused every change and no control could clear it.
-* Diagnostics: `/status` reports `unbound: { at, site_ref }` while a
-  disconnect is outstanding, and `app_password_probe_unproven:
-  { count, at, owner }` when the site cannot prove an Application Password was
-  revoked — the usual reason a disconnect never finishes. Both are bounded and
-  contain no secrets.
-* New error codes: `aura_site_unbound` (403 — the site is disconnected),
-  `aura_site_busy` (503 — retry), `aura_unbind_incomplete` (409 — something is
-  still owed; the answer lists it), `aura_unbind_unreadable` (409 — the
-  disconnect record could not be read, which is NOT the same as an incomplete
-  cleanup), `aura_unbind_unrepairable` (409), `aura_unbind_marker_stuck`
-  (500 — everything was removed but the record itself would not delete),
-  `aura_unbind_marker_malformed` (500), `aura_unbind_store_failed` (500) and
-  `aura_ruleset_client_mismatch` (409 — a disconnect addressed to a different
-  Aura client), which the bare unkeyed form now checks too.
-* Compatibility: a 2.13 site that is never sent a disconnect behaves exactly
-  as 2.12 did. Nothing on the site changes until Aura asks for one.
-
-= 2.12.0 and earlier =
+= 2.13.0 and earlier =
 
 * WordPress.org truncates a Changelog over 5,000 words, and this plugin's history is longer than that.
-  The entries for 2.12.0 and every release before it were moved out of this file verbatim and are kept in full at:
+  The entries for 2.13.0 and every release before it were moved out of this file verbatim and are kept in full at:
   https://github.com/Digitizers/SiteAgent/blob/main/docs/changelog-archive.md
 
 == Upgrade Notice ==

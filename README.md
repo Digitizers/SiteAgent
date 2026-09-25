@@ -17,7 +17,7 @@
   </a>
   <img src="https://img.shields.io/badge/WordPress-6.2%E2%80%937.1-21759b?logo=wordpress" alt="WordPress" />
   <img src="https://img.shields.io/badge/PHP-7.4%2B-777bb4?logo=php" alt="PHP" />
-  <img src="https://img.shields.io/badge/Stable-2.20.0-green" alt="Stable" />
+  <img src="https://img.shields.io/badge/Stable-2.21.0-green" alt="Stable" />
 </p>
 
 ---
@@ -238,6 +238,11 @@ These plug straight into **Aura's Fleet MCP Gateway**: read tools run on demand,
 ---
 
 ## Changelog
+
+### 2.21.0
+
+- **The approval queue sees elementor-mcp writes' rule verdicts.** `tools/preview` answers a name its own registry does not know by asking elementor-mcp ≥ 1.38.0's `Elementor_MCP_Governance::declare_touches()` (Digitizers/Aura#586) — exactly the touches the fork's early rules gate judges — with `_mcpPath` removed, and returns `{success, supported: false, preview: null, touches, rule_match}`. Fail-closed: no fork, an older fork, a throw, a malformed answer or touch, or a declaration of nothing (a dry run) answer `Unknown tool` as before. (#137)
+- **One decision function.** New `Aura_Worker_Rules::preview_match()` = `widen_for_old_fork()` + `enforceable_match()` without `enforce()`'s side effects; `enforce()` and both preview paths decide through it, so a preview and the call it previews cannot disagree. (#137)
 
 ### 2.20.0
 
