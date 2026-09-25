@@ -318,7 +318,8 @@ class Aura_Worker_Tools {
 	 *
 	 * Null means "not the fork's either" — the caller answers Unknown tool,
 	 * exactly as before: no fork, an older fork, a name the fork does not
-	 * govern, a throw, or anything malformed (never a partial list).
+	 * govern, a throw, anything malformed (never a partial list), or a
+	 * declaration of nothing (a dry run).
 	 *
 	 * @since 2.21.0
 	 * @param string $name   The published MCP tool name.
@@ -345,7 +346,14 @@ class Aura_Worker_Tools {
 		if ( null === $touches ) {
 			return null;
 		}
-		$rule = empty( $touches ) ? null : Aura_Worker_Rules::preview_match( $touches, $answer['ability'] );
+		// A declaration of nothing (the fork's dry run — rules never see one)
+		// is not reported as coverage: Aura reads an empty set as the unknown
+		// sentinel, which every site/page rule matches, so `[]` would show a
+		// call the site runs unchecked as blocked. Unknown is the honest answer.
+		if ( empty( $touches ) ) {
+			return null;
+		}
+		$rule = Aura_Worker_Rules::preview_match( $touches, $answer['ability'] );
 		return array(
 			'success'    => true,
 			'supported'  => false,

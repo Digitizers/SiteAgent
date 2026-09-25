@@ -106,13 +106,14 @@ final class PreviewForkTest extends TestCase {
 		);
 	}
 
-	public function test_a_dry_run_declares_nothing_and_matches_nothing(): void {
+	public function test_a_dry_run_is_unknown_not_clean(): void {
+		// An empty declaration is not reported as coverage: Aura's matcher
+		// reads `touches: []` as the unknown sentinel, which every site/page
+		// rule matches — so `[]` would show a call the site runs unchecked as
+		// blocked. Unknown tool is the honest answer here, same as no fork.
 		$this->store( array( $this->rule( 'block', 'site', null ) ) );
 		$this->fork( array( 'ability' => 'elementor-mcp/generate-meta-tags', 'touches' => array() ) );
-		$res = $this->preview();
-		$this->assertTrue( $res['success'] );
-		$this->assertSame( array(), $res['touches'] );
-		$this->assertNull( $res['rule_match'] );
+		$this->assert_unknown( $this->preview() );
 	}
 
 	public function test_evidence_fields_survive_only_as_literal_true(): void {
