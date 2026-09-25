@@ -5399,6 +5399,9 @@ function sa_reset_state(): void {
 		Aura_Worker_Rules::$cookie_auth_override  = null;
 		Aura_Worker_Rules::_set_fork_version_for_tests( null );
 	}
+	if ( class_exists( 'Aura_Worker_Tools' ) ) {
+		Aura_Worker_Tools::_set_fork_declarer_for_tests( null );
+	}
 	if ( class_exists( 'Aura_Worker_Door_Log' ) ) {
 		// Ruling S7's test seam: a test that fakes a 32-bit build and forgets
 		// to clear it would otherwise poison every later test's door version

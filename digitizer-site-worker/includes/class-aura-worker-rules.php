@@ -2525,14 +2525,31 @@ class Aura_Worker_Rules {
 		return $rule;
 	}
 
+	/**
+	 * The rule enforce() would apply to this call — the same widening, the
+	 * same accessor, the same site identity — with none of enforce()'s side
+	 * effects: no expiry sweep, no per-dispatch record, no hook. The preview
+	 * paths ask this (Aura spec 2026-09-25 §5.2), so what the gateway shows
+	 * before approval is what the very next request decides.
+	 *
+	 * @since 2.21.0
+	 * @param array    $touches   What the call declares it touches.
+	 * @param string   $tool_name Calling tool (an elementor-mcp/… ability name widens on an old fork).
+	 * @param int|null $now       Unix time; injected for tests.
+	 * @return array|null The deciding rule (block or warn), or null.
+	 */
+	public static function preview_match( array $touches, $tool_name, $now = null ) {
+		$touches = self::widen_for_old_fork( $touches, $tool_name );
+		return self::enforceable_match( $touches, self::rules(), $now, self::site_ref() );
+	}
+
 	public static function enforce( array $touches, $tool_name, $now = null ) {
 		self::note_expired( $now );
 		// Judged in THIS site's identity (self::site_ref(), the one accessor —
 		// the preview path asks the same question of the same record, so the
 		// two can never disagree). The fork inherits this through enforce(),
 		// so its governance wrapper needs no change of its own.
-		$touches = self::widen_for_old_fork( $touches, $tool_name );
-		$rule    = self::enforceable_match( $touches, self::rules(), $now, self::site_ref() );
+		$rule = self::preview_match( $touches, $tool_name, $now );
 		if ( null === $rule ) {
 			return array( 'effect' => null );
 		}
