@@ -116,6 +116,58 @@ final class InstallLedgerSiteAgentTest extends TestCase {
 		$this->assertSame( array( 'kind' => 'remote_host', 'host' => 'cdn.example' ), $entry['source'] );
 	}
 
+	/**
+	 * A verified self-update installs OVER the existing plugin through
+	 * Plugin_Upgrader::install(), whose hook_extra says `action: install` and
+	 * names no plugin — install() itself has no notion of "this replaces
+	 * something already here" (Codex r2 on #139, install ledger 2.22.0).
+	 * as_siteagent()'s options-array third argument carries an action
+	 * override, and the frame on_pre_download() stakes for the claimed run
+	 * carries it through to on_install_result(), even though hook_extra
+	 * itself never changes.
+	 */
+	public function test_a_claimed_actions_override_records_update_even_when_hook_extra_says_install(): void {
+		$own   = new Plugin_Upgrader( new Automatic_Upgrader_Skin() );
+		$entry = Aura_Worker_Install_Ledger::as_siteagent(
+			function () use ( $own ) {
+				return $this->one_run( 'self', $own, array( 'type' => 'plugin', 'action' => 'install' ) );
+			},
+			$own,
+			array( 'package' => 'https://downloads.wordpress.org/plugin/self.zip', 'action' => 'update' )
+		);
+		$this->assertSame( 'siteagent', $entry['transport'] );
+		$this->assertSame( 'update', $entry['action'] );
+	}
+
+	/** Without an action override, a claimed run's action still comes from hook_extra, unchanged. */
+	public function test_a_claimed_run_without_an_action_override_keeps_hook_extras_action(): void {
+		$own   = new Plugin_Upgrader( new Automatic_Upgrader_Skin() );
+		$entry = Aura_Worker_Install_Ledger::as_siteagent(
+			function () use ( $own ) {
+				return $this->one_run( 'plain', $own, array( 'type' => 'plugin', 'action' => 'install' ) );
+			},
+			$own
+			// no third argument
+		);
+		$this->assertSame( 'siteagent', $entry['transport'] );
+		$this->assertSame( 'install', $entry['action'] );
+	}
+
+	/** An unclaimed run's action is unaffected by another call's action override. */
+	public function test_an_unclaimed_run_is_unaffected_by_another_calls_action_override(): void {
+		$own   = new Plugin_Upgrader( new Automatic_Upgrader_Skin() );
+		$other = new Plugin_Upgrader( new Automatic_Upgrader_Skin() );
+		$entry = Aura_Worker_Install_Ledger::as_siteagent(
+			function () use ( $other ) {
+				return $this->one_run( 'unclaimed', $other, array( 'type' => 'plugin', 'action' => 'install' ) );
+			},
+			$own,
+			array( 'package' => 'https://downloads.wordpress.org/plugin/x.zip', 'action' => 'update' )
+		);
+		$this->assertSame( 'unknown', $entry['transport'] );
+		$this->assertSame( 'install', $entry['action'] );
+	}
+
 	public function test_update_theme_records_exactly_one_siteagent_entry(): void {
 		$this->theme_run();
 		( new Aura_Worker_Updater() )->update_theme( 'bar' );

@@ -61,7 +61,7 @@ class Aura_Worker_Install_Ledger {
 
 	/**
 	 * SiteAgent's active as_siteagent() claims — one per frame, `{ upgrader,
-	 * package }`. A run is `transport: siteagent` only when
+	 * package, action }`. A run is `transport: siteagent` only when
 	 * `upgrader_pre_download` hands us the very object a claim's `upgrader`
 	 * holds, so a nested run a filter starts — any order, any priority, even
 	 * for the same plugin — goes through its own upgrader and is recorded as
@@ -72,6 +72,13 @@ class Aura_Worker_Install_Ledger {
 	 * a verified self-update downloads its zip_url to a temp file and installs
 	 * from that local path, so without this the ledger would record the temp
 	 * path — never the real source — for every verified self-update.
+	 *
+	 * `action` is the claim's optional action override (Codex r2 on #139): a
+	 * verified self-update installs OVER the existing plugin through
+	 * Plugin_Upgrader::install(), whose hook_extra says `action: install` and
+	 * names no plugin — install() has no notion of "this replaces something
+	 * already here". Without the override the ledger would record every
+	 * self-update as an install rather than an update.
 	 *
 	 * @var array[]
 	 */
@@ -85,24 +92,54 @@ class Aura_Worker_Install_Ledger {
 	 * SiteAgent created — record `transport: siteagent`, approved and audited
 	 * on our side (spec §4.2); any other run inside the call does not.
 	 *
-	 * @param callable    $work            The upgrader call.
-	 * @param object      $upgrader        The Plugin_Upgrader / Theme_Upgrader it uses.
-	 * @param string|null $source_package  The call's own original package, when
-	 *                                     it differs from what $upgrader will
-	 *                                     actually be told to install (Codex r1
-	 *                                     on #139): a verified self-update
-	 *                                     downloads $zip_url to a temp file and
-	 *                                     installs from THAT path, so on_pre_download()
-	 *                                     would otherwise see and classify only the
-	 *                                     temp path, never the real source. Omitted
-	 *                                     or not a non-empty string, the installed
-	 *                                     package is classified exactly as before.
+	 * @param callable           $work    The upgrader call.
+	 * @param object             $upgrader The Plugin_Upgrader / Theme_Upgrader it uses.
+	 * @param string|array|null  $claim   Either a bare string — the call's own
+	 *                                    original package, kept for backward
+	 *                                    compatibility — or an options array
+	 *                                    `{ package?: string|null, action?:
+	 *                                    'update'|null }`:
+	 *                                    - `package` is the call's own original
+	 *                                      package, when it differs from what
+	 *                                      $upgrader will actually be told to
+	 *                                      install (Codex r1 on #139): a
+	 *                                      verified self-update downloads
+	 *                                      $zip_url to a temp file and installs
+	 *                                      from THAT path, so on_pre_download()
+	 *                                      would otherwise see and classify
+	 *                                      only the temp path, never the real
+	 *                                      source.
+	 *                                    - `action` overrides the recorded
+	 *                                      `action` (Codex r2 on #139): a
+	 *                                      verified self-update installs OVER
+	 *                                      the existing plugin through
+	 *                                      Plugin_Upgrader::install(), whose
+	 *                                      hook_extra says `action: install`
+	 *                                      and names no plugin, so without
+	 *                                      this every self-update would be
+	 *                                      recorded as an install.
+	 *                                    Omitted, or neither shape recognised,
+	 *                                    the run is classified exactly as
+	 *                                    before.
 	 * @return mixed $work's return.
 	 */
-	public static function as_siteagent( $work, $upgrader, $source_package = null ) {
+	public static function as_siteagent( $work, $upgrader, $claim = null ) {
+		$package = null;
+		$action  = null;
+		if ( is_array( $claim ) ) {
+			if ( isset( $claim['package'] ) && is_string( $claim['package'] ) && '' !== $claim['package'] ) {
+				$package = $claim['package'];
+			}
+			if ( isset( $claim['action'] ) && 'update' === $claim['action'] ) {
+				$action = 'update';
+			}
+		} elseif ( is_string( $claim ) && '' !== $claim ) {
+			$package = $claim; // backward compatibility: a bare string is the package
+		}
 		self::$siteagent_claims[] = array(
 			'upgrader' => $upgrader,
-			'package'  => is_string( $source_package ) && '' !== $source_package ? $source_package : null,
+			'package'  => $package,
+			'action'   => $action,
 		);
 		try {
 			return $work();
@@ -554,6 +591,14 @@ class Aura_Worker_Install_Ledger {
 					? self::classify_source( null !== $claim && null !== $claim['package'] ? $claim['package'] : $package )
 					: array( 'kind' => 'unknown' ),
 				'context' => self::context( null !== $claim ),
+				// The claim's action override, taken here — not re-derived at
+				// on_install_result() from $upgrader, which is not passed to
+				// that filter (Codex r2 on #139): a verified self-update
+				// installs OVER the existing plugin through
+				// Plugin_Upgrader::install(), whose hook_extra says `action:
+				// install` and names no plugin, so without this override every
+				// self-update would be recorded as an install.
+				'action'  => null !== $claim ? $claim['action'] : null,
 			);
 		} catch ( \Throwable $e ) {
 			// Recording never breaks an upgrade.
@@ -599,12 +644,20 @@ class Aura_Worker_Install_Ledger {
 			}
 			$slug        = isset( $result['destination_name'] ) ? (string) $result['destination_name'] : '';
 			$destination = isset( $result['destination'] ) ? (string) $result['destination'] : '';
+			// The frame's claim action wins over hook_extra when set (Codex r2
+			// on #139): a verified self-update installs OVER the existing
+			// plugin through Plugin_Upgrader::install(), whose hook_extra says
+			// `action: install` and names no plugin — install() itself has no
+			// notion of "this replaces something already here". An unclaimed
+			// run, or a claimed run with no override, is classified exactly as
+			// before.
+			$action      = null !== $frame && null !== $frame['action'] ? $frame['action'] : self::action_of( $hook_extra );
 			$recorded    = self::append(
 				array_merge(
 					array(
 						'when'    => gmdate( 'c', self::now() ),
 						'type'    => $type,
-						'action'  => self::action_of( $hook_extra ),
+						'action'  => $action,
 						'slug'    => self::clip( $slug ),
 						'version' => self::installed_version( $type, $destination, $hook_extra, $slug ),
 					),
@@ -775,7 +828,7 @@ class Aura_Worker_Install_Ledger {
 	 * as_siteagent() ever populates $siteagent_claims.
 	 *
 	 * @param mixed $upgrader The upgrader instance upgrader_pre_download hands us.
-	 * @return array|null `{ upgrader, package }`, the exact claim as_siteagent() stored.
+	 * @return array|null `{ upgrader, package, action }`, the exact claim as_siteagent() stored.
 	 */
 	private static function matching_claim( $upgrader ) {
 		if ( ! is_object( $upgrader ) ) {
@@ -796,7 +849,13 @@ class Aura_Worker_Install_Ledger {
 			: null;
 	}
 
-	/** `update` when hook_extra names the package; else `install` unless it says `update`. */
+	/**
+	 * `update` when hook_extra names the package; else `install` unless it says
+	 * `update`. This is the FALLBACK a claim's own action override (Codex r2 on
+	 * #139) preempts at on_install_result() — hook_extra alone cannot tell a
+	 * fresh install from a self-update's Plugin_Upgrader::install() call over
+	 * an existing plugin, which names no plugin and says `action: install`.
+	 */
 	private static function action_of( $hook_extra ) {
 		if ( ! empty( $hook_extra['plugin'] ) || ! empty( $hook_extra['theme'] ) ) {
 			return 'update';

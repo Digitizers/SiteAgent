@@ -349,7 +349,15 @@ final class InstallLedgerObserverTest extends TestCase {
 	 * after the first, even on a fresh network-wide install where nothing had
 	 * happened yet. `aura_worker_activate()` fires exactly once per
 	 * activation, single-site or network-wide alike, matching the one moment
-	 * coverage should actually move. Static source inspection, like this
+	 * coverage should actually move.
+	 *
+	 * BEFORE the per-site loop, not after (Codex r2 on #139): the loop calls
+	 * aura_worker_activate_site() -> aura_worker_maybe_upgrade() ->
+	 * Aura_Worker_Install_Ledger::ensure_started(), which creates a fresh
+	 * ledger for a site that has none yet. restart_coverage() running AFTER
+	 * the loop would then find that brand-new ledger already on disk and
+	 * treat a fresh activation as a reactivation, marking it `evicted: true`
+	 * before anything was ever recorded. Static source inspection, like this
 	 * suite's other activation-hook assertions (ConnectAppPasswordTest) —
 	 * digitizer-site-worker.php is never `require`d live by this bootstrap.
 	 */
@@ -369,6 +377,12 @@ final class InstallLedgerObserverTest extends TestCase {
 		$try = strrpos( $before, 'try {' );
 		$this->assertNotFalse( $try, 'the call must be guarded by a try block so activation never fails because of the ledger' );
 		$this->assertStringContainsString( 'catch ( \Throwable $e )', substr( $activate, $try ) );
+
+		// The call must precede the per-site loop (Codex r2 on #139): the
+		// loop's own ensure_started() must never run before this one.
+		$loop = strpos( $activate, "aura_worker_for_each_site( 'aura_worker_activate_site'" );
+		$this->assertNotFalse( $loop, 'aura_worker_activate() must call the per-site activation loop' );
+		$this->assertLessThan( $loop, $call, 'restart_coverage() must be called BEFORE the per-site activation loop, or the loop\'s own ensure_started() will have already created a fresh ledger that restart_coverage() then marks evicted' );
 	}
 
 	/**

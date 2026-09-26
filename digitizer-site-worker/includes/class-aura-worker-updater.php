@@ -452,10 +452,16 @@ class Aura_Worker_Updater {
 		// Heartbeaten from inside (SA#80): the install is the longest phase, and
 		// renewing only around it left it seizable while it ran. The download
 		// above already sits between two renewals and fires no upgrader filter.
+		//
+		// `action: update` (Codex r2 on #139): Plugin_Upgrader::install() puts
+		// the new build straight over the plugin already at this slug, but its
+		// hook_extra says `action: install` and names no plugin — install()
+		// itself has no notion of "this replaces something already here". The
+		// ledger would otherwise record every self-update as an install.
 		$result = $this->heartbeat_during( $fence, function () use ( $upgrader, $install_source, $zip_url ) {
 			return Aura_Worker_Install_Ledger::as_siteagent( function () use ( $upgrader, $install_source ) {
 				return $upgrader->install( $install_source, array( 'overwrite_package' => true ) );
-			}, $upgrader, $zip_url );
+			}, $upgrader, array( 'package' => $zip_url, 'action' => 'update' ) );
 		} );
 
 		if ( '' !== $tmp && file_exists( $tmp ) ) {
