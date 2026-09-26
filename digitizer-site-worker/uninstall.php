@@ -251,3 +251,12 @@ if ( is_multisite() && function_exists( 'get_sites' ) && function_exists( 'switc
 } else {
 	$aura_uninstall_site();
 }
+
+// The install ledger's rows are NETWORK options on multisite (2.22.0, spec
+// 2026-09-21 §4.3) — sitemeta, which the per-site prefix sweep above never
+// reads. Deleted by name, once. On a single site they are ordinary options
+// and the sweep already removed them.
+if ( is_multisite() && function_exists( 'delete_site_option' ) ) {
+	delete_site_option( 'aura_worker_install_ledger' );       // mirrors Aura_Worker_Install_Ledger::OPTION
+	delete_site_option( 'aura_worker_install_ledger_state' ); // mirrors Aura_Worker_Install_Ledger::STATE_OPTION
+}

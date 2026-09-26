@@ -12,6 +12,8 @@
  * every request from the active environment, no snapshot, no approval); our
  * own Power Pack's execute_php / write_file / run_wp_cli flags; and third-party
  * exec stores (EMCP Pro's sandbox, Atarim's execute-php / run-wp-cli abilities).
+ * Since 2.22.0 a fourth subtree, installs, reports the install ledger (Aura
+ * spec 2026-09-21 §4).
  *
  * Facts, not verdicts, under audit_mcp_exposure's contract: every subtree is
  * independent and answers { error } on a throw; `null` is unreadable, never
@@ -68,6 +70,7 @@ class Aura_Tool_Audit_Agent_Code extends Aura_Tool_Base {
 			'angie_snippets' => 'object — { installed, version } (installed = loaded at runtime OR present in the installed-plugin inventory, so a deactivated Angie still reports its dormant rows and directories) and, when installed: module_active, total|published|drafts|agent_authored (int|null — null when the CPT read failed or hit its cap of 500), active_env ("prod"|"dev"|null — the environment Angie\'s loader includes for THIS request; null when the dev-mode API is not callable or the snippet module is inactive), deployed: { prod: { dirs, agent_authored, orphan }, dev: {…} } (int|null per environment — directories named snippet-<post_id> that contain main.php, joined to the CPT by id; orphan = no row, which the loader still includes), latest_deploy_at: { prod, dev } (ISO8601|null, per environment, never a max across both), recent: [{ id, title, status, agent_authored, environments, modified }] (newest first, cap 20; recent_truncated when cut — never bounds a count), coverage: { total_seen, returned, truncated, cap } (the DIRECTORY WALK only, 200 entries per environment). Absent Angie: { installed: false, version: "" }. A scan that threw: { error }.',
 			'power_pack'     => 'object — { installed, version, execute_php, fs_write, wp_cli, create_publish } from AURA_POWER_PACK_VERSION / AURA_POWER_EXECUTE_PHP / AURA_POWER_ALLOW_FS_WRITE / AURA_POWER_ALLOW_WP_CLI; every flag false when not installed',
 			'third_party'    => 'object — { emcp_sandbox: { present, version, active, store }, atarim_exec: { present } }. active = EMCP_TOOLS_VERSION is defined (the plugin is loaded). store = null when wp-content/emcp-sandbox does not exist, { error } when it could not be walked — one of sandbox_unreadable (the root would not open), sandbox_is_link (the root is itself a link, so it is not walked at all) or sandbox_walk_failed (the walk threw; the sibling subtrees still answer) — else { files, executable_files, newest_mtime, truncated, unreadable_dirs } — a metadata walk: no file is opened and no name leaves the site; a link is one entry judged by its own name, never followed and never stat\'ed; truncated = the 20000-entry cap was reached, and that cap counts every entry visited, directories included; unreadable_dirs counts sub-directories that could not be opened or vanished mid-walk; truncated OR unreadable_dirs >= 1 means the counts are lower bounds (since 2.19.2)',
+			'installs'       => 'object — the install ledger (since 2.22.0): { since, entries, total, evicted } or { error } (ledger_unreadable | ledger_unavailable). Every plugin and theme install or update this site performed, newest first, every retained entry (≤ 200, ≤ 90 days): { when, type: plugin|theme, action: install|update, slug, version|null, transport: wp_admin|rest|wp_cli|cron|auto_update|siteagent|unknown, user_id, auth: cookie|application_password|none|unknown, app_password_name|null (the name only — never the uuid), route|null (REST route, no query), source: { kind: wporg|uploaded_zip|remote_host|local_path|unknown, attachment_id?, host? } }. since = the edge of coverage — every install after it is held; evicted = something was rotated out. user_id, app_password_name and route are personal data kept by owner decision (Aura spec 2026-09-21 §4.2)',
 			'counters_as_of' => 'string — ISO8601 instant the counts were taken',
 		);
 	}
@@ -84,7 +87,7 @@ class Aura_Tool_Audit_Agent_Code extends Aura_Tool_Base {
 
 	public function execute( $params ) {
 		$out = array();
-		foreach ( array( 'angie_snippets', 'power_pack', 'third_party' ) as $subtree ) {
+		foreach ( array( 'angie_snippets', 'power_pack', 'third_party', 'installs' ) as $subtree ) {
 			try {
 				$out[ $subtree ] = $this->{ $subtree }();
 			} catch ( \Throwable $e ) {
@@ -625,6 +628,21 @@ class Aura_Tool_Audit_Agent_Code extends Aura_Tool_Base {
 		} catch ( \Throwable $e ) {
 			return array( 'error' => 'sandbox_walk_failed' );
 		}
+	}
+
+	// ---- installs ----------------------------------------------------------------
+
+	/**
+	 * The install ledger (spec 2026-09-21 §4.3), verbatim.
+	 *
+	 * @since 2.22.0
+	 * @return array
+	 */
+	protected function installs() {
+		if ( ! class_exists( 'Aura_Worker_Install_Ledger' ) ) {
+			return array( 'error' => 'ledger_unavailable' );
+		}
+		return Aura_Worker_Install_Ledger::report();
 	}
 
 	// ---- helpers ---------------------------------------------------------------
