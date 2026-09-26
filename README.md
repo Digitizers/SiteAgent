@@ -17,7 +17,7 @@
   </a>
   <img src="https://img.shields.io/badge/WordPress-6.2%E2%80%937.1-21759b?logo=wordpress" alt="WordPress" />
   <img src="https://img.shields.io/badge/PHP-7.4%2B-777bb4?logo=php" alt="PHP" />
-  <img src="https://img.shields.io/badge/Stable-2.21.0-green" alt="Stable" />
+  <img src="https://img.shields.io/badge/Stable-2.22.0-green" alt="Stable" />
 </p>
 
 ---
@@ -238,6 +238,12 @@ These plug straight into **Aura's Fleet MCP Gateway**: read tools run on demand,
 ---
 
 ## Changelog
+
+### 2.22.0
+
+- **An install ledger** (Digitizers/Aura spec 2026-09-21 §4, P6.3 phase 2). New `Aura_Worker_Install_Ledger` observes the upgrader for plugin and theme runs only — a per-run token in `hook_extra`, `upgrader_pre_download` at `PHP_INT_MAX`, the entry at `upgrader_install_package_result` — and records and never decides. Each entry: when, type, action, slug, version (the main file), transport (`siteagent` for SiteAgent's own upgrader object, `wp_cli`, `auto_update` only inside core's `wp_maybe_auto_update` — never the upgrader skin, `cron`, `rest`, `wp_admin`), user id, auth, the application password's name (never its uuid), REST route, and the package source (`wporg`, `uploaded_zip`, `remote_host` + host, `local_path`, `unknown`). (#139)
+- **Storage that only under-claims.** A ring of 200 entries / 90 days in two non-autoloaded options (network options on multisite), purged physically on read and daily (`wp_scheduled_delete`); every stored row is validated; unreadable storage answers `ledger_unreadable` and is recovered behind a coverage boundary; writes are ordered and read back so an interruption can only shorten `since`. Reactivation restarts coverage; a network where SiteAgent is not network-active answers `ledger_partial_network`. (#139)
+- **`audit_agent_code` reports it as `installs`** — `{ since, entries, total, evicted }` — consumed by Aura's `agent_installed_package` grading. Uninstall removes the network rows. `user_id`, the password name and the route are personal data kept by owner decision, bounded as above — while the plugin is active; a deactivated SiteAgent runs no purge, so its rows stay until the first purge after reactivation (the next audit read, install or daily `wp_scheduled_delete` pass — activation itself only restarts coverage) or uninstall. (#139)
 
 ### 2.21.0
 
