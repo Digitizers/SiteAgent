@@ -88,6 +88,7 @@ require_once AURA_WORKER_DIR . 'includes/class-elementor-door-governor.php';
 require_once AURA_WORKER_DIR . 'includes/class-aura-worker-abilities.php';
 require_once AURA_WORKER_DIR . 'includes/class-aura-worker-magic-link.php';
 require_once AURA_WORKER_DIR . 'includes/class-aura-worker-unbind.php';
+require_once AURA_WORKER_DIR . 'includes/class-aura-worker-install-ledger.php';
 
 /**
  * Initialize the plugin.
@@ -116,6 +117,11 @@ function aura_worker_init() {
 function aura_worker_maybe_upgrade() {
 	if ( get_option( 'aura_worker_version' ) === AURA_WORKER_VERSION ) {
 		return;
+	}
+	// The install ledger's coverage starts here (2.22.0, Ruling R3): once per
+	// version change, a fresh install included — never on every request.
+	if ( class_exists( 'Aura_Worker_Install_Ledger' ) ) {
+		Aura_Worker_Install_Ledger::ensure_started();
 	}
 	if ( class_exists( 'Aura_Worker_Rules' ) && ! Aura_Worker_Rules::backfill_from_stored_envelope() ) {
 		return; // the NEXT request retries; the marker stays behind on purpose

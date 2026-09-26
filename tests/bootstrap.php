@@ -4389,6 +4389,7 @@ require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-redact.php';
 require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-abilities.php';
 require_once SA_PLUGIN_DIR . '/includes/credential-rules.php';
 require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-unbind.php';
+require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-install-ledger.php';
 // The Elementor door (2.16.0): Aura_Worker::init() wires the governor, so
 // the class has to be loaded here as the plugin bootstrap loads it — the
 // door tests require these three themselves too, harmlessly (require_once).
@@ -4547,6 +4548,21 @@ if ( ! function_exists( 'is_main_site' ) ) {
 if ( ! function_exists( 'get_site_option' ) ) {
 	function get_site_option( string $option, $default = false ) {
 		return $GLOBALS['_site_options'][ $option ] ?? $default;
+	}
+}
+
+if ( ! function_exists( 'update_site_option' ) ) {
+	function update_site_option( string $option, $value ): bool {
+		$GLOBALS['_site_options'][ $option ] = $value;
+		return true;
+	}
+}
+
+if ( ! function_exists( 'delete_site_option' ) ) {
+	function delete_site_option( string $option ): bool {
+		$had = array_key_exists( $option, (array) ( $GLOBALS['_site_options'] ?? array() ) );
+		unset( $GLOBALS['_site_options'][ $option ] );
+		return $had;
 	}
 }
 
@@ -5212,6 +5228,9 @@ function sa_reset_state(): void {
 	}
 	if ( class_exists( 'Aura_Worker_Call_Context' ) ) {
 		Aura_Worker_Call_Context::reset(); // the dispatching route is a static too
+	}
+	if ( class_exists( 'Aura_Worker_Install_Ledger' ) ) {
+		Aura_Worker_Install_Ledger::reset_for_tests(); // frames, the SiteAgent depth and probe overrides are statics (2.22.0)
 	}
 	if ( class_exists( 'Aura_Worker_Redact' ) ) {
 		Aura_Worker_Redact::reset_for_tests(); // the unredacted-grant exemption memo is a static (#419)
