@@ -255,7 +255,7 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 
 = 2.22.0 =
 * New: an install ledger. Every plugin and theme install or update is recorded with how it arrived (wp-admin, REST, WP-CLI, cron, a WordPress auto-update, or SiteAgent itself), which user and application password, and where the package came from, so Aura can flag packages an AI agent installed. It only observes; it never blocks an install. Nothing to configure.
-* Privacy: each record keeps the user ID, the application password's name (never the password) and the REST route. Records are kept at most 90 days or 200 installs, are not autoloaded, and are deleted when the plugin is uninstalled.
+* Privacy: each record keeps the user ID, the application password's name (never the password) and the REST route. While the plugin is active, records older than 90 days (or beyond the latest 200 installs) are deleted; a deactivated plugin keeps them until it is reactivated or uninstalled. Records are not autoloaded and are deleted when the plugin is uninstalled.
 
 = 2.21.0 =
 * The Aura approval queue now shows whether an operator rule would block or warn about an Elementor design change made through the elementor-mcp plugin (1.38.0 or later), before anyone approves it. Nothing runs when the queue asks. No new settings.
