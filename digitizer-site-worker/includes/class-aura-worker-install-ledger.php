@@ -83,6 +83,26 @@ class Aura_Worker_Install_Ledger {
 	const AUTO_UPDATE_ACTION = 'wp_maybe_auto_update';
 
 	/**
+	 * Run SiteAgent's own upgrader call. Runs through $upgrader — the object
+	 * SiteAgent created — record `transport: siteagent`, approved and audited
+	 * on our side (spec §4.2); any other run inside the call does not.
+	 *
+	 * @param callable $work     The upgrader call.
+	 * @param object   $upgrader The Plugin_Upgrader / Theme_Upgrader it uses.
+	 * @return mixed $work's return.
+	 */
+	public static function as_siteagent( $work, $upgrader ) {
+		self::$siteagent_depth++;
+		self::$siteagent_claims[] = $upgrader;
+		try {
+			return $work();
+		} finally {
+			array_pop( self::$siteagent_claims );
+			self::$siteagent_depth--;
+		}
+	}
+
+	/**
 	 * Append one entry: newest first, then retention — 90 days, then 200
 	 * entries. Read-modify-write without a lock: two installs finishing in
 	 * the same instant can lose one entry (spec §4.3, stated, not fixed).

@@ -1693,7 +1693,7 @@ if ( ! class_exists( 'Plugin_Upgrader' ) ) {
 			// `_upgrade_effect` models what happens WHILE the upgrade runs (a
 			// claim seized mid-phase), the way `_install_effect` does for install().
 			if ( isset( $GLOBALS['_upgrade_effect'] ) && is_callable( $GLOBALS['_upgrade_effect'] ) ) {
-				call_user_func( $GLOBALS['_upgrade_effect'] );
+				call_user_func( $GLOBALS['_upgrade_effect'], $this );
 			}
 			return true;
 		}
@@ -1704,7 +1704,7 @@ if ( ! class_exists( 'Plugin_Upgrader' ) ) {
 			// install does (replace the plugin directory), so a rollback can be
 			// asserted on CONTENT rather than on a return value.
 			if ( isset( $GLOBALS['_install_effect'] ) && is_callable( $GLOBALS['_install_effect'] ) ) {
-				call_user_func( $GLOBALS['_install_effect'] );
+				call_user_func( $GLOBALS['_install_effect'], $this );
 			}
 			// array_key_exists, not ??: a test may set null to model an upgrader that never reached its install step.
 			return array_key_exists( '_install_result', $GLOBALS ) ? $GLOBALS['_install_result'] : true;
@@ -1718,6 +1718,9 @@ if ( ! class_exists( 'Theme_Upgrader' ) ) {
 
 		public function upgrade( $theme_slug ) {
 			$GLOBALS['_mutations'][] = 'Theme_Upgrader::upgrade';
+			if ( isset( $GLOBALS['_upgrade_effect'] ) && is_callable( $GLOBALS['_upgrade_effect'] ) ) {
+				call_user_func( $GLOBALS['_upgrade_effect'], $this );
+			}
 			return true;
 		}
 	}

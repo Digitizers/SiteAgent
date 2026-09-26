@@ -453,7 +453,9 @@ class Aura_Worker_Updater {
 		// renewing only around it left it seizable while it ran. The download
 		// above already sits between two renewals and fires no upgrader filter.
 		$result = $this->heartbeat_during( $fence, function () use ( $upgrader, $install_source ) {
-			return $upgrader->install( $install_source, array( 'overwrite_package' => true ) );
+			return Aura_Worker_Install_Ledger::as_siteagent( function () use ( $upgrader, $install_source ) {
+				return $upgrader->install( $install_source, array( 'overwrite_package' => true ) );
+			}, $upgrader );
 		} );
 
 		if ( '' !== $tmp && file_exists( $tmp ) ) {
@@ -1692,7 +1694,9 @@ class Aura_Worker_Updater {
 			$r = $this->heartbeat_during( $fence, function () use ( $plugin_file ) {
 				$skin     = new Automatic_Upgrader_Skin();
 				$upgrader = new Plugin_Upgrader( $skin );
-				return $upgrader->upgrade( $plugin_file );
+				return Aura_Worker_Install_Ledger::as_siteagent( function () use ( $upgrader, $plugin_file ) {
+					return $upgrader->upgrade( $plugin_file );
+				}, $upgrader );
 			} );
 			// A claim lost during the phase (a heartbeat that fired only at
 			// post-install passes through) is a successor owning these files:
@@ -1748,7 +1752,9 @@ class Aura_Worker_Updater {
 
 		$skin     = new Automatic_Upgrader_Skin();
 		$upgrader = new Theme_Upgrader( $skin );
-		$result   = $upgrader->upgrade( $theme_slug );
+		$result   = Aura_Worker_Install_Ledger::as_siteagent( function () use ( $upgrader, $theme_slug ) {
+			return $upgrader->upgrade( $theme_slug );
+		}, $upgrader );
 
 		if ( is_wp_error( $result ) ) {
 			return array(
@@ -1865,7 +1871,9 @@ class Aura_Worker_Updater {
 
 		$skin     = new Automatic_Upgrader_Skin();
 		$upgrader = new Plugin_Upgrader( $skin );
-		$result   = $upgrader->upgrade( $plugin_file );
+		$result   = Aura_Worker_Install_Ledger::as_siteagent( function () use ( $upgrader, $plugin_file ) {
+			return $upgrader->upgrade( $plugin_file );
+		}, $upgrader );
 
 		if ( is_wp_error( $result ) ) {
 			return array( 'success' => false, 'error' => $result->get_error_message() );
