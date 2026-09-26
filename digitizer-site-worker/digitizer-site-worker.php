@@ -88,6 +88,7 @@ require_once AURA_WORKER_DIR . 'includes/class-elementor-door-governor.php';
 require_once AURA_WORKER_DIR . 'includes/class-aura-worker-abilities.php';
 require_once AURA_WORKER_DIR . 'includes/class-aura-worker-magic-link.php';
 require_once AURA_WORKER_DIR . 'includes/class-aura-worker-unbind.php';
+require_once AURA_WORKER_DIR . 'includes/class-aura-worker-install-ledger.php';
 
 /**
  * Initialize the plugin.
@@ -117,6 +118,11 @@ function aura_worker_maybe_upgrade() {
 	if ( get_option( 'aura_worker_version' ) === AURA_WORKER_VERSION ) {
 		return;
 	}
+	// The install ledger's coverage starts here (2.22.0, Ruling R3): once per
+	// version change, a fresh install included — never on every request.
+	if ( class_exists( 'Aura_Worker_Install_Ledger' ) ) {
+		Aura_Worker_Install_Ledger::ensure_started();
+	}
 	if ( class_exists( 'Aura_Worker_Rules' ) && ! Aura_Worker_Rules::backfill_from_stored_envelope() ) {
 		return; // the NEXT request retries; the marker stays behind on purpose
 	}
@@ -129,6 +135,39 @@ add_action( 'plugins_loaded', 'aura_worker_init' );
  * Activation hook.
  */
 function aura_worker_activate( $network_wide = false ) {
+	// The install ledger's coverage restarts here, once per ACTIVATION CALL —
+	// not once per site (Codex r1 on #139, install ledger 2.22.0): the ledger
+	// is a single NETWORK option even on a network-wide activation, so a call
+	// inside the per-site loop restarted that one shared ledger once per site,
+	// reporting `evicted: true` (coverage "moved") on every site after the
+	// first — even on a fresh network-wide install where nothing had
+	// happened yet. This hook fires exactly once per activation, whether
+	// network-wide or on a single site, which is the one moment a
+	// deactivate -> reactivate cycle should actually move coverage: the
+	// plugin observed nothing while inactive, and leaving `started` unmoved
+	// would have the ledger claim coverage over that gap. Guarded and
+	// swallowed on both sides — activation must never fail because of the
+	// ledger.
+	//
+	// BEFORE the per-site loop below, not after (Codex r2 on #139): the loop's
+	// own aura_worker_activate_site() calls aura_worker_maybe_upgrade(), which
+	// calls Aura_Worker_Install_Ledger::ensure_started() for a site with no
+	// ledger option yet. Restarting coverage AFTER the loop would then find
+	// that fresh ledger already sitting on disk and treat it as an existing
+	// ring being reactivated — marking a brand-new install `evicted: true`
+	// before it ever recorded anything. Running first means a genuinely fresh
+	// site still has no storage at all: restart_coverage() takes the
+	// ensure_started() path itself (`evicted: false`), and the loop's later
+	// ensure_started() call is then a no-op because the ledger already
+	// exists. A true reactivation still sees its ring already on disk and
+	// moves coverage to a boundary exactly as before.
+	if ( class_exists( 'Aura_Worker_Install_Ledger' ) ) {
+		try {
+			Aura_Worker_Install_Ledger::restart_coverage();
+		} catch ( \Throwable $e ) {
+			// Activation must still complete.
+		}
+	}
 	aura_worker_for_each_site( 'aura_worker_activate_site', (bool) $network_wide );
 }
 register_activation_hook( __FILE__, 'aura_worker_activate' );
@@ -169,6 +208,17 @@ function aura_worker_activate_site() {
 		error_log( 'SiteAgent: an Aura Application Password left over from a failed deactivation could not be revoked; revoke it by hand in Users → Profile → Application Passwords.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 	}
 	Aura_Worker_Magic_Link::release_site( $aura_fence );
+	// The install ledger's coverage restart lives in aura_worker_activate()
+	// itself, BEFORE this function ever runs (Codex r1/r2 on #139): the
+	// ledger is a single NETWORK option even on a network-wide activation, so
+	// restarting it once PER SITE from this function restarted that one
+	// shared ledger once per site — reporting `evicted: true` on every site
+	// after the first, even on a fresh network-wide install where nothing had
+	// happened yet. aura_worker_maybe_upgrade() below still calls
+	// ensure_started(), but by the time it runs the caller has already
+	// restarted coverage once for this whole activation, so a fresh site's
+	// ensure_started() call here is a no-op and a reactivated site's ring is
+	// untouched.
 	// Through the SAME decision as a request-time upgrade (round-1 P2). A site
 	// updated while the plugin was inactive reaches this hook with the marker
 	// still behind and `plugins_loaded` already past: stamping the version

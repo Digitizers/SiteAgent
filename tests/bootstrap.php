@@ -81,6 +81,14 @@ if ( ! defined( 'AURA_WORKER_VERSION' ) ) {
 	// way through (normally the rule/grant guards stop it first).
 	define( 'AURA_WORKER_VERSION', 'test' );
 }
+if ( ! defined( 'AURA_WORKER_FILE' ) ) {
+	// The install ledger's network-active probe (2.22.0) resolves this
+	// through plugin_basename() the same way digitizer-site-worker.php's own
+	// `define( 'AURA_WORKER_FILE', __FILE__ )` does; bootstrap.php loads the
+	// plugin's classes directly and never requires that top-level file, so
+	// the constant needs a test-only stand-in here.
+	define( 'AURA_WORKER_FILE', SA_PLUGIN_DIR . '/digitizer-site-worker.php' );
+}
 
 // ---------------------------------------------------------------------------
 // Mutable state used by the stubs
@@ -237,6 +245,15 @@ if ( ! function_exists( 'trailingslashit' ) ) {
 if ( ! function_exists( 'plugin_dir_path' ) ) {
 	function plugin_dir_path( string $file ): string {
 		return trailingslashit( dirname( $file ) );
+	}
+}
+
+if ( ! function_exists( 'plugin_basename' ) ) {
+	function plugin_basename( string $file ): string {
+		// Core's real algorithm is far more elaborate (symlinked plugin dirs,
+		// WP_PLUGIN_DIR vs muplugins), but every caller in this suite passes a
+		// path already under SA_PLUGIN_DIR, so stripping that prefix is exact.
+		return ltrim( str_replace( '\\', '/', str_replace( (string) SA_PLUGIN_DIR, '', $file ) ), '/' );
 	}
 }
 
@@ -1562,6 +1579,16 @@ if ( ! function_exists( 'is_plugin_active' ) ) {
 	}
 }
 
+if ( ! function_exists( 'is_plugin_active_for_network' ) ) {
+	// The install ledger's `installs.error: ledger_partial_network` probe
+	// (2.22.0) reads this on multisite. Default true: a single site never
+	// consults it (is_multisite() gates the call), and a test that cares sets
+	// $GLOBALS['_network_active_plugins'][ $plugin ] explicitly.
+	function is_plugin_active_for_network( $plugin ) {
+		return isset( $GLOBALS['_network_active_plugins'][ $plugin ] );
+	}
+}
+
 if ( ! function_exists( 'activate_plugin' ) ) {
 	function activate_plugin( $plugin ) {
 		$GLOBALS['_active_plugins'][ $plugin ] = true;
@@ -1652,6 +1679,17 @@ if ( ! function_exists( 'get_plugin_data' ) ) {
 	}
 }
 
+if ( ! function_exists( 'get_file_data' ) ) {
+	function get_file_data( $file, $default_headers, $context = '' ) {
+		$head = is_readable( $file ) ? (string) file_get_contents( $file, false, null, 0, 8192 ) : '';
+		$out  = array();
+		foreach ( $default_headers as $key => $label ) {
+			$out[ $key ] = preg_match( '/^[ \t\/*#@]*' . preg_quote( $label, '/' ) . ':(.*)$/mi', $head, $m ) ? trim( $m[1] ) : '';
+		}
+		return $out;
+	}
+}
+
 if ( ! function_exists( 'download_url' ) ) {
 	function download_url( $url, $timeout = 300, $signature_verification = false ) {
 		$GLOBALS['_download_url_calls'][] = $url; // witnessed, so a refusal can prove it downloaded nothing (SA#95)
@@ -1682,7 +1720,7 @@ if ( ! class_exists( 'Plugin_Upgrader' ) ) {
 			// `_upgrade_effect` models what happens WHILE the upgrade runs (a
 			// claim seized mid-phase), the way `_install_effect` does for install().
 			if ( isset( $GLOBALS['_upgrade_effect'] ) && is_callable( $GLOBALS['_upgrade_effect'] ) ) {
-				call_user_func( $GLOBALS['_upgrade_effect'] );
+				call_user_func( $GLOBALS['_upgrade_effect'], $this );
 			}
 			return true;
 		}
@@ -1693,7 +1731,7 @@ if ( ! class_exists( 'Plugin_Upgrader' ) ) {
 			// install does (replace the plugin directory), so a rollback can be
 			// asserted on CONTENT rather than on a return value.
 			if ( isset( $GLOBALS['_install_effect'] ) && is_callable( $GLOBALS['_install_effect'] ) ) {
-				call_user_func( $GLOBALS['_install_effect'] );
+				call_user_func( $GLOBALS['_install_effect'], $this );
 			}
 			// array_key_exists, not ??: a test may set null to model an upgrader that never reached its install step.
 			return array_key_exists( '_install_result', $GLOBALS ) ? $GLOBALS['_install_result'] : true;
@@ -1707,6 +1745,9 @@ if ( ! class_exists( 'Theme_Upgrader' ) ) {
 
 		public function upgrade( $theme_slug ) {
 			$GLOBALS['_mutations'][] = 'Theme_Upgrader::upgrade';
+			if ( isset( $GLOBALS['_upgrade_effect'] ) && is_callable( $GLOBALS['_upgrade_effect'] ) ) {
+				call_user_func( $GLOBALS['_upgrade_effect'], $this );
+			}
 			return true;
 		}
 	}
@@ -4389,6 +4430,7 @@ require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-redact.php';
 require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-abilities.php';
 require_once SA_PLUGIN_DIR . '/includes/credential-rules.php';
 require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-unbind.php';
+require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-install-ledger.php';
 // The Elementor door (2.16.0): Aura_Worker::init() wires the governor, so
 // the class has to be loaded here as the plugin bootstrap loads it — the
 // door tests require these three themselves too, harmlessly (require_once).
@@ -4547,6 +4589,21 @@ if ( ! function_exists( 'is_main_site' ) ) {
 if ( ! function_exists( 'get_site_option' ) ) {
 	function get_site_option( string $option, $default = false ) {
 		return $GLOBALS['_site_options'][ $option ] ?? $default;
+	}
+}
+
+if ( ! function_exists( 'update_site_option' ) ) {
+	function update_site_option( string $option, $value ): bool {
+		$GLOBALS['_site_options'][ $option ] = $value;
+		return true;
+	}
+}
+
+if ( ! function_exists( 'delete_site_option' ) ) {
+	function delete_site_option( string $option ): bool {
+		$had = array_key_exists( $option, (array) ( $GLOBALS['_site_options'] ?? array() ) );
+		unset( $GLOBALS['_site_options'][ $option ] );
+		return $had;
 	}
 }
 
@@ -5213,6 +5270,9 @@ function sa_reset_state(): void {
 	if ( class_exists( 'Aura_Worker_Call_Context' ) ) {
 		Aura_Worker_Call_Context::reset(); // the dispatching route is a static too
 	}
+	if ( class_exists( 'Aura_Worker_Install_Ledger' ) ) {
+		Aura_Worker_Install_Ledger::reset_for_tests(); // frames, SiteAgent's claimed upgraders and probe overrides are statics (2.22.0)
+	}
 	if ( class_exists( 'Aura_Worker_Redact' ) ) {
 		Aura_Worker_Redact::reset_for_tests(); // the unredacted-grant exemption memo is a static (#419)
 	}
@@ -5368,6 +5428,7 @@ function sa_reset_state(): void {
 	$GLOBALS['_sa_state']     = array();
 	$GLOBALS['_is_admin']       = false; // is_admin() — see the stub above.
 	$GLOBALS['_is_multisite']   = false;
+	$GLOBALS['_network_active_plugins'] = array(); // is_plugin_active_for_network() — see the stub above.
 	$GLOBALS['_current_blog_id'] = 1; // get_current_blog_id() — core's own default on a single site.
 	$GLOBALS['_main_site_id']  = 1; // is_main_site() — which blog of a network is the main one (Ruling P39).
 	$GLOBALS['_site_options']   = array();

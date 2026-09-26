@@ -452,8 +452,16 @@ class Aura_Worker_Updater {
 		// Heartbeaten from inside (SA#80): the install is the longest phase, and
 		// renewing only around it left it seizable while it ran. The download
 		// above already sits between two renewals and fires no upgrader filter.
-		$result = $this->heartbeat_during( $fence, function () use ( $upgrader, $install_source ) {
-			return $upgrader->install( $install_source, array( 'overwrite_package' => true ) );
+		//
+		// `action: update` (Codex r2 on #139): Plugin_Upgrader::install() puts
+		// the new build straight over the plugin already at this slug, but its
+		// hook_extra says `action: install` and names no plugin — install()
+		// itself has no notion of "this replaces something already here". The
+		// ledger would otherwise record every self-update as an install.
+		$result = $this->heartbeat_during( $fence, function () use ( $upgrader, $install_source, $zip_url ) {
+			return Aura_Worker_Install_Ledger::as_siteagent( function () use ( $upgrader, $install_source ) {
+				return $upgrader->install( $install_source, array( 'overwrite_package' => true ) );
+			}, $upgrader, array( 'package' => $zip_url, 'action' => 'update' ) );
 		} );
 
 		if ( '' !== $tmp && file_exists( $tmp ) ) {
@@ -1692,7 +1700,9 @@ class Aura_Worker_Updater {
 			$r = $this->heartbeat_during( $fence, function () use ( $plugin_file ) {
 				$skin     = new Automatic_Upgrader_Skin();
 				$upgrader = new Plugin_Upgrader( $skin );
-				return $upgrader->upgrade( $plugin_file );
+				return Aura_Worker_Install_Ledger::as_siteagent( function () use ( $upgrader, $plugin_file ) {
+					return $upgrader->upgrade( $plugin_file );
+				}, $upgrader );
 			} );
 			// A claim lost during the phase (a heartbeat that fired only at
 			// post-install passes through) is a successor owning these files:
@@ -1748,7 +1758,9 @@ class Aura_Worker_Updater {
 
 		$skin     = new Automatic_Upgrader_Skin();
 		$upgrader = new Theme_Upgrader( $skin );
-		$result   = $upgrader->upgrade( $theme_slug );
+		$result   = Aura_Worker_Install_Ledger::as_siteagent( function () use ( $upgrader, $theme_slug ) {
+			return $upgrader->upgrade( $theme_slug );
+		}, $upgrader );
 
 		if ( is_wp_error( $result ) ) {
 			return array(
@@ -1865,7 +1877,9 @@ class Aura_Worker_Updater {
 
 		$skin     = new Automatic_Upgrader_Skin();
 		$upgrader = new Plugin_Upgrader( $skin );
-		$result   = $upgrader->upgrade( $plugin_file );
+		$result   = Aura_Worker_Install_Ledger::as_siteagent( function () use ( $upgrader, $plugin_file ) {
+			return $upgrader->upgrade( $plugin_file );
+		}, $upgrader );
 
 		if ( is_wp_error( $result ) ) {
 			return array( 'success' => false, 'error' => $result->get_error_message() );

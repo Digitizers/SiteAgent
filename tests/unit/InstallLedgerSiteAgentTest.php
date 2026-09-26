@@ -1,0 +1,216 @@
+<?php
+/**
+ * An install SiteAgent's own updater performs is recorded once, with
+ * transport `siteagent` (spec §4.2, §8).
+ *
+ * @package Aura_Worker\Tests
+ */
+
+use PHPUnit\Framework\TestCase;
+
+final class InstallLedgerSiteAgentTest extends TestCase {
+
+	protected function setUp(): void {
+		sa_reset_state();
+		Aura_Worker_Install_Ledger::_set_probe_for_tests( array( 'now' => 1790424000, 'versions' => array() ) );
+		Aura_Worker_Install_Ledger::ensure_started();
+	}
+
+	protected function tearDown(): void {
+		unset( $GLOBALS['_upgrade_effect'] );
+	}
+
+	/** What WP_Upgrader::run() does for one theme, as the upgrade effect. */
+	private function theme_run(): void {
+		$GLOBALS['_upgrade_effect'] = static function ( $upgrader ) {
+			$o = Aura_Worker_Install_Ledger::on_package_options( array( 'hook_extra' => array( 'theme' => 'bar', 'type' => 'theme', 'action' => 'update' ) ) );
+			Aura_Worker_Install_Ledger::on_pre_download( false, 'https://downloads.wordpress.org/theme/bar.zip', $upgrader, $o['hook_extra'] );
+			Aura_Worker_Install_Ledger::on_install_result( array( 'destination_name' => 'bar', 'destination' => '/x/bar' ), $o['hook_extra'] );
+		};
+	}
+
+	/** One full run through the three filters on $upgrader; returns its entry. */
+	private function one_run( string $slug, $upgrader, array $extra = array( 'type' => 'plugin', 'action' => 'install' ) ): array {
+		$o = Aura_Worker_Install_Ledger::on_package_options( array( 'hook_extra' => $extra ) );
+		Aura_Worker_Install_Ledger::on_pre_download( false, 'https://cdn.example/' . $slug . '.zip', $upgrader, $o['hook_extra'] );
+		Aura_Worker_Install_Ledger::on_install_result( array( 'destination_name' => $slug, 'destination' => '/x/' . $slug ), $o['hook_extra'] );
+		return Aura_Worker_Install_Ledger::report()['entries'][0];
+	}
+
+	public function test_only_runs_through_siteagents_own_upgrader_are_siteagent(): void {
+		$own     = new Plugin_Upgrader( new Automatic_Upgrader_Skin() );
+		$entries = Aura_Worker_Install_Ledger::as_siteagent( function () use ( $own ) {
+			// Nested runs a filter starts — before, and for the SAME plugin
+			// (Codex r17/r18 on #595) — go through their own upgrader.
+			$before = $this->one_run( 'companion', new Plugin_Upgrader() );
+			$same   = $this->one_run( 'own', new Plugin_Upgrader(), array( 'plugin' => 'own/own.php' ) );
+			$mine   = $this->one_run( 'own', $own, array( 'plugin' => 'own/own.php' ) );
+			return array( $before, $same, $mine );
+		}, $own );
+		$this->assertSame( array( 'unknown', 'unknown', 'siteagent' ), array_column( $entries, 'transport' ) );
+	}
+
+	public function test_the_marker_ends_with_the_call_even_on_a_throw(): void {
+		try {
+			Aura_Worker_Install_Ledger::as_siteagent( static function () {
+				throw new RuntimeException( 'boom' );
+			}, new Plugin_Upgrader() );
+		} catch ( RuntimeException $e ) {
+			// expected
+		}
+		$this->assertSame( 'unknown', $this->one_run( 'after', new Plugin_Upgrader() )['transport'] );
+	}
+
+	/**
+	 * A verified self-update downloads $zip_url to a temp file and installs
+	 * from THAT local path — the temp path is never the real source (Codex r1
+	 * on #139, install ledger 2.22.0). as_siteagent()'s optional third
+	 * argument carries the original package, and on_pre_download() classifies
+	 * THAT when the run matches a claim that carries one.
+	 */
+	public function test_a_claimed_source_package_is_classified_over_the_installed_temp_path(): void {
+		$own   = new Plugin_Upgrader( new Automatic_Upgrader_Skin() );
+		$entry = Aura_Worker_Install_Ledger::as_siteagent(
+			function () use ( $own ) {
+				$o = Aura_Worker_Install_Ledger::on_package_options( array( 'hook_extra' => array( 'type' => 'plugin', 'action' => 'install' ) ) );
+				Aura_Worker_Install_Ledger::on_pre_download( false, '/tmp/x.zip', $own, $o['hook_extra'] );
+				Aura_Worker_Install_Ledger::on_install_result( array( 'destination_name' => 'x', 'destination' => '/x/x' ), $o['hook_extra'] );
+				return Aura_Worker_Install_Ledger::report()['entries'][0];
+			},
+			$own,
+			'https://downloads.wordpress.org/plugin/x.zip'
+		);
+		$this->assertSame( 'siteagent', $entry['transport'] );
+		$this->assertSame( array( 'kind' => 'wporg' ), $entry['source'] );
+	}
+
+	/** Without the third argument, behaviour is unchanged: the installed path is classified as before. */
+	public function test_without_a_claimed_package_the_installed_path_is_classified_as_before(): void {
+		$own   = new Plugin_Upgrader( new Automatic_Upgrader_Skin() );
+		$entry = Aura_Worker_Install_Ledger::as_siteagent(
+			function () use ( $own ) {
+				$o = Aura_Worker_Install_Ledger::on_package_options( array( 'hook_extra' => array( 'type' => 'plugin', 'action' => 'install' ) ) );
+				Aura_Worker_Install_Ledger::on_pre_download( false, '/tmp/y.zip', $own, $o['hook_extra'] );
+				Aura_Worker_Install_Ledger::on_install_result( array( 'destination_name' => 'y', 'destination' => '/x/y' ), $o['hook_extra'] );
+				return Aura_Worker_Install_Ledger::report()['entries'][0];
+			},
+			$own
+			// no third argument
+		);
+		$this->assertSame( 'siteagent', $entry['transport'] );
+		$this->assertSame( array( 'kind' => 'local_path' ), $entry['source'] );
+	}
+
+	/** A run through an upgrader that is NOT the claimed one is unaffected by another call's claimed package. */
+	public function test_a_non_claimed_run_is_unaffected_by_another_calls_claimed_package(): void {
+		$own   = new Plugin_Upgrader( new Automatic_Upgrader_Skin() );
+		$other = new Plugin_Upgrader( new Automatic_Upgrader_Skin() );
+		$entry = Aura_Worker_Install_Ledger::as_siteagent(
+			function () use ( $other ) {
+				return $this->one_run( 'z', $other );
+			},
+			$own,
+			'https://downloads.wordpress.org/plugin/x.zip'
+		);
+		$this->assertSame( 'unknown', $entry['transport'] );
+		$this->assertSame( array( 'kind' => 'remote_host', 'host' => 'cdn.example' ), $entry['source'] );
+	}
+
+	/**
+	 * A verified self-update installs OVER the existing plugin through
+	 * Plugin_Upgrader::install(), whose hook_extra says `action: install` and
+	 * names no plugin — install() itself has no notion of "this replaces
+	 * something already here" (Codex r2 on #139, install ledger 2.22.0).
+	 * as_siteagent()'s options-array third argument carries an action
+	 * override, and the frame on_pre_download() stakes for the claimed run
+	 * carries it through to on_install_result(), even though hook_extra
+	 * itself never changes.
+	 */
+	public function test_a_claimed_actions_override_records_update_even_when_hook_extra_says_install(): void {
+		$own   = new Plugin_Upgrader( new Automatic_Upgrader_Skin() );
+		$entry = Aura_Worker_Install_Ledger::as_siteagent(
+			function () use ( $own ) {
+				return $this->one_run( 'self', $own, array( 'type' => 'plugin', 'action' => 'install' ) );
+			},
+			$own,
+			array( 'package' => 'https://downloads.wordpress.org/plugin/self.zip', 'action' => 'update' )
+		);
+		$this->assertSame( 'siteagent', $entry['transport'] );
+		$this->assertSame( 'update', $entry['action'] );
+	}
+
+	/** Without an action override, a claimed run's action still comes from hook_extra, unchanged. */
+	public function test_a_claimed_run_without_an_action_override_keeps_hook_extras_action(): void {
+		$own   = new Plugin_Upgrader( new Automatic_Upgrader_Skin() );
+		$entry = Aura_Worker_Install_Ledger::as_siteagent(
+			function () use ( $own ) {
+				return $this->one_run( 'plain', $own, array( 'type' => 'plugin', 'action' => 'install' ) );
+			},
+			$own
+			// no third argument
+		);
+		$this->assertSame( 'siteagent', $entry['transport'] );
+		$this->assertSame( 'install', $entry['action'] );
+	}
+
+	/** An unclaimed run's action is unaffected by another call's action override. */
+	public function test_an_unclaimed_run_is_unaffected_by_another_calls_action_override(): void {
+		$own   = new Plugin_Upgrader( new Automatic_Upgrader_Skin() );
+		$other = new Plugin_Upgrader( new Automatic_Upgrader_Skin() );
+		$entry = Aura_Worker_Install_Ledger::as_siteagent(
+			function () use ( $other ) {
+				return $this->one_run( 'unclaimed', $other, array( 'type' => 'plugin', 'action' => 'install' ) );
+			},
+			$own,
+			array( 'package' => 'https://downloads.wordpress.org/plugin/x.zip', 'action' => 'update' )
+		);
+		$this->assertSame( 'unknown', $entry['transport'] );
+		$this->assertSame( 'install', $entry['action'] );
+	}
+
+	public function test_update_theme_records_exactly_one_siteagent_entry(): void {
+		$this->theme_run();
+		( new Aura_Worker_Updater() )->update_theme( 'bar' );
+		$entries = Aura_Worker_Install_Ledger::report()['entries'];
+		$this->assertCount( 1, $entries );
+		$this->assertSame( 'siteagent', $entries[0]['transport'] );
+		$this->assertSame( 'update', $entries[0]['action'] );
+	}
+
+	/**
+	 * Structural, not by argument name (Codex r3 on #595): EVERY call of an
+	 * upgrader's install()/upgrade()/bulk_upgrade() in the updater, whatever
+	 * its receiver or argument, is either inside an as_siteagent() closure or
+	 * in one of the two functions whose runs the ledger ignores anyway (core
+	 * and translations never reach the ledger's scope).
+	 */
+	public function test_every_upgrader_call_in_the_updater_is_wrapped(): void {
+		$src    = (string) file_get_contents( SA_PLUGIN_DIR . '/includes/class-aura-worker-updater.php' );
+		$exempt = array( 'update_core', 'update_translations' );
+		preg_match_all( '/->(install|upgrade|bulk_upgrade)\s*\(/', $src, $m, PREG_OFFSET_CAPTURE );
+		$this->assertNotEmpty( $m[0] );
+		$wrapped = 0;
+		foreach ( $m[0] as $hit ) {
+			$before = substr( $src, 0, $hit[1] );
+			preg_match_all( '/function\s+(\w+)\s*\(/', $before, $fn );
+			$func = end( $fn[1] );
+			if ( in_array( $func, $exempt, true ) ) {
+				continue;
+			}
+			$opened = strrpos( $before, 'Aura_Worker_Install_Ledger::as_siteagent(' );
+			$this->assertNotFalse( $opened, "an upgrader call in {$func}() runs outside as_siteagent()" );
+			// The closure opened there must still be open at the call: no
+			// `} );` closing an as_siteagent() between it and the call.
+			// Any closure terminator — `} );`, the wrapper's own
+			// `}, $upgrader );`, or its optional-third-argument form
+			// `}, $upgrader, $zip_url );` (Codex r1 on #139) — between the
+			// opener and the call means the call is outside it (Codex r19 on
+			// #595). The terminator group allows up to two trailing
+			// `, $arg` clauses so a claimed source package's extra argument
+			// does not itself defeat this guard.
+			$this->assertSame( 0, preg_match( '/\}\s*(,\s*\$\w+\s*){0,2}\)\s*;/', substr( $before, $opened ) ), "an upgrader call in {$func}() runs outside as_siteagent()" );
+			$wrapped++;
+		}
+		$this->assertSame( 4, $wrapped ); // self-update install, update_plugin, update_theme, update_single_plugin
+	}
+}
