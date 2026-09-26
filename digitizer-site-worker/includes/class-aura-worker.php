@@ -560,7 +560,14 @@ class Aura_Worker {
 		}
 		wp_add_privacy_policy_content(
 			'SiteAgent',
-			wp_kses_post( wpautop( __( 'This site uses the SiteAgent plugin to enable remote management from the Aura dashboard (my-aura.app). When connected, the Aura dashboard may access site health information including WordPress version, PHP version, installed plugins and themes, and database metadata. No personal user data is collected or transmitted by this plugin.', 'digitizer-site-worker' ) ) )
+			wp_kses_post(
+				wpautop(
+					__( 'This site uses the SiteAgent plugin to enable remote management from the Aura dashboard (my-aura.app). When connected, the Aura dashboard may access site health information including WordPress version, PHP version, installed plugins and themes, and database metadata.', 'digitizer-site-worker' )
+					. "\n\n"
+					// Since 2.22.0 the install ledger keeps personal data (Aura spec 2026-09-21 §4.2).
+					. __( 'SiteAgent also keeps a record of each plugin and theme installation or update: when it happened, how it was made (for example the dashboard, the REST API or WP-CLI), the ID of the user who made it, the name of the application password used (never the password itself) and the REST route. This record is sent to the connected Aura dashboard as part of its security audit. While the plugin is active, records older than 90 days, or beyond the latest 200 installations, are deleted; all of them are deleted when the plugin is uninstalled.', 'digitizer-site-worker' )
+				)
+			)
 		);
 	}
 
