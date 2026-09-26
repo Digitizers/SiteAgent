@@ -60,15 +60,20 @@ class Aura_Worker_Install_Ledger {
 	private static $frames = array();
 
 	/**
-	 * The upgrader OBJECTS SiteAgent's active calls created — one per
-	 * as_siteagent() frame. A run is `transport: siteagent` only when
-	 * `upgrader_pre_download` hands us that very object, so a nested run a
-	 * filter starts — any order, any priority, even for the same plugin —
-	 * goes through its own upgrader and is recorded as what it is (Codex
-	 * r16/r17/r18 on #595: position, "first run" and target-name matching all
-	 * proved spoofable; object identity is not).
+	 * SiteAgent's active as_siteagent() claims — one per frame, `{ upgrader,
+	 * package }`. A run is `transport: siteagent` only when
+	 * `upgrader_pre_download` hands us the very object a claim's `upgrader`
+	 * holds, so a nested run a filter starts — any order, any priority, even
+	 * for the same plugin — goes through its own upgrader and is recorded as
+	 * what it is (Codex r16/r17/r18 on #595: position, "first run" and
+	 * target-name matching all proved spoofable; object identity is not).
 	 *
-	 * @var object[]
+	 * `package` is the claim's optional ORIGINAL package (Codex r1 on #139):
+	 * a verified self-update downloads its zip_url to a temp file and installs
+	 * from that local path, so without this the ledger would record the temp
+	 * path — never the real source — for every verified self-update.
+	 *
+	 * @var array[]
 	 */
 	private static $siteagent_claims = array();
 
@@ -80,12 +85,25 @@ class Aura_Worker_Install_Ledger {
 	 * SiteAgent created — record `transport: siteagent`, approved and audited
 	 * on our side (spec §4.2); any other run inside the call does not.
 	 *
-	 * @param callable $work     The upgrader call.
-	 * @param object   $upgrader The Plugin_Upgrader / Theme_Upgrader it uses.
+	 * @param callable    $work            The upgrader call.
+	 * @param object      $upgrader        The Plugin_Upgrader / Theme_Upgrader it uses.
+	 * @param string|null $source_package  The call's own original package, when
+	 *                                     it differs from what $upgrader will
+	 *                                     actually be told to install (Codex r1
+	 *                                     on #139): a verified self-update
+	 *                                     downloads $zip_url to a temp file and
+	 *                                     installs from THAT path, so on_pre_download()
+	 *                                     would otherwise see and classify only the
+	 *                                     temp path, never the real source. Omitted
+	 *                                     or not a non-empty string, the installed
+	 *                                     package is classified exactly as before.
 	 * @return mixed $work's return.
 	 */
-	public static function as_siteagent( $work, $upgrader ) {
-		self::$siteagent_claims[] = $upgrader;
+	public static function as_siteagent( $work, $upgrader, $source_package = null ) {
+		self::$siteagent_claims[] = array(
+			'upgrader' => $upgrader,
+			'package'  => is_string( $source_package ) && '' !== $source_package ? $source_package : null,
+		);
 		try {
 			return $work();
 		} finally {
@@ -521,12 +539,21 @@ class Aura_Worker_Install_Ledger {
 			if ( null === $type || null === $token ) {
 				return $reply;
 			}
+			$claim = self::matching_claim( $upgrader );
 			self::$frames[ $token ] = array(
 				'type'    => $type,
 				// A non-false reply is the file that will be installed, and its
-				// origin is not ours to know (Codex r2 on #594).
-				'source'  => false === $reply ? self::classify_source( $package ) : array( 'kind' => 'unknown' ),
-				'context' => self::context( self::is_siteagent_run( $upgrader ) ),
+				// origin is not ours to know (Codex r2 on #594) — a non-false
+				// reply still means unknown even when the run carries a claimed
+				// package. A claimed run whose claim carries its own original
+				// package classifies THAT instead of $package (Codex r1 on
+				// #139): a verified self-update swaps the URL for a local temp
+				// file before calling install(), and that temp path is never
+				// the real source.
+				'source'  => false === $reply
+					? self::classify_source( null !== $claim && null !== $claim['package'] ? $claim['package'] : $package )
+					: array( 'kind' => 'unknown' ),
+				'context' => self::context( null !== $claim ),
 			);
 		} catch ( \Throwable $e ) {
 			// Recording never breaks an upgrade.
@@ -741,25 +768,25 @@ class Aura_Worker_Install_Ledger {
 	}
 
 	/**
-	 * Whether $upgrader is the very object one of SiteAgent's own active
-	 * as_siteagent() calls created (Task 3). Object identity only — never
-	 * position, "first run", or a target-name match (Codex r16/r17/r18 on
-	 * #595: all proved spoofable; object identity is not). Always false
-	 * until Task 3's as_siteagent() ever populates $siteagent_claims.
+	 * The claim one of SiteAgent's own active as_siteagent() calls made for
+	 * $upgrader (Task 3), if any — object identity only, never position,
+	 * "first run", or a target-name match (Codex r16/r17/r18 on #595: all
+	 * proved spoofable; object identity is not). Always null until
+	 * as_siteagent() ever populates $siteagent_claims.
 	 *
 	 * @param mixed $upgrader The upgrader instance upgrader_pre_download hands us.
-	 * @return bool
+	 * @return array|null `{ upgrader, package }`, the exact claim as_siteagent() stored.
 	 */
-	private static function is_siteagent_run( $upgrader ) {
+	private static function matching_claim( $upgrader ) {
 		if ( ! is_object( $upgrader ) ) {
-			return false;
+			return null;
 		}
 		foreach ( self::$siteagent_claims as $claim ) {
-			if ( $claim === $upgrader ) {
-				return true;
+			if ( $claim['upgrader'] === $upgrader ) {
+				return $claim;
 			}
 		}
-		return false;
+		return null;
 	}
 
 	/** @return string|null */

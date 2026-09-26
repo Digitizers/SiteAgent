@@ -136,6 +136,26 @@ add_action( 'plugins_loaded', 'aura_worker_init' );
  */
 function aura_worker_activate( $network_wide = false ) {
 	aura_worker_for_each_site( 'aura_worker_activate_site', (bool) $network_wide );
+	// The install ledger's coverage restarts here, once per ACTIVATION CALL —
+	// not once per site (Codex r1 on #139, install ledger 2.22.0): the ledger
+	// is a single NETWORK option even on a network-wide activation, so a call
+	// inside the per-site loop restarted that one shared ledger once per site,
+	// reporting `evicted: true` (coverage "moved") on every site after the
+	// first — even on a fresh network-wide install where nothing had
+	// happened yet. This hook fires exactly once per activation, whether
+	// network-wide or on a single site, which is the one moment a
+	// deactivate -> reactivate cycle should actually move coverage: the
+	// plugin observed nothing while inactive, and leaving `started` unmoved
+	// would have the ledger claim coverage over that gap. Guarded and
+	// swallowed on both sides — activation must never fail because of the
+	// ledger.
+	if ( class_exists( 'Aura_Worker_Install_Ledger' ) ) {
+		try {
+			Aura_Worker_Install_Ledger::restart_coverage();
+		} catch ( \Throwable $e ) {
+			// Activation must still complete.
+		}
+	}
 }
 register_activation_hook( __FILE__, 'aura_worker_activate' );
 
@@ -175,20 +195,12 @@ function aura_worker_activate_site() {
 		error_log( 'SiteAgent: an Aura Application Password left over from a failed deactivation could not be revoked; revoke it by hand in Users → Profile → Application Passwords.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 	}
 	Aura_Worker_Magic_Link::release_site( $aura_fence );
-	// The install ledger's coverage restarts here, on EVERY activation of
-	// THIS site — not gated by a version change like aura_worker_maybe_upgrade()
-	// below (final review Task 1, P6.3 phase 2): a deactivate → reactivate
-	// cycle observed nothing while inactive, and leaving `started` unmoved
-	// would have the ledger claim coverage over that gap. Guarded and
-	// swallowed on both sides — activation must never fail because of the
-	// ledger.
-	if ( class_exists( 'Aura_Worker_Install_Ledger' ) ) {
-		try {
-			Aura_Worker_Install_Ledger::restart_coverage();
-		} catch ( \Throwable $e ) {
-			// Activation must still complete.
-		}
-	}
+	// The install ledger's coverage restart lives in aura_worker_activate()
+	// itself, not here (Codex r1 on #139): the ledger is a single NETWORK
+	// option even on a network-wide activation, so restarting it once PER
+	// SITE from this function restarted that one shared ledger once per
+	// site — reporting `evicted: true` on every site after the first, even
+	// on a fresh network-wide install where nothing had happened yet.
 	// Through the SAME decision as a request-time upgrade (round-1 P2). A site
 	// updated while the plugin was inactive reaches this hook with the marker
 	// still behind and `plugins_loaded` already past: stamping the version

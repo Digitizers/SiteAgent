@@ -452,10 +452,10 @@ class Aura_Worker_Updater {
 		// Heartbeaten from inside (SA#80): the install is the longest phase, and
 		// renewing only around it left it seizable while it ran. The download
 		// above already sits between two renewals and fires no upgrader filter.
-		$result = $this->heartbeat_during( $fence, function () use ( $upgrader, $install_source ) {
+		$result = $this->heartbeat_during( $fence, function () use ( $upgrader, $install_source, $zip_url ) {
 			return Aura_Worker_Install_Ledger::as_siteagent( function () use ( $upgrader, $install_source ) {
 				return $upgrader->install( $install_source, array( 'overwrite_package' => true ) );
-			}, $upgrader );
+			}, $upgrader, $zip_url );
 		} );
 
 		if ( '' !== $tmp && file_exists( $tmp ) ) {

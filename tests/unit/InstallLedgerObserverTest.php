@@ -338,19 +338,58 @@ final class InstallLedgerObserverTest extends TestCase {
 	/**
 	 * Deactivate -> reactivate must not leave `started` unchanged (final
 	 * review Task 1): the ledger would otherwise claim coverage over a gap it
-	 * never observed while inactive. Static source inspection, like this
+	 * never observed while inactive.
+	 *
+	 * The call lives in `aura_worker_activate()` — once per activation call —
+	 * not in `aura_worker_activate_site()` (Codex r1 on #139/install ledger
+	 * 2.22.0): that per-site function runs once per site on a network-wide
+	 * activation, but the ledger is a single NETWORK option even then, so
+	 * calling restart_coverage() from inside it restarted the very same
+	 * shared ledger once per site — reporting `evicted: true` on every site
+	 * after the first, even on a fresh network-wide install where nothing had
+	 * happened yet. `aura_worker_activate()` fires exactly once per
+	 * activation, single-site or network-wide alike, matching the one moment
+	 * coverage should actually move. Static source inspection, like this
 	 * suite's other activation-hook assertions (ConnectAppPasswordTest) —
 	 * digitizer-site-worker.php is never `require`d live by this bootstrap.
 	 */
-	public function test_activation_restarts_the_ledgers_coverage_per_site(): void {
+	public function test_activation_restarts_the_ledgers_coverage_once_per_activation(): void {
 		$main     = (string) file_get_contents( SA_PLUGIN_DIR . '/digitizer-site-worker.php' );
-		$activate = substr( $main, (int) strpos( $main, 'function aura_worker_activate_site()' ) );
-		$call     = strpos( $activate, 'Aura_Worker_Install_Ledger::restart_coverage()' );
-		$this->assertNotFalse( $call, 'aura_worker_activate_site() must call Aura_Worker_Install_Ledger::restart_coverage()' );
+		$opened   = strpos( $main, 'function aura_worker_activate( $network_wide = false ) {' );
+		$this->assertNotFalse( $opened, 'aura_worker_activate() must exist' );
+		$activate = substr( $main, $opened );
+		$next_fn  = strpos( $activate, 'function ', 1 );
+		$this->assertNotFalse( $next_fn, 'aura_worker_activate() must be followed by another function' );
+		$activate = substr( $activate, 0, $next_fn ); // just this one function's body
+
+		$call = strpos( $activate, 'Aura_Worker_Install_Ledger::restart_coverage()' );
+		$this->assertNotFalse( $call, 'aura_worker_activate() must call Aura_Worker_Install_Ledger::restart_coverage()' );
 		$before = substr( $activate, 0, $call );
 		$this->assertStringContainsString( "class_exists( 'Aura_Worker_Install_Ledger' )", $before );
 		$try = strrpos( $before, 'try {' );
 		$this->assertNotFalse( $try, 'the call must be guarded by a try block so activation never fails because of the ledger' );
 		$this->assertStringContainsString( 'catch ( \Throwable $e )', substr( $activate, $try ) );
+	}
+
+	/**
+	 * The per-site function must NOT also restart coverage — that would be
+	 * once per site again on a network-wide activation, the exact defect
+	 * test_activation_restarts_the_ledgers_coverage_once_per_activation()
+	 * guards against from the other side (Codex r1 on #139).
+	 */
+	public function test_the_per_site_activation_function_does_not_restart_coverage(): void {
+		$main         = (string) file_get_contents( SA_PLUGIN_DIR . '/digitizer-site-worker.php' );
+		$opened       = strpos( $main, 'function aura_worker_activate_site()' );
+		$this->assertNotFalse( $opened, 'aura_worker_activate_site() must exist' );
+		$activate_site = substr( $main, $opened );
+		$next_fn       = strpos( $activate_site, 'function ', 1 );
+		$this->assertNotFalse( $next_fn, 'aura_worker_activate_site() must be followed by another function' );
+		$activate_site = substr( $activate_site, 0, $next_fn ); // just this one function's body
+
+		$this->assertStringNotContainsString(
+			'Aura_Worker_Install_Ledger::restart_coverage()',
+			$activate_site,
+			'aura_worker_activate_site() must not itself call restart_coverage() — the network ledger would restart once per site'
+		);
 	}
 }
