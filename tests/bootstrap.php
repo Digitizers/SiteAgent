@@ -81,6 +81,14 @@ if ( ! defined( 'AURA_WORKER_VERSION' ) ) {
 	// way through (normally the rule/grant guards stop it first).
 	define( 'AURA_WORKER_VERSION', 'test' );
 }
+if ( ! defined( 'AURA_WORKER_FILE' ) ) {
+	// The install ledger's network-active probe (2.22.0) resolves this
+	// through plugin_basename() the same way digitizer-site-worker.php's own
+	// `define( 'AURA_WORKER_FILE', __FILE__ )` does; bootstrap.php loads the
+	// plugin's classes directly and never requires that top-level file, so
+	// the constant needs a test-only stand-in here.
+	define( 'AURA_WORKER_FILE', SA_PLUGIN_DIR . '/digitizer-site-worker.php' );
+}
 
 // ---------------------------------------------------------------------------
 // Mutable state used by the stubs
@@ -237,6 +245,15 @@ if ( ! function_exists( 'trailingslashit' ) ) {
 if ( ! function_exists( 'plugin_dir_path' ) ) {
 	function plugin_dir_path( string $file ): string {
 		return trailingslashit( dirname( $file ) );
+	}
+}
+
+if ( ! function_exists( 'plugin_basename' ) ) {
+	function plugin_basename( string $file ): string {
+		// Core's real algorithm is far more elaborate (symlinked plugin dirs,
+		// WP_PLUGIN_DIR vs muplugins), but every caller in this suite passes a
+		// path already under SA_PLUGIN_DIR, so stripping that prefix is exact.
+		return ltrim( str_replace( '\\', '/', str_replace( (string) SA_PLUGIN_DIR, '', $file ) ), '/' );
 	}
 }
 
@@ -1559,6 +1576,16 @@ if ( ! function_exists( 'get_plugins' ) ) {
 if ( ! function_exists( 'is_plugin_active' ) ) {
 	function is_plugin_active( $plugin ) {
 		return isset( $GLOBALS['_active_plugins'][ $plugin ] );
+	}
+}
+
+if ( ! function_exists( 'is_plugin_active_for_network' ) ) {
+	// The install ledger's `installs.error: ledger_partial_network` probe
+	// (2.22.0) reads this on multisite. Default true: a single site never
+	// consults it (is_multisite() gates the call), and a test that cares sets
+	// $GLOBALS['_network_active_plugins'][ $plugin ] explicitly.
+	function is_plugin_active_for_network( $plugin ) {
+		return isset( $GLOBALS['_network_active_plugins'][ $plugin ] );
 	}
 }
 
@@ -5244,7 +5271,7 @@ function sa_reset_state(): void {
 		Aura_Worker_Call_Context::reset(); // the dispatching route is a static too
 	}
 	if ( class_exists( 'Aura_Worker_Install_Ledger' ) ) {
-		Aura_Worker_Install_Ledger::reset_for_tests(); // frames, the SiteAgent depth and probe overrides are statics (2.22.0)
+		Aura_Worker_Install_Ledger::reset_for_tests(); // frames, SiteAgent's claimed upgraders and probe overrides are statics (2.22.0)
 	}
 	if ( class_exists( 'Aura_Worker_Redact' ) ) {
 		Aura_Worker_Redact::reset_for_tests(); // the unredacted-grant exemption memo is a static (#419)
@@ -5401,6 +5428,7 @@ function sa_reset_state(): void {
 	$GLOBALS['_sa_state']     = array();
 	$GLOBALS['_is_admin']       = false; // is_admin() — see the stub above.
 	$GLOBALS['_is_multisite']   = false;
+	$GLOBALS['_network_active_plugins'] = array(); // is_plugin_active_for_network() — see the stub above.
 	$GLOBALS['_current_blog_id'] = 1; // get_current_blog_id() — core's own default on a single site.
 	$GLOBALS['_main_site_id']  = 1; // is_main_site() — which blog of a network is the main one (Ruling P39).
 	$GLOBALS['_site_options']   = array();

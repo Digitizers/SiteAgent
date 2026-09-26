@@ -39,6 +39,18 @@ final class AgentCodeAuditInstallsTest extends TestCase {
 		$returns = ( new Aura_Tool_Audit_Agent_Code() )->get_returns();
 		$this->assertArrayHasKey( 'installs', $returns );
 		$this->assertStringContainsString( 'since', $returns['installs'] );
+		// Final review Task 2: a network ledger cannot see every install when
+		// SiteAgent is active per-site rather than network-wide.
+		$this->assertStringContainsString( 'ledger_partial_network', $returns['installs'] );
+	}
+
+	public function test_installs_reports_partial_coverage_on_a_not_network_active_multisite(): void {
+		$GLOBALS['_is_multisite'] = true;
+		Aura_Worker_Install_Ledger::_set_probe_for_tests( array( 'now' => 1790424000, 'network_active' => false ) );
+		Aura_Worker_Install_Ledger::ensure_started();
+		$out = $this->run_tool();
+		$this->assertSame( array( 'error' => 'ledger_partial_network' ), $out['installs'] );
+		$this->assertArrayHasKey( 'installed', $out['angie_snippets'] ); // siblings unaffected
 	}
 
 	public function test_uninstall_removes_the_network_rows_on_multisite(): void {

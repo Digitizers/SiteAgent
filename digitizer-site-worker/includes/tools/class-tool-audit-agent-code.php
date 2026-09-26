@@ -18,8 +18,11 @@
  * Facts, not verdicts, under audit_mcp_exposure's contract: every subtree is
  * independent and answers { error } on a throw; `null` is unreadable, never
  * zero; walks are bounded and say so; strings are clipped. Never reads a
- * file's contents, never executes anything, never touches the database
- * beyond the CPT query and get_post_meta().
+ * file's contents and never executes anything. Every read beyond the CPT
+ * query and get_post_meta() belongs to the installs subtree: it also DELETES
+ * — the install ledger's own retention pass (spec §4.2), purging rows past 90
+ * days before answering, exactly as report() does on every other caller
+ * (final review Task 3).
  *
  * @package Aura_Worker
  */
@@ -70,12 +73,18 @@ class Aura_Tool_Audit_Agent_Code extends Aura_Tool_Base {
 			'angie_snippets' => 'object — { installed, version } (installed = loaded at runtime OR present in the installed-plugin inventory, so a deactivated Angie still reports its dormant rows and directories) and, when installed: module_active, total|published|drafts|agent_authored (int|null — null when the CPT read failed or hit its cap of 500), active_env ("prod"|"dev"|null — the environment Angie\'s loader includes for THIS request; null when the dev-mode API is not callable or the snippet module is inactive), deployed: { prod: { dirs, agent_authored, orphan }, dev: {…} } (int|null per environment — directories named snippet-<post_id> that contain main.php, joined to the CPT by id; orphan = no row, which the loader still includes), latest_deploy_at: { prod, dev } (ISO8601|null, per environment, never a max across both), recent: [{ id, title, status, agent_authored, environments, modified }] (newest first, cap 20; recent_truncated when cut — never bounds a count), coverage: { total_seen, returned, truncated, cap } (the DIRECTORY WALK only, 200 entries per environment). Absent Angie: { installed: false, version: "" }. A scan that threw: { error }.',
 			'power_pack'     => 'object — { installed, version, execute_php, fs_write, wp_cli, create_publish } from AURA_POWER_PACK_VERSION / AURA_POWER_EXECUTE_PHP / AURA_POWER_ALLOW_FS_WRITE / AURA_POWER_ALLOW_WP_CLI; every flag false when not installed',
 			'third_party'    => 'object — { emcp_sandbox: { present, version, active, store }, atarim_exec: { present } }. active = EMCP_TOOLS_VERSION is defined (the plugin is loaded). store = null when wp-content/emcp-sandbox does not exist, { error } when it could not be walked — one of sandbox_unreadable (the root would not open), sandbox_is_link (the root is itself a link, so it is not walked at all) or sandbox_walk_failed (the walk threw; the sibling subtrees still answer) — else { files, executable_files, newest_mtime, truncated, unreadable_dirs } — a metadata walk: no file is opened and no name leaves the site; a link is one entry judged by its own name, never followed and never stat\'ed; truncated = the 20000-entry cap was reached, and that cap counts every entry visited, directories included; unreadable_dirs counts sub-directories that could not be opened or vanished mid-walk; truncated OR unreadable_dirs >= 1 means the counts are lower bounds (since 2.19.2)',
-			'installs'       => 'object — the install ledger (since 2.22.0): { since, entries, total, evicted } or { error } (ledger_unreadable | ledger_unavailable). Every plugin and theme install or update this site performed, newest first, every retained entry (≤ 200, ≤ 90 days): { when, type: plugin|theme, action: install|update, slug, version|null, transport: wp_admin|rest|wp_cli|cron|auto_update|siteagent|unknown, user_id, auth: cookie|application_password|none|unknown, app_password_name|null (the name only — never the uuid), route|null (REST route, no query), source: { kind: wporg|uploaded_zip|remote_host|local_path|unknown, attachment_id?, host? } }. since = the edge of coverage — every install after it is held; evicted = something was rotated out. user_id, app_password_name and route are personal data kept by owner decision (Aura spec 2026-09-21 §4.2)',
+			'installs'       => 'object — the install ledger (since 2.22.0): { since, entries, total, evicted } or { error } (ledger_unreadable | ledger_unavailable | ledger_partial_network). Every plugin and theme install or update this site performed, newest first, every retained entry (≤ 200, ≤ 90 days): { when, type: plugin|theme, action: install|update, slug, version|null, transport: wp_admin|rest|wp_cli|cron|auto_update|siteagent|unknown, user_id, auth: cookie|application_password|none|unknown, app_password_name|null (the name only — never the uuid), route|null (REST route, no query), source: { kind: wporg|uploaded_zip|remote_host|local_path|unknown, attachment_id?, host? } }. since = the edge of coverage — every install after it is held; evicted = something was rotated out. user_id, app_password_name and route are personal data kept by owner decision (Aura spec 2026-09-21 §4.2). ledger_partial_network = this is a multisite network and SiteAgent is active on this site but not network-activated, so the one network-wide ledger cannot see every site\'s installs',
 			'counters_as_of' => 'string — ISO8601 instant the counts were taken',
 		);
 	}
 
-	/** Read-only: never mutates the site. */
+	/**
+	 * Annotated read_only for the tool registry's contract, not literally
+	 * side-effect-free: the installs subtree's report() call deletes ledger
+	 * rows past their 90-day retention window before answering (spec §4.2,
+	 * final review Task 3) — a physical purge, not a mutation of the site
+	 * an agent authored or can author, which is what read_only promises here.
+	 */
 	public function get_annotations() {
 		return array(
 			'read_only'         => true,

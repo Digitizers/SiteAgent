@@ -175,6 +175,20 @@ function aura_worker_activate_site() {
 		error_log( 'SiteAgent: an Aura Application Password left over from a failed deactivation could not be revoked; revoke it by hand in Users → Profile → Application Passwords.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 	}
 	Aura_Worker_Magic_Link::release_site( $aura_fence );
+	// The install ledger's coverage restarts here, on EVERY activation of
+	// THIS site — not gated by a version change like aura_worker_maybe_upgrade()
+	// below (final review Task 1, P6.3 phase 2): a deactivate → reactivate
+	// cycle observed nothing while inactive, and leaving `started` unmoved
+	// would have the ledger claim coverage over that gap. Guarded and
+	// swallowed on both sides — activation must never fail because of the
+	// ledger.
+	if ( class_exists( 'Aura_Worker_Install_Ledger' ) ) {
+		try {
+			Aura_Worker_Install_Ledger::restart_coverage();
+		} catch ( \Throwable $e ) {
+			// Activation must still complete.
+		}
+	}
 	// Through the SAME decision as a request-time upgrade (round-1 P2). A site
 	// updated while the plugin was inactive reaches this hook with the marker
 	// still behind and `plugins_loaded` already past: stamping the version

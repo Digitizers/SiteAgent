@@ -306,6 +306,8 @@ final class InstallLedgerObserverTest extends TestCase {
 			'other host'         => array( 'https://cdn.evil.example/p.zip?sig=1', array( 'kind' => 'remote_host', 'host' => 'cdn.evil.example' ) ),
 			'uploads'            => array( '/srv/wp-content/uploads/2026/09/p.zip', array( 'kind' => 'uploaded_zip' ) ),
 			'other local path'   => array( '/tmp/p.zip', array( 'kind' => 'local_path' ) ),
+			'traversal segment'  => array( '/srv/wp-content/uploads/2026/09/../../../etc/passwd.zip', array( 'kind' => 'local_path' ) ),
+			'traversal, backslash normalised' => array( '/srv/wp-content/uploads\\..\\..\\etc\\passwd.zip', array( 'kind' => 'local_path' ) ),
 			'another scheme'     => array( 'ftp://x/p.zip', array( 'kind' => 'unknown' ) ),
 			'empty'              => array( '', array( 'kind' => 'unknown' ) ),
 			'not a string'       => array( array( 'x' ), array( 'kind' => 'unknown' ) ),
@@ -331,5 +333,24 @@ final class InstallLedgerObserverTest extends TestCase {
 		$this->assertSame( PHP_INT_MAX, has_filter( 'upgrader_pre_download', array( 'Aura_Worker_Install_Ledger', 'on_pre_download' ) ) );
 		$this->assertSame( PHP_INT_MAX, has_filter( 'upgrader_install_package_result', array( 'Aura_Worker_Install_Ledger', 'on_install_result' ) ) );
 		$this->assertNotFalse( has_action( 'wp_scheduled_delete', array( 'Aura_Worker_Install_Ledger', 'purge_expired' ) ) ); // physical retention, daily
+	}
+
+	/**
+	 * Deactivate -> reactivate must not leave `started` unchanged (final
+	 * review Task 1): the ledger would otherwise claim coverage over a gap it
+	 * never observed while inactive. Static source inspection, like this
+	 * suite's other activation-hook assertions (ConnectAppPasswordTest) —
+	 * digitizer-site-worker.php is never `require`d live by this bootstrap.
+	 */
+	public function test_activation_restarts_the_ledgers_coverage_per_site(): void {
+		$main     = (string) file_get_contents( SA_PLUGIN_DIR . '/digitizer-site-worker.php' );
+		$activate = substr( $main, (int) strpos( $main, 'function aura_worker_activate_site()' ) );
+		$call     = strpos( $activate, 'Aura_Worker_Install_Ledger::restart_coverage()' );
+		$this->assertNotFalse( $call, 'aura_worker_activate_site() must call Aura_Worker_Install_Ledger::restart_coverage()' );
+		$before = substr( $activate, 0, $call );
+		$this->assertStringContainsString( "class_exists( 'Aura_Worker_Install_Ledger' )", $before );
+		$try = strrpos( $before, 'try {' );
+		$this->assertNotFalse( $try, 'the call must be guarded by a try block so activation never fails because of the ledger' );
+		$this->assertStringContainsString( 'catch ( \Throwable $e )', substr( $activate, $try ) );
 	}
 }

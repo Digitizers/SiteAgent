@@ -60,13 +60,6 @@ class Aura_Worker_Install_Ledger {
 	private static $frames = array();
 
 	/**
-	 * Depth of SiteAgent's own upgrader calls (as_siteagent(), Task 3).
-	 *
-	 * @var int
-	 */
-	private static $siteagent_depth = 0;
-
-	/**
 	 * The upgrader OBJECTS SiteAgent's active calls created — one per
 	 * as_siteagent() frame. A run is `transport: siteagent` only when
 	 * `upgrader_pre_download` hands us that very object, so a nested run a
@@ -92,13 +85,11 @@ class Aura_Worker_Install_Ledger {
 	 * @return mixed $work's return.
 	 */
 	public static function as_siteagent( $work, $upgrader ) {
-		self::$siteagent_depth++;
 		self::$siteagent_claims[] = $upgrader;
 		try {
 			return $work();
 		} finally {
 			array_pop( self::$siteagent_claims );
-			self::$siteagent_depth--;
 		}
 	}
 
@@ -197,9 +188,20 @@ class Aura_Worker_Install_Ledger {
 	 * 90 days first — retention is physical, the rows hold personal data — and
 	 * still leaves them out of the answer should that write fail.
 	 *
+	 * On multisite, checked BEFORE any storage read (final review Task 2):
+	 * this class always stores network-wide (read_entries()/read_state()), so
+	 * when SiteAgent is active on this site but not network-activated, that
+	 * one ledger cannot see what every OTHER site's own (non-network) copy of
+	 * this plugin is installing — the network option only ever holds what
+	 * ran through THIS site's requests. A single site never checks (Ruling,
+	 * final review Task 2, binding).
+	 *
 	 * @return array { since, entries, total, evicted } | { error }
 	 */
 	public static function report() {
+		if ( is_multisite() && ! (bool) self::probe()['network_active'] ) {
+			return array( 'error' => 'ledger_partial_network' );
+		}
 		self::purge_rows();
 		$now    = self::now();
 		$stored = self::read_entries();
@@ -317,6 +319,42 @@ class Aura_Worker_Install_Ledger {
 		self::commit( self::fresh_state( self::now() ), array(), self::now() );
 	}
 
+	/**
+	 * Restart coverage on (re)activation — called from
+	 * aura_worker_activate_site() for every site (final review Task 1).
+	 * Deactivate → reactivate must not leave `started` unchanged: the plugin
+	 * observed nothing while inactive, and an unmoved `started` would have
+	 * report() claim coverage over that gap.
+	 *
+	 * A genuinely fresh site (no state, no ring at all) is not a
+	 * reactivation — ensure_started() itself is correct there, `evicted:
+	 * false`. Everything else moves coverage to a boundary at NOW, exactly
+	 * like an install that could not be recorded, keeping whatever ring is on
+	 * disk. The one shape this must never produce is a state with no ring at
+	 * all (storage_corrupt() treats that as corruption, Codex r8 on #595): a
+	 * state alone is repaired by committing an empty ring alongside the
+	 * boundary rather than writing the state in isolation.
+	 */
+	public static function restart_coverage() {
+		try {
+			$ring = self::read_entries();
+			if ( null === self::read_state() && null === $ring ) {
+				self::ensure_started();
+				return;
+			}
+			if ( null === $ring ) {
+				$now              = self::now();
+				$state            = self::fresh_state( $now );
+				$state['evicted'] = true;
+				self::commit( $state, array(), $now );
+				return;
+			}
+			self::write_boundary( self::now() ); // the ring already on disk is left untouched
+		} catch ( \Throwable $e ) {
+			// Reactivation must not fail because of the ledger.
+		}
+	}
+
 	/** @return int */
 	public static function now() {
 		$p = self::probe();
@@ -375,9 +413,8 @@ class Aura_Worker_Install_Ledger {
 
 	/** Clear every static (sa_reset_state()). */
 	public static function reset_for_tests() {
-		self::$probe_overrides = array();
-		self::$frames          = array();
-		self::$siteagent_depth  = 0;
+		self::$probe_overrides  = array();
+		self::$frames           = array();
 		self::$siteagent_claims = array();
 	}
 
@@ -402,8 +439,32 @@ class Aura_Worker_Install_Ledger {
 			'uploads'           => self::uploads_dir(),
 			'attachment_ids'    => null,
 			'versions'          => null,
+			// report()'s multisite gate (final review Task 2): computed lazily
+			// — non-multisite never checks, so a single site never pays for
+			// requiring wp-admin/includes/plugin.php. Overridable in tests so
+			// they never depend on WP's real plugin-activation internals.
+			'network_active'    => is_multisite() ? self::network_active_now() : true,
 		);
 		return array_merge( $real, self::$probe_overrides );
+	}
+
+	/**
+	 * Whether SiteAgent is network-activated (spec, final review Task 2).
+	 * Only ever consulted on multisite. A fact this class cannot resolve
+	 * (the constant or the function missing) answers true — unable to prove
+	 * partial coverage is not the same as proving it, and this call must
+	 * never itself break a read.
+	 *
+	 * @return bool
+	 */
+	private static function network_active_now() {
+		if ( ! function_exists( 'is_plugin_active_for_network' ) ) {
+			require_once ABSPATH . 'wp-admin/includes/plugin.php';
+		}
+		if ( ! function_exists( 'is_plugin_active_for_network' ) || ! defined( 'AURA_WORKER_FILE' ) ) {
+			return true;
+		}
+		return (bool) is_plugin_active_for_network( plugin_basename( AURA_WORKER_FILE ) );
 	}
 
 	/** Register the three filters (spec §4.1). */
@@ -434,6 +495,15 @@ class Aura_Worker_Install_Ledger {
 
 	/**
 	 * Classify the package and capture the request context, under the token.
+	 *
+	 * A run that stops here — download_url() itself fails, or anything after
+	 * this filter throws before WordPress ever calls
+	 * upgrader_install_package_result — leaves its frame in $frames with no
+	 * on_install_result() call to clear it. That is not a leak: $frames is a
+	 * static, so it lives only for THIS request and is gone when the request
+	 * ends, and every token is a fresh wp_generate_uuid4() (on_package_options()),
+	 * so a stray frame from an earlier aborted run in the same request can
+	 * never be mistaken for a different one's.
 	 *
 	 * @param mixed $reply      An earlier filter's answer: false, a local file, or a WP_Error.
 	 * @param mixed $package    The package WordPress would download.
@@ -466,6 +536,12 @@ class Aura_Worker_Install_Ledger {
 
 	/**
 	 * Write the entry for a package that installed.
+	 *
+	 * A frame this call never sees — because on_pre_download() never staked
+	 * one for this token, or a run stopped before reaching here at all — is
+	 * simply gone: $frames lives only for this request, and tokens are unique
+	 * per run (wp_generate_uuid4() in on_package_options()), so there is never
+	 * a stale frame from a PREVIOUS run to mistake for this one's.
 	 *
 	 * @param mixed $result     install_package()'s result, or a WP_Error.
 	 * @param mixed $hook_extra The run's hook_extra.
@@ -576,9 +652,16 @@ class Aura_Worker_Install_Ledger {
 		}
 		$p       = self::probe();
 		$uploads = $p['uploads'];
+		$path    = str_replace( '\\', '/', $package );
+		// A traversal segment is never resolved as though it were safely
+		// under uploads — `/../` (or a leading `../`) always answers
+		// local_path, whatever the string looks like it starts with (final
+		// review Task 5).
+		if ( preg_match( '#(?:^|/)\.\.(?:/|$)#', $path ) ) {
+			return array( 'kind' => 'local_path' );
+		}
 		if ( is_array( $uploads ) && ! empty( $uploads['basedir'] ) ) {
 			$base = rtrim( str_replace( '\\', '/', (string) $uploads['basedir'] ), '/' ) . '/';
-			$path = str_replace( '\\', '/', $package );
 			if ( 0 === strpos( $path, $base ) ) {
 				$out = array( 'kind' => 'uploaded_zip' );
 				$id  = self::attachment_id( rtrim( (string) ( $uploads['baseurl'] ?? '' ), '/' ) . '/' . substr( $path, strlen( $base ) ) );

@@ -49,6 +49,61 @@ final class InstallLedgerStoreTest extends TestCase {
 		$this->assertSame( gmdate( 'c', self::NOW ), Aura_Worker_Install_Ledger::report()['since'] );
 	}
 
+	// ---- restart_coverage() (deactivate -> reactivate; final review Task 1) ----
+
+	public function test_restart_coverage_on_a_fresh_site_behaves_like_ensure_started(): void {
+		Aura_Worker_Install_Ledger::restart_coverage();
+		$r = Aura_Worker_Install_Ledger::report();
+		$this->assertSame( gmdate( 'c', self::NOW ), $r['since'] );
+		$this->assertSame( array(), $r['entries'] );
+		$this->assertFalse( $r['evicted'] ); // a fresh site: nothing was ever evicted
+		$this->assertSame(
+			array( 'started' => gmdate( 'c', self::NOW ), 'count_edge' => null, 'evicted' => false ),
+			get_option( Aura_Worker_Install_Ledger::STATE_OPTION )
+		);
+	}
+
+	public function test_restart_coverage_over_an_existing_ring_moves_since_and_keeps_the_rows(): void {
+		Aura_Worker_Install_Ledger::ensure_started();
+		Aura_Worker_Install_Ledger::append( $this->entry( self::NOW, 'kept' ) );
+		$later = self::NOW + 3600;
+		Aura_Worker_Install_Ledger::_set_probe_for_tests( array( 'now' => $later ) );
+		Aura_Worker_Install_Ledger::restart_coverage();
+		$r = Aura_Worker_Install_Ledger::report();
+		$this->assertSame( gmdate( 'c', $later ), $r['since'] );
+		$this->assertTrue( $r['evicted'] );
+		// The rows themselves are not deleted — restart_coverage() only moves
+		// the edge of coverage; report()'s own `since` hides them, but the
+		// ring on disk still holds them (a later restart_coverage(), or a
+		// bug, must not have silently wiped install history).
+		$this->assertSame( array( 'kept' ), array_column( get_option( Aura_Worker_Install_Ledger::OPTION ), 'slug' ) );
+	}
+
+	public function test_restart_coverage_over_an_orphaned_ring_keeps_it_and_becomes_readable(): void {
+		$rows = array( $this->entry( self::NOW - 60, 'evidence' ) );
+		$GLOBALS['_options'][ Aura_Worker_Install_Ledger::OPTION ] = $rows; // the state is gone: an orphan
+		$this->assertSame( array( 'error' => 'ledger_unreadable' ), Aura_Worker_Install_Ledger::report() );
+		Aura_Worker_Install_Ledger::restart_coverage();
+		$this->assertSame( $rows, get_option( Aura_Worker_Install_Ledger::OPTION ) ); // never overwritten
+		$r = Aura_Worker_Install_Ledger::report();
+		$this->assertSame( array( 'evidence' ), array_column( $r['entries'], 'slug' ) );
+		$this->assertSame( gmdate( 'c', self::NOW ), $r['since'] );
+		$this->assertTrue( $r['evicted'] );
+	}
+
+	public function test_restart_coverage_over_a_state_with_no_ring_commits_a_readable_empty_ring(): void {
+		Aura_Worker_Install_Ledger::ensure_started(); // the ring is created WITH the state
+		delete_option( Aura_Worker_Install_Ledger::OPTION ); // the rows vanish; the state stays (a state-alone orphan)
+		$this->assertSame( array( 'error' => 'ledger_unreadable' ), Aura_Worker_Install_Ledger::report() );
+		Aura_Worker_Install_Ledger::restart_coverage();
+		// storage_corrupt() treats a state without its ring as corruption
+		// (Codex r8 on #595): restart_coverage() must never leave that shape
+		// on disk, so it commits an empty ring alongside the boundary.
+		$this->assertSame( array(), get_option( Aura_Worker_Install_Ledger::OPTION ) );
+		$r = Aura_Worker_Install_Ledger::report();
+		$this->assertSame( array( gmdate( 'c', self::NOW ), array(), true ), array( $r['since'], $r['entries'], $r['evicted'] ) );
+	}
+
 	public function test_since_is_never_earlier_than_ninety_days(): void {
 		Aura_Worker_Install_Ledger::_set_probe_for_tests( array( 'now' => self::NOW - 200 * 86400 ) );
 		Aura_Worker_Install_Ledger::ensure_started();
@@ -326,12 +381,51 @@ final class InstallLedgerStoreTest extends TestCase {
 
 	public function test_multisite_keeps_both_rows_as_network_options(): void {
 		$GLOBALS['_is_multisite'] = true;
+		$GLOBALS['_network_active_plugins'][ plugin_basename( AURA_WORKER_FILE ) ] = true; // network-active: report() sees every site
 		Aura_Worker_Install_Ledger::ensure_started();
 		Aura_Worker_Install_Ledger::append( $this->entry( self::NOW ) );
 		$this->assertArrayHasKey( Aura_Worker_Install_Ledger::OPTION, $GLOBALS['_site_options'] );
 		$this->assertArrayHasKey( Aura_Worker_Install_Ledger::STATE_OPTION, $GLOBALS['_site_options'] );
 		$this->assertArrayNotHasKey( Aura_Worker_Install_Ledger::OPTION, $GLOBALS['_options'] );
 		$this->assertSame( 1, Aura_Worker_Install_Ledger::report()['total'] );
+	}
+
+	// ---- multisite, not network-active: `ledger_partial_network` (final review Task 2) ----
+
+	public function test_report_is_partial_on_multisite_when_not_network_active(): void {
+		$GLOBALS['_is_multisite'] = true;
+		Aura_Worker_Install_Ledger::_set_probe_for_tests( array( 'now' => self::NOW, 'network_active' => false ) );
+		Aura_Worker_Install_Ledger::ensure_started();
+		Aura_Worker_Install_Ledger::append( $this->entry( self::NOW ) );
+		$this->assertSame( array( 'error' => 'ledger_partial_network' ), Aura_Worker_Install_Ledger::report() );
+	}
+
+	public function test_report_is_normal_on_multisite_when_network_active(): void {
+		$GLOBALS['_is_multisite'] = true;
+		Aura_Worker_Install_Ledger::_set_probe_for_tests( array( 'now' => self::NOW, 'network_active' => true ) );
+		Aura_Worker_Install_Ledger::ensure_started();
+		$r = Aura_Worker_Install_Ledger::report();
+		$this->assertArrayNotHasKey( 'error', $r );
+		$this->assertSame( gmdate( 'c', self::NOW ), $r['since'] );
+	}
+
+	public function test_report_never_checks_network_active_on_a_single_site(): void {
+		// non-multisite never checks (final review Task 2, binding): the
+		// probe is only consulted when is_multisite() is true.
+		Aura_Worker_Install_Ledger::_set_probe_for_tests( array( 'now' => self::NOW, 'network_active' => false ) );
+		Aura_Worker_Install_Ledger::ensure_started();
+		$r = Aura_Worker_Install_Ledger::report();
+		$this->assertArrayNotHasKey( 'error', $r );
+	}
+
+	public function test_the_real_network_active_probe_reads_is_plugin_active_for_network(): void {
+		// No override this time: the REAL probe value, resolved through
+		// is_plugin_active_for_network( plugin_basename( AURA_WORKER_FILE ) ).
+		$GLOBALS['_is_multisite'] = true;
+		Aura_Worker_Install_Ledger::ensure_started();
+		$this->assertSame( array( 'error' => 'ledger_partial_network' ), Aura_Worker_Install_Ledger::report() );
+		$GLOBALS['_network_active_plugins'][ plugin_basename( AURA_WORKER_FILE ) ] = true;
+		$this->assertArrayNotHasKey( 'error', Aura_Worker_Install_Ledger::report() );
 	}
 
 	public function test_strings_are_clipped_multibyte_safe(): void {
@@ -491,5 +585,58 @@ final class InstallLedgerStoreTest extends TestCase {
 		$name = Aura_Worker_Install_Ledger::clip( str_repeat( 'ש', 300 ) ); // 200 characters, 400 bytes
 		Aura_Worker_Install_Ledger::append( array_merge( $this->entry( self::NOW ), array( 'app_password_name' => $name ) ) );
 		$this->assertSame( $name, Aura_Worker_Install_Ledger::report()['entries'][0]['app_password_name'] );
+	}
+
+	// ---- the wire shape (final review Task 6) ----
+
+	/** PHP 7.4 has no array_is_list(): a JSON list's keys are exactly 0..n-1. */
+	private function is_json_list( array $arr ): bool {
+		return array() === $arr || array_keys( $arr ) === range( 0, count( $arr ) - 1 );
+	}
+
+	/**
+	 * The tool layer json-encodes report() verbatim (audit_agent_code's
+	 * `installs`), so its shape on the wire — a JSON list of entries, each an
+	 * object with a fixed key order, `source` a nested object never
+	 * re-indexed into a list — is a contract of its own, not just an array
+	 * shape PHP happens to produce.
+	 */
+	public function test_report_round_trips_through_json_with_one_entry_per_source_kind(): void {
+		Aura_Worker_Install_Ledger::ensure_started();
+		$sources = array(
+			array( 'kind' => 'wporg' ),
+			array( 'kind' => 'remote_host', 'host' => 'cdn.example' ),
+			array( 'kind' => 'uploaded_zip', 'attachment_id' => 42 ),
+			array( 'kind' => 'local_path' ),
+			array( 'kind' => 'unknown' ),
+		);
+		foreach ( $sources as $i => $source ) {
+			$this->assertTrue(
+				Aura_Worker_Install_Ledger::append( array_merge( $this->entry( self::NOW - $i, 'p' . $i ), array( 'source' => $source ) ) )
+			);
+		}
+
+		$decoded = json_decode( wp_json_encode( Aura_Worker_Install_Ledger::report() ), true );
+
+		$this->assertTrue( $this->is_json_list( $decoded['entries'] ), '`entries` must encode as a JSON list' );
+		$this->assertSame( count( $decoded['entries'] ), $decoded['total'] );
+		$this->assertIsBool( $decoded['evicted'] );
+		$this->assertMatchesRegularExpression( '/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00$/', $decoded['since'] );
+
+		$expected_keys        = array( 'when', 'type', 'action', 'slug', 'version', 'transport', 'user_id', 'auth', 'app_password_name', 'route', 'source' );
+		$expected_source_keys = array(
+			'wporg'        => array( 'kind' ),
+			'remote_host'  => array( 'kind', 'host' ),
+			'uploaded_zip' => array( 'kind', 'attachment_id' ),
+			'local_path'   => array( 'kind' ),
+			'unknown'      => array( 'kind' ),
+		);
+		$this->assertCount( 5, $decoded['entries'] );
+		foreach ( $decoded['entries'] as $entry ) {
+			$this->assertSame( $expected_keys, array_keys( $entry ), 'key order must match exactly what this class writes' );
+			$this->assertIsArray( $entry['source'] );
+			$this->assertFalse( $this->is_json_list( $entry['source'] ), '`source` must decode as an object, never re-indexed into a list' );
+			$this->assertSame( $expected_source_keys[ $entry['source']['kind'] ], array_keys( $entry['source'] ) );
+		}
 	}
 }
