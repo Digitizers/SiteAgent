@@ -77,16 +77,38 @@ class Aura_Worker_Install_Ledger {
 		$entries = is_array( $stored ) ? array_values( $stored ) : array();
 		// Newest first is an invariant (entries_corrupt()), so a clock that
 		// stepped backward must not break it: the new row takes the head's
-		// stamp instead (Codex r15 on #595). Its true order is still right —
-		// it happened after the head.
-		if ( isset( $entries[0]['when'], $entry['when'] ) && strtotime( $entry['when'] ) < strtotime( $entries[0]['when'] ) ) {
-			$entry['when'] = $entries[0]['when'];
+		// stamp instead (Codex r15 on #595) — but only when the entry's OWN
+		// `when` parses. An unparseable one must reach valid_entry() below
+		// unmasked, or a malformed entry would look clamp-repaired and slip
+		// past it (controller ruling 2, Task 1 review round 1). The clamped
+		// row's true order is still right — it happened after the head.
+		if ( isset( $entries[0]['when'], $entry['when'] ) ) {
+			$entry_when = strtotime( (string) $entry['when'] );
+			if ( false !== $entry_when && $entry_when < strtotime( (string) $entries[0]['when'] ) ) {
+				$entry['when'] = $entries[0]['when'];
+			}
+		}
+		// RECORDS AND NEVER DECIDES cuts both ways: an entry this class did
+		// not itself shape is not stored either. Unvalidated, a malformed row
+		// would make the NEXT read call the whole ring unreadable, and the
+		// read-modify-write after that would wipe it (controller ruling 2,
+		// Task 1 review round 1) — silently, on an append that has nothing to
+		// do with the bad row. Reject it here instead: nothing is written.
+		if ( ! self::valid_entry( $entry, $now ) ) {
+			return;
 		}
 		array_unshift( $entries, $entry );
 
+		// The count edge already on disk marks rows an earlier — possibly
+		// interrupted — rotation already dropped (controller ruling 1, Task 1
+		// review round 1): expired() ages them out here exactly like a
+		// 90-day-old row, rather than storage_corrupt() calling their mere
+		// presence corruption.
+		$edge = self::edge_timestamp( $state );
+
 		$kept = array();
 		foreach ( $entries as $e ) {
-			if ( self::expired( $e, $now ) ) {
+			if ( self::expired( $e, $now, $edge ) ) {
 				$state['evicted'] = true;
 				continue;
 			}
@@ -101,10 +123,14 @@ class Aura_Worker_Install_Ledger {
 		// State FIRST (Codex r2 on #595): the two writes are separately
 		// visible, and a read between them must only ever under-claim — the
 		// new edge over the old, longer ring, never the old edge over a ring
-		// that has already lost an entry. And only once the state is PROVEN
-		// stored (Codex r5 on #595): a refused state write followed by a
-		// landed entries write would truncate the ring under the old edge.
-		// Losing this one entry is the stated cost of a failed write.
+		// that has already lost an entry. (That in-between state — the new
+		// edge landed, the old ring still on disk — is exactly the reading
+		// report() now gives it: readable, the pre-edge row dropped like any
+		// other expired one, never `ledger_unreadable`; controller ruling 1,
+		// Task 1 review round 1.) And only once the state is PROVEN stored
+		// (Codex r5 on #595): a refused state write followed by a landed
+		// entries write would truncate the ring under the old edge. Losing
+		// this one entry is the stated cost of a failed write.
 		self::commit( $state, $kept, $now );
 	}
 
@@ -124,9 +150,10 @@ class Aura_Worker_Install_Ledger {
 			return array( 'error' => 'ledger_unreadable' );
 		}
 		$evicted = is_array( $state ) && ! empty( $state['evicted'] );
+		$edge    = self::edge_timestamp( $state );
 		$entries = array();
 		foreach ( is_array( $stored ) ? $stored : array() as $e ) {
-			if ( self::expired( $e, $now ) ) {
+			if ( self::expired( $e, $now, $edge ) ) {
 				$evicted = true;
 				continue;
 			}
@@ -170,12 +197,13 @@ class Aura_Worker_Install_Ledger {
 			$stored = self::read_entries();
 			$state  = self::read_state();
 			if ( self::storage_corrupt( $stored, $state, $now ) ) {
+				$orphan           = self::orphan_ring( $stored, $state, $now );
 				$fresh            = self::fresh_state( $now );
 				$fresh['evicted'] = true;
 				// An orphaned ring keeps its rows (Codex r10 on #595); purge_rows()
 				// then ages them out as usual.
-				self::commit( $fresh, self::orphan_ring( $stored, $state, $now ) ? array_values( $stored ) : array(), $now );
-				if ( ! self::orphan_ring( $stored, $state, $now ) ) {
+				self::commit( $fresh, $orphan ? array_values( $stored ) : array(), $now );
+				if ( ! $orphan ) {
 					return;
 				}
 			}
@@ -198,9 +226,10 @@ class Aura_Worker_Install_Ledger {
 			if ( null === $stored || self::storage_corrupt( $stored, $state, $now ) ) {
 				return;
 			}
+			$edge = self::edge_timestamp( $state );
 			$kept = array();
 			foreach ( $stored as $e ) {
-				if ( ! self::expired( $e, $now ) ) {
+				if ( ! self::expired( $e, $now, $edge ) ) {
 					$kept[] = $e;
 				}
 			}
@@ -387,31 +416,35 @@ class Aura_Worker_Install_Ledger {
 			|| self::state_corrupt( $state, $now )
 			|| ( null === $stored && null !== $state )
 			|| self::orphan_ring( $stored, $state, $now )
-			|| self::edge_contradicts_ring( $stored, $state );
+			|| self::edge_contradicts_ring( $state );
 	}
 
 	/**
-	 * The count edge against the ring it describes (Codex r15 on #595). A
-	 * count eviction sets the edge to the oldest row it kept, and every later
-	 * row is newer, so the edge can never be NEWER than the oldest row still
-	 * held (rows only leave by age after that); and an edge means something
-	 * was evicted. An edge corrupted to an EARLIER, still-valid instant is
-	 * not detectable from storage — stated in spec §4.3.
+	 * A count edge stored without `evicted: true` (Codex r15 on #595, narrowed
+	 * by controller ruling 1, Task 1 review round 1): a count eviction always
+	 * sets `evicted` alongside the edge, so the two disagreeing is corruption
+	 * no read can make sense of.
 	 *
+	 * A ring ROW older than the edge is deliberately NOT checked here anymore
+	 * — it is not corruption, it is a row an earlier rotation already dropped.
+	 * commit() writes the state (the new, narrower edge) before the entries
+	 * (the new, shorter ring); when the entries write does not land — refused,
+	 * or the process ends between the two writes — the edge is on disk ahead
+	 * of a ring that is still the old, longer one, with exactly one row past
+	 * it. That is the state append() and purge_rows() already expect: expired()
+	 * ages a pre-edge row out the same way it ages out a 90-day-old one, and
+	 * report() answers it as a normal, readable, `evicted: true` ledger. An
+	 * edge corrupted to an EARLIER, still-valid instant is not detectable from
+	 * storage — stated in spec §4.3.
+	 *
+	 * @param mixed $state The state option.
 	 * @return bool
 	 */
-	private static function edge_contradicts_ring( $stored, $state ) {
+	private static function edge_contradicts_ring( $state ) {
 		if ( ! is_array( $state ) || null === $state['count_edge'] ) {
 			return false;
 		}
-		if ( true !== $state['evicted'] ) {
-			return true;
-		}
-		if ( ! is_array( $stored ) || array() === $stored ) {
-			return false;
-		}
-		$oldest = end( $stored );
-		return strtotime( $state['count_edge'] ) > strtotime( $oldest['when'] );
+		return true !== $state['evicted'];
 	}
 
 	/**
@@ -532,13 +565,42 @@ class Aura_Worker_Install_Ledger {
 		}
 	}
 
-	/** @return bool */
-	private static function expired( $e, $now ) {
+	/**
+	 * Past 90 days, OR past the count edge (controller ruling 1, Task 1
+	 * review round 1) — a row an earlier, possibly interrupted, rotation
+	 * already dropped is aged out here exactly like one past 90 days, not
+	 * flagged as corruption by storage_corrupt().
+	 *
+	 * @param mixed    $e    A stored row.
+	 * @param int      $now  Now.
+	 * @param int|null $edge The count edge as a timestamp, or null when unset.
+	 * @return bool
+	 */
+	private static function expired( $e, $now, $edge = null ) {
 		if ( ! is_array( $e ) || ! isset( $e['when'] ) ) {
 			return false;
 		}
 		$t = strtotime( (string) $e['when'] );
-		return false !== $t && $t < $now - self::MAX_AGE;
+		if ( false === $t ) {
+			return false;
+		}
+		return $t < $now - self::MAX_AGE || ( null !== $edge && $t < $edge );
+	}
+
+	/**
+	 * The state's count edge, as a timestamp — null when unset or unparseable
+	 * (state_corrupt() already refuses a $state whose count_edge is set but
+	 * does not parse, so null here means genuinely unset).
+	 *
+	 * @param mixed $state The state option.
+	 * @return int|null
+	 */
+	private static function edge_timestamp( $state ) {
+		if ( ! is_array( $state ) || ! isset( $state['count_edge'] ) || null === $state['count_edge'] ) {
+			return null;
+		}
+		$t = strtotime( (string) $state['count_edge'] );
+		return false !== $t ? $t : null;
 	}
 
 	/** @return mixed null when absent */

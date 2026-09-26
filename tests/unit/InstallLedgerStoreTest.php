@@ -351,19 +351,106 @@ final class InstallLedgerStoreTest extends TestCase {
 	}
 
 	public function test_a_count_edge_that_contradicts_the_ring_is_unreadable(): void {
+		// An edge stored without `evicted: true` beside it is the only shape
+		// edge_contradicts_ring() still refuses (controller ruling 1, Task 1
+		// review round 1 narrowed this — a ring ROW older than the edge is no
+		// longer checked here at all; see the two tests below).
 		$ring = array( $this->entry( self::NOW, 'a' ), $this->entry( self::NOW - 600, 'b' ) );
-		foreach ( array(
-			'edge without eviction'   => array( 'started' => gmdate( 'c', self::NOW - 86400 ), 'count_edge' => gmdate( 'c', self::NOW - 600 ), 'evicted' => false ),
-			'edge newer than oldest'  => array( 'started' => gmdate( 'c', self::NOW - 86400 ), 'count_edge' => gmdate( 'c', self::NOW - 60 ), 'evicted' => true ),
-		) as $label => $state ) {
-			sa_reset_state();
-			Aura_Worker_Install_Ledger::_set_probe_for_tests( array( 'now' => self::NOW ) );
-			$GLOBALS['_options'][ Aura_Worker_Install_Ledger::OPTION ]       = $ring;
-			$GLOBALS['_options'][ Aura_Worker_Install_Ledger::STATE_OPTION ] = $state;
-			$this->assertSame( array( 'error' => 'ledger_unreadable' ), Aura_Worker_Install_Ledger::report(), $label );
-		}
+		$GLOBALS['_options'][ Aura_Worker_Install_Ledger::OPTION ]       = $ring;
+		$GLOBALS['_options'][ Aura_Worker_Install_Ledger::STATE_OPTION ] = array( 'started' => gmdate( 'c', self::NOW - 86400 ), 'count_edge' => gmdate( 'c', self::NOW - 600 ), 'evicted' => false );
+		$this->assertSame( array( 'error' => 'ledger_unreadable' ), Aura_Worker_Install_Ledger::report() );
 		$GLOBALS['_options'][ Aura_Worker_Install_Ledger::STATE_OPTION ] = array( 'started' => gmdate( 'c', self::NOW - 86400 ), 'count_edge' => gmdate( 'c', self::NOW - 600 ), 'evicted' => true );
 		$this->assertSame( 2, Aura_Worker_Install_Ledger::report()['total'] ); // the edge AT the oldest row is the normal case
+	}
+
+	/**
+	 * An interrupted or raced count rotation: commit() lands the new, narrower
+	 * count_edge (state first), but the new, shorter ring never lands — the
+	 * OLD ring is still on disk, one row older than the edge now promises.
+	 * Controller ruling 1 (Task 1 review round 1): this is not corruption, it
+	 * is a row already rotated out. report() must stay readable, quietly
+	 * dropping that one pre-edge row instead of refusing the whole ledger —
+	 * the exact bug the reviewer reproduced (a spurious `ledger_unreadable`
+	 * beyond spec §4.3's "can lose an entry", and the wipe that followed it).
+	 */
+	public function test_an_edge_ahead_of_the_old_ring_omits_the_pre_edge_row_but_stays_readable(): void {
+		$ring = array();
+		for ( $i = 0; $i < 200; $i++ ) {
+			$ring[] = $this->entry( self::NOW - $i, 'p' . $i ); // p0 newest, p199 oldest
+		}
+		$GLOBALS['_options'][ Aura_Worker_Install_Ledger::OPTION ]       = $ring;
+		// The exact interrupted state: the rotation's state write landed with
+		// the edge at what would be the 200th surviving row (p198); its
+		// entries write never did, so the ring on disk is still the one from
+		// BEFORE that rotation — p199 sits one row behind the edge.
+		$GLOBALS['_options'][ Aura_Worker_Install_Ledger::STATE_OPTION ] = array(
+			'started'    => gmdate( 'c', self::NOW - 86400 ),
+			'count_edge' => gmdate( 'c', self::NOW - 198 ),
+			'evicted'    => true,
+		);
+		$r = Aura_Worker_Install_Ledger::report();
+		$this->assertSame( 199, $r['total'] ); // p199 (older than the edge) is already rotated out
+		$this->assertSame( array_column( array_slice( $ring, 0, 199 ), 'slug' ), array_column( $r['entries'], 'slug' ) );
+		$this->assertTrue( $r['evicted'] );
+	}
+
+	/**
+	 * The same interrupted rotation, produced by an actual failed write rather
+	 * than seeded directly: the 201st append's entries write throws (modelling
+	 * a process that dies between the state write and the entries write).
+	 * Controller ruling 1 regression test — before the fix, the next report()
+	 * answered `ledger_unreadable` and the next append()'s read-modify-write
+	 * would have wiped the whole 200-row ring instead of just dropping the one
+	 * row past the edge.
+	 */
+	public function test_a_thrown_write_during_the_201st_append_leaves_it_recoverable_not_wiped(): void {
+		Aura_Worker_Install_Ledger::_set_probe_for_tests( array( 'now' => self::NOW - 200 * 86400 ) );
+		Aura_Worker_Install_Ledger::ensure_started();
+		$stored = array();
+		for ( $i = 0; $i < 200; $i++ ) {
+			$stored[] = $this->entry( self::NOW - 3600 - $i, 'p' . $i );
+		}
+		$GLOBALS['_options'][ Aura_Worker_Install_Ledger::OPTION ] = $stored;
+		Aura_Worker_Install_Ledger::_set_probe_for_tests( array( 'now' => self::NOW ) );
+		add_filter( 'sanitize_option_' . Aura_Worker_Install_Ledger::OPTION, static function () {
+			throw new RuntimeException( 'the process died between the state write and the entries write' );
+		} );
+		$threw = false;
+		try {
+			Aura_Worker_Install_Ledger::append( $this->entry( self::NOW, 'the-201st' ) );
+		} catch ( RuntimeException $e ) {
+			$threw = true;
+		}
+		$this->assertTrue( $threw, 'the entries write must actually have thrown, or this test proves nothing' );
+		// The state landed (with the new edge); the ring never got the new
+		// write — the OLD 200-row ring is still on disk, unmodified.
+		$this->assertSame( $stored, get_option( Aura_Worker_Install_Ledger::OPTION ) );
+		unset( $GLOBALS['_filters'][ 'sanitize_option_' . Aura_Worker_Install_Ledger::OPTION ] ); // the failing write is over
+		$r = Aura_Worker_Install_Ledger::report();
+		$this->assertSame( 199, $r['total'] ); // readable: the pre-edge row (p199) is omitted, not corruption
+		$this->assertTrue( $r['evicted'] );
+		Aura_Worker_Install_Ledger::append( $this->entry( self::NOW, 'next' ) );
+		$this->assertSame( 200, count( get_option( Aura_Worker_Install_Ledger::OPTION ) ) ); // no wipe
+	}
+
+	/**
+	 * append() must shape what it stores, not just what it reads back later.
+	 * Controller ruling 2 (Task 1 review round 1): an unvalidated entry would
+	 * make the NEXT read call the whole ring unreadable, and the
+	 * read-modify-write after that would silently wipe it.
+	 */
+	public function test_append_rejects_an_invalid_entry_without_writing_anything(): void {
+		Aura_Worker_Install_Ledger::ensure_started();
+		Aura_Worker_Install_Ledger::append( $this->entry( self::NOW, 'good' ) );
+		$entries_before = get_option( Aura_Worker_Install_Ledger::OPTION );
+		$state_before   = get_option( Aura_Worker_Install_Ledger::STATE_OPTION );
+		$bad = $this->entry( self::NOW, 'bad' );
+		unset( $bad['source'] ); // no source: not a row this class ever wrote
+		Aura_Worker_Install_Ledger::append( $bad );
+		$this->assertSame( $entries_before, get_option( Aura_Worker_Install_Ledger::OPTION ) );
+		$this->assertSame( $state_before, get_option( Aura_Worker_Install_Ledger::STATE_OPTION ) );
+		$r = Aura_Worker_Install_Ledger::report();
+		$this->assertSame( array( 'good' ), array_column( $r['entries'], 'slug' ) ); // readable, unaffected
 	}
 
 	public function test_rows_written_before_a_large_backward_clock_correction_stay_readable(): void {
