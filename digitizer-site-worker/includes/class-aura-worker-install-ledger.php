@@ -52,6 +52,37 @@ class Aura_Worker_Install_Ledger {
 	private static $probe_overrides = array();
 
 	/**
+	 * Frames by token, this request only: `{ type, source, context }` stored at
+	 * pre-download, taken at install-result (spec §4.1).
+	 *
+	 * @var array
+	 */
+	private static $frames = array();
+
+	/**
+	 * Depth of SiteAgent's own upgrader calls (as_siteagent(), Task 3).
+	 *
+	 * @var int
+	 */
+	private static $siteagent_depth = 0;
+
+	/**
+	 * The upgrader OBJECTS SiteAgent's active calls created — one per
+	 * as_siteagent() frame. A run is `transport: siteagent` only when
+	 * `upgrader_pre_download` hands us that very object, so a nested run a
+	 * filter starts — any order, any priority, even for the same plugin —
+	 * goes through its own upgrader and is recorded as what it is (Codex
+	 * r16/r17/r18 on #595: position, "first run" and target-name matching all
+	 * proved spoofable; object identity is not).
+	 *
+	 * @var object[]
+	 */
+	private static $siteagent_claims = array();
+
+	/** Core's own automatic-update action (Ruling R1). */
+	const AUTO_UPDATE_ACTION = 'wp_maybe_auto_update';
+
+	/**
 	 * Append one entry: newest first, then retention — 90 days, then 200
 	 * entries. Read-modify-write without a lock: two installs finishing in
 	 * the same instant can lose one entry (spec §4.3, stated, not fixed).
@@ -307,6 +338,9 @@ class Aura_Worker_Install_Ledger {
 	/** Clear every static (sa_reset_state()). */
 	public static function reset_for_tests() {
 		self::$probe_overrides = array();
+		self::$frames          = array();
+		self::$siteagent_depth  = 0;
+		self::$siteagent_claims = array();
 	}
 
 	/**
@@ -316,9 +350,386 @@ class Aura_Worker_Install_Ledger {
 	 */
 	private static function probe() {
 		$real = array(
-			'now' => time(),
+			'now'               => time(),
+			'siteagent'         => null, // null = decided by the run's token (context()); tests may force a bool
+			'wp_cli'            => defined( 'WP_CLI' ) && WP_CLI,
+			'auto_update'       => function_exists( 'doing_action' ) && doing_action( self::AUTO_UPDATE_ACTION ),
+			'cron'              => function_exists( 'wp_doing_cron' ) && wp_doing_cron(),
+			'rest'              => class_exists( 'Aura_Worker_Rules' ) && Aura_Worker_Rules::serving_rest(),
+			'admin'             => function_exists( 'is_admin' ) && is_admin(),
+			'rest_cookie'       => isset( $GLOBALS['wp_rest_auth_cookie'] ) && true === $GLOBALS['wp_rest_auth_cookie'],
+			'user_id'           => function_exists( 'get_current_user_id' ) ? (int) get_current_user_id() : 0,
+			'app_password_uuid' => self::authenticated_uuid(),
+			'route'             => class_exists( 'Aura_Worker_Call_Context' ) ? Aura_Worker_Call_Context::rest_route() : null,
+			'uploads'           => self::uploads_dir(),
+			'attachment_ids'    => null,
+			'versions'          => null,
 		);
 		return array_merge( $real, self::$probe_overrides );
+	}
+
+	/** Register the three filters (spec §4.1). */
+	public static function init() {
+		add_filter( 'upgrader_package_options', array( __CLASS__, 'on_package_options' ), PHP_INT_MAX, 1 );
+		add_filter( 'upgrader_pre_download', array( __CLASS__, 'on_pre_download' ), PHP_INT_MAX, 4 );
+		add_filter( 'upgrader_install_package_result', array( __CLASS__, 'on_install_result' ), PHP_INT_MAX, 2 );
+		// Retention is physical (Codex r3 on #595): core's daily event, always scheduled.
+		add_action( 'wp_scheduled_delete', array( __CLASS__, 'purge_expired' ) );
+	}
+
+	/**
+	 * Stamp a per-run token into hook_extra — plugin and theme runs only.
+	 *
+	 * @param mixed $options WP_Upgrader::run() options.
+	 * @return mixed The options, with only the token added.
+	 */
+	public static function on_package_options( $options ) {
+		try {
+			if ( is_array( $options ) && isset( $options['hook_extra'] ) && is_array( $options['hook_extra'] ) && null !== self::type_of( $options['hook_extra'] ) ) {
+				$options['hook_extra'][ self::TOKEN_KEY ] = wp_generate_uuid4();
+			}
+		} catch ( \Throwable $e ) {
+			// Recording never breaks an upgrade.
+		}
+		return $options;
+	}
+
+	/**
+	 * Classify the package and capture the request context, under the token.
+	 *
+	 * @param mixed $reply      An earlier filter's answer: false, a local file, or a WP_Error.
+	 * @param mixed $package    The package WordPress would download.
+	 * @param mixed $upgrader   Compared by identity with SiteAgent's own (as_siteagent()); its skin is never read (Ruling R1).
+	 * @param mixed $hook_extra The run's hook_extra.
+	 * @return mixed $reply, unchanged.
+	 */
+	public static function on_pre_download( $reply, $package, $upgrader = null, $hook_extra = array() ) {
+		try {
+			if ( is_wp_error( $reply ) ) {
+				return $reply; // the run aborts before anything is downloaded — nothing to record
+			}
+			$type  = self::type_of( $hook_extra );
+			$token = self::token_of( $hook_extra );
+			if ( null === $type || null === $token ) {
+				return $reply;
+			}
+			self::$frames[ $token ] = array(
+				'type'    => $type,
+				// A non-false reply is the file that will be installed, and its
+				// origin is not ours to know (Codex r2 on #594).
+				'source'  => false === $reply ? self::classify_source( $package ) : array( 'kind' => 'unknown' ),
+				'context' => self::context( self::is_siteagent_run( $upgrader ) ),
+			);
+		} catch ( \Throwable $e ) {
+			// Recording never breaks an upgrade.
+		}
+		return $reply;
+	}
+
+	/**
+	 * Write the entry for a package that installed.
+	 *
+	 * @param mixed $result     install_package()'s result, or a WP_Error.
+	 * @param mixed $hook_extra The run's hook_extra.
+	 * @return mixed $result, unchanged.
+	 */
+	public static function on_install_result( $result, $hook_extra = array() ) {
+		try {
+			if ( is_wp_error( $result ) || ! is_array( $result ) ) {
+				return $result;
+			}
+			$type = self::type_of( $hook_extra );
+			if ( null === $type ) {
+				return $result;
+			}
+			$in_scope = true; // a plugin/theme package installed: from here a failure loses an install
+			$token    = self::token_of( $hook_extra );
+			$frame = null;
+			if ( null !== $token && isset( self::$frames[ $token ] ) ) {
+				$frame = self::$frames[ $token ];
+				unset( self::$frames[ $token ] );
+			}
+			$slug        = isset( $result['destination_name'] ) ? (string) $result['destination_name'] : '';
+			$destination = isset( $result['destination'] ) ? (string) $result['destination'] : '';
+			self::append(
+				array_merge(
+					array(
+						'when'    => gmdate( 'c', self::now() ),
+						'type'    => $type,
+						'action'  => self::action_of( $hook_extra ),
+						'slug'    => self::clip( $slug ),
+						'version' => self::installed_version( $type, $destination, $hook_extra, $slug ),
+					),
+					null === $frame ? self::context( false ) : $frame['context'], // no frame: the upgrader was never seen, so never siteagent
+					array( 'source' => null === $frame ? array( 'kind' => 'unknown' ) : $frame['source'] )
+				)
+			);
+		} catch ( \Throwable $e ) {
+			// Recording never breaks an upgrade — but an install that could not
+			// be recorded moves coverage to NOW (Codex r10 on #595), so the
+			// ledger never claims the stretch that just lost it.
+			if ( ! empty( $in_scope ) ) {
+				self::mark_boundary();
+			}
+		}
+		return $result;
+	}
+
+	/**
+	 * `plugin` | `theme` | null (spec §4.1 scope).
+	 *
+	 * @param mixed $hook_extra hook_extra.
+	 * @return string|null
+	 */
+	public static function type_of( $hook_extra ) {
+		if ( ! is_array( $hook_extra ) ) {
+			return null;
+		}
+		$type = isset( $hook_extra['type'] ) ? $hook_extra['type'] : null;
+		if ( 'plugin' === $type || 'theme' === $type ) {
+			return $type;
+		}
+		if ( ! empty( $hook_extra['plugin'] ) ) {
+			return 'plugin';
+		}
+		if ( ! empty( $hook_extra['theme'] ) ) {
+			return 'theme';
+		}
+		return null;
+	}
+
+	/**
+	 * Where the package comes from (spec §4.2 `source`).
+	 *
+	 * @param mixed $package Package URL or path.
+	 * @return array
+	 */
+	public static function classify_source( $package ) {
+		if ( ! is_string( $package ) || '' === $package ) {
+			return array( 'kind' => 'unknown' );
+		}
+		if ( preg_match( '#^https?://#i', $package ) ) {
+			$host = strtolower( (string) wp_parse_url( $package, PHP_URL_HOST ) );
+			if ( '' === $host ) {
+				return array( 'kind' => 'unknown' );
+			}
+			if ( 'downloads.wordpress.org' === $host ) {
+				return array( 'kind' => 'wporg' );
+			}
+			return array( 'kind' => 'remote_host', 'host' => self::clip( $host ) );
+		}
+		if ( preg_match( '#^[a-z][a-z0-9+.-]*://#i', $package ) ) {
+			return array( 'kind' => 'unknown' ); // ftp://, phar://, … — not a kind the spec names
+		}
+		$p       = self::probe();
+		$uploads = $p['uploads'];
+		if ( is_array( $uploads ) && ! empty( $uploads['basedir'] ) ) {
+			$base = rtrim( str_replace( '\\', '/', (string) $uploads['basedir'] ), '/' ) . '/';
+			$path = str_replace( '\\', '/', $package );
+			if ( 0 === strpos( $path, $base ) ) {
+				$out = array( 'kind' => 'uploaded_zip' );
+				$id  = self::attachment_id( rtrim( (string) ( $uploads['baseurl'] ?? '' ), '/' ) . '/' . substr( $path, strlen( $base ) ) );
+				if ( $id > 0 ) {
+					$out['attachment_id'] = $id;
+				}
+				return $out;
+			}
+		}
+		return array( 'kind' => 'local_path' );
+	}
+
+	/**
+	 * The request context, read now (spec §4.2).
+	 *
+	 * @return array { transport, user_id, auth, app_password_name, route }
+	 */
+	public static function context( $siteagent_run = false ) {
+		$p    = self::probe();
+		$user = (int) $p['user_id'];
+		$uuid = (string) $p['app_password_uuid'];
+		$sa   = null !== $p['siteagent'] ? (bool) $p['siteagent'] : (bool) $siteagent_run;
+
+		if ( $sa ) {
+			$transport = 'siteagent';
+		} elseif ( $p['wp_cli'] ) {
+			$transport = 'wp_cli';
+		} elseif ( $p['auto_update'] ) {
+			$transport = 'auto_update';
+		} elseif ( $p['cron'] ) {
+			$transport = 'cron';
+		} elseif ( $p['rest'] ) {
+			$transport = 'rest';
+		} elseif ( $p['admin'] && $user > 0 ) {
+			$transport = 'wp_admin';
+		} else {
+			$transport = 'unknown';
+		}
+
+		if ( '' !== $uuid ) {
+			$auth = 'application_password';
+		} elseif ( $user <= 0 ) {
+			$auth = 'none';
+		} elseif ( $p['rest'] ) {
+			$auth = $p['rest_cookie'] ? 'cookie' : 'unknown';
+		} elseif ( $p['admin'] ) {
+			$auth = 'cookie'; // an admin screen authenticates only by cookie
+		} else {
+			$auth = 'unknown';
+		}
+
+		$route = null;
+		if ( $p['rest'] && is_string( $p['route'] ) && '' !== $p['route'] ) {
+			$route = self::clip( strtok( $p['route'], '?' ) );
+		}
+
+		return array(
+			'transport'         => $transport,
+			'user_id'           => $user,
+			'auth'              => $auth,
+			'app_password_name' => '' === $uuid ? null : self::app_password_name( $user, $uuid ),
+			'route'             => $route,
+		);
+	}
+
+	/**
+	 * Coverage restarts NOW (`evicted: true`); the ring is kept. For an
+	 * install that happened but could not be recorded. Swallows its own
+	 * failure — the upgrade must still complete.
+	 */
+	private static function mark_boundary() {
+		try {
+			self::write_boundary( self::now() ); // proven and retried once (Codex r14 on #595)
+		} catch ( \Throwable $e ) {
+			// Nothing more can be done from inside an upgrader filter.
+		}
+	}
+
+	/**
+	 * Whether $upgrader is the very object one of SiteAgent's own active
+	 * as_siteagent() calls created (Task 3). Object identity only — never
+	 * position, "first run", or a target-name match (Codex r16/r17/r18 on
+	 * #595: all proved spoofable; object identity is not). Always false
+	 * until Task 3's as_siteagent() ever populates $siteagent_claims.
+	 *
+	 * @param mixed $upgrader The upgrader instance upgrader_pre_download hands us.
+	 * @return bool
+	 */
+	private static function is_siteagent_run( $upgrader ) {
+		if ( ! is_object( $upgrader ) ) {
+			return false;
+		}
+		foreach ( self::$siteagent_claims as $claim ) {
+			if ( $claim === $upgrader ) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/** @return string|null */
+	private static function token_of( $hook_extra ) {
+		return is_array( $hook_extra ) && isset( $hook_extra[ self::TOKEN_KEY ] ) && is_string( $hook_extra[ self::TOKEN_KEY ] ) && '' !== $hook_extra[ self::TOKEN_KEY ]
+			? $hook_extra[ self::TOKEN_KEY ]
+			: null;
+	}
+
+	/** `update` when hook_extra names the package; else `install` unless it says `update`. */
+	private static function action_of( $hook_extra ) {
+		if ( ! empty( $hook_extra['plugin'] ) || ! empty( $hook_extra['theme'] ) ) {
+			return 'update';
+		}
+		return isset( $hook_extra['action'] ) && 'update' === $hook_extra['action'] ? 'update' : 'install';
+	}
+
+	/** The uuid core recorded at authentication, else the one SiteAgent captured. Never stored. */
+	private static function authenticated_uuid() {
+		$uuid = function_exists( 'rest_get_authenticated_app_password' ) ? rest_get_authenticated_app_password() : null;
+		if ( ( null === $uuid || '' === $uuid ) && class_exists( 'Aura_Worker_Security' ) ) {
+			$uuid = Aura_Worker_Security::authenticating_app_password_uuid();
+		}
+		return null === $uuid ? '' : (string) $uuid;
+	}
+
+	/** The password's NAME — never its uuid, never its hash. */
+	private static function app_password_name( $user, $uuid ) {
+		if ( $user <= 0 || ! class_exists( 'WP_Application_Passwords' ) ) {
+			return null;
+		}
+		$pw = WP_Application_Passwords::get_user_application_password( $user, $uuid );
+		return is_array( $pw ) && isset( $pw['name'] ) ? self::clip( $pw['name'] ) : null;
+	}
+
+	/** @return array|null { basedir, baseurl } */
+	private static function uploads_dir() {
+		if ( ! function_exists( 'wp_upload_dir' ) ) {
+			return null;
+		}
+		$u = wp_upload_dir( null, false );
+		return is_array( $u ) && empty( $u['error'] ) ? array( 'basedir' => (string) $u['basedir'], 'baseurl' => (string) $u['baseurl'] ) : null;
+	}
+
+	/** @return int 0 when none resolves */
+	private static function attachment_id( $url ) {
+		$p = self::probe();
+		if ( is_array( $p['attachment_ids'] ) ) {
+			return (int) ( $p['attachment_ids'][ $url ] ?? 0 );
+		}
+		return function_exists( 'attachment_url_to_postid' ) ? (int) attachment_url_to_postid( $url ) : 0;
+	}
+
+	/**
+	 * The installed version, from the files under $destination (Ruling R4).
+	 * A plugin's MAIN file, never merely the first header found (Codex r21 on
+	 * #595 — a folder can carry a bundled companion): on an update the file
+	 * hook_extra['plugin'] names; on an install `<slug>.php` when it carries a
+	 * header, else the ONLY header file — several candidates and no
+	 * `<slug>.php` is null, never a guess by sort order (Codex r22 on #595).
+	 *
+	 * @param string $type        plugin|theme.
+	 * @param string $destination Installed directory.
+	 * @param mixed  $hook_extra  The run's hook_extra.
+	 * @param string $slug        The destination directory name.
+	 * @return string|null
+	 */
+	private static function installed_version( $type, $destination, $hook_extra = array(), $slug = '' ) {
+		$p = self::probe();
+		if ( is_array( $p['versions'] ) ) {
+			return isset( $p['versions'][ $destination ] ) ? self::clip( $p['versions'][ $destination ] ) : null;
+		}
+		if ( '' === $destination || ! function_exists( 'get_file_data' ) || ! is_dir( $destination ) ) {
+			return null;
+		}
+		$dir = rtrim( $destination, '/\\' );
+		if ( 'theme' === $type ) {
+			$v = get_file_data( $dir . '/style.css', array( 'Version' => 'Version' ) );
+			return '' !== (string) ( $v['Version'] ?? '' ) ? self::clip( $v['Version'] ) : null;
+		}
+		$read = static function ( $file ) {
+			if ( ! is_file( $file ) ) {
+				return null;
+			}
+			$h = get_file_data( $file, array( 'Name' => 'Plugin Name', 'Version' => 'Version' ) );
+			return '' !== (string) ( $h['Name'] ?? '' ) ? (string) ( $h['Version'] ?? '' ) : null; // null = no plugin header
+		};
+		$named = null;
+		if ( is_array( $hook_extra ) && ! empty( $hook_extra['plugin'] ) && is_string( $hook_extra['plugin'] ) ) {
+			$named = $dir . '/' . basename( $hook_extra['plugin'] ); // an update: WordPress names the main file
+		} elseif ( '' !== (string) $slug && null !== $read( $dir . '/' . basename( (string) $slug ) . '.php' ) ) {
+			$named = $dir . '/' . basename( (string) $slug ) . '.php';
+		}
+		if ( null !== $named ) {
+			$v = $read( $named );
+		} else {
+			$found = array();
+			foreach ( (array) glob( $dir . '/*.php' ) as $file ) {
+				$v = $read( $file );
+				if ( null !== $v ) {
+					$found[] = $v;
+				}
+			}
+			$v = 1 === count( $found ) ? $found[0] : null; // several headers: not ours to guess
+		}
+		return null !== $v && '' !== $v ? self::clip( $v ) : null;
 	}
 
 	/** @return array */

@@ -104,6 +104,11 @@ class Aura_Worker {
 		// once Phase A/B exist; this only registers the init hook.
 		Aura_Worker_Unbind::init();
 
+		// The install ledger (2.22.0, P6.3 phase 2): every plugin and theme
+		// install or update, with the door it came through. Observes the
+		// upgrader and never decides.
+		Aura_Worker_Install_Ledger::init();
+
 		// The breadcrumb Task 6 left behind fired into nothing until now
 		// (#434 Task 9): a probe that cannot prove itself owes `app_passwords`
 		// forever, so a tombstone that never completes had no explanation

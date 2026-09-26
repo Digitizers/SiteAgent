@@ -1652,6 +1652,17 @@ if ( ! function_exists( 'get_plugin_data' ) ) {
 	}
 }
 
+if ( ! function_exists( 'get_file_data' ) ) {
+	function get_file_data( $file, $default_headers, $context = '' ) {
+		$head = is_readable( $file ) ? (string) file_get_contents( $file, false, null, 0, 8192 ) : '';
+		$out  = array();
+		foreach ( $default_headers as $key => $label ) {
+			$out[ $key ] = preg_match( '/^[ \t\/*#@]*' . preg_quote( $label, '/' ) . ':(.*)$/mi', $head, $m ) ? trim( $m[1] ) : '';
+		}
+		return $out;
+	}
+}
+
 if ( ! function_exists( 'download_url' ) ) {
 	function download_url( $url, $timeout = 300, $signature_verification = false ) {
 		$GLOBALS['_download_url_calls'][] = $url; // witnessed, so a refusal can prove it downloaded nothing (SA#95)
