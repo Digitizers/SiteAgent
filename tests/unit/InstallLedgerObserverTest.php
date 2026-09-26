@@ -107,6 +107,20 @@ final class InstallLedgerObserverTest extends TestCase {
 		$this->assertSame( array( gmdate( 'c', self::NOW ), true ), array( $r['since'], $r['evicted'] ) );
 	}
 
+	public function test_a_rejected_entry_moves_coverage_to_a_boundary(): void {
+		$GLOBALS['_options'][ Aura_Worker_Install_Ledger::STATE_OPTION ] = array( 'started' => gmdate( 'c', self::NOW - 30 * 86400 ), 'count_edge' => null, 'evicted' => false );
+		// A malformed FACT, not a thrown exception: a negative user_id makes
+		// context() build an entry valid_entry() itself refuses — append()
+		// returns false, nothing is thrown, and on_install_result() must
+		// still move coverage to a boundary the same as a thrown probe would
+		// (Codex review round 1, Task 2).
+		Aura_Worker_Install_Ledger::_set_probe_for_tests( $this->quiet( array( 'user_id' => -1 ) ) );
+		$this->run_package( array( 'type' => 'plugin', 'action' => 'install' ), 'https://downloads.wordpress.org/plugin/foo.zip' );
+		$this->assertSame( array(), $this->entries() );
+		$r = Aura_Worker_Install_Ledger::report();
+		$this->assertSame( array( gmdate( 'c', self::NOW ), true ), array( $r['since'], $r['evicted'] ) );
+	}
+
 	// ---- the entry ----
 
 	public function test_a_rest_application_password_install_from_wporg(): void {
@@ -144,6 +158,10 @@ final class InstallLedgerObserverTest extends TestCase {
 		Aura_Worker_Install_Ledger::_set_probe_for_tests( $this->quiet( array( 'rest' => true, 'user_id' => 5, 'rest_cookie' => false ) ) );
 		$this->run_package( array( 'type' => 'plugin', 'action' => 'install' ), 'https://evil.example/x.zip', new WP_Error( 'bad', 'no' ) );
 		$this->assertSame( array(), $this->entries() );
+		// The frame this token staked at pre-download is actually gone, not
+		// merely orphaned — left in place it would leak for the rest of a
+		// long bulk request (Codex review round 1, Task 2).
+		$this->assertSame( 0, Aura_Worker_Install_Ledger::_frame_count_for_tests() );
 		// An identical outer run with its own token still gets its OWN source (Codex r1 on #594).
 		$this->run_package( array( 'type' => 'plugin', 'action' => 'install' ), 'https://downloads.wordpress.org/plugin/foo.zip' );
 		$this->assertSame( 'wporg', $this->entries()[0]['source']['kind'] );

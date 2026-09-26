@@ -441,12 +441,15 @@ final class InstallLedgerStoreTest extends TestCase {
 	 */
 	public function test_append_rejects_an_invalid_entry_without_writing_anything(): void {
 		Aura_Worker_Install_Ledger::ensure_started();
-		Aura_Worker_Install_Ledger::append( $this->entry( self::NOW, 'good' ) );
+		$this->assertTrue( Aura_Worker_Install_Ledger::append( $this->entry( self::NOW, 'good' ) ) );
 		$entries_before = get_option( Aura_Worker_Install_Ledger::OPTION );
 		$state_before   = get_option( Aura_Worker_Install_Ledger::STATE_OPTION );
 		$bad = $this->entry( self::NOW, 'bad' );
 		unset( $bad['source'] ); // no source: not a row this class ever wrote
-		Aura_Worker_Install_Ledger::append( $bad );
+		// A caller must be able to tell a rejected entry from a committed one
+		// without inspecting storage (Codex review round 1, Task 2): an
+		// in-scope caller treats false the same as append() throwing.
+		$this->assertFalse( Aura_Worker_Install_Ledger::append( $bad ) );
 		$this->assertSame( $entries_before, get_option( Aura_Worker_Install_Ledger::OPTION ) );
 		$this->assertSame( $state_before, get_option( Aura_Worker_Install_Ledger::STATE_OPTION ) );
 		$r = Aura_Worker_Install_Ledger::report();

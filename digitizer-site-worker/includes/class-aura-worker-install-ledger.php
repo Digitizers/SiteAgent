@@ -88,6 +88,12 @@ class Aura_Worker_Install_Ledger {
 	 * the same instant can lose one entry (spec §4.3, stated, not fixed).
 	 *
 	 * @param array $entry The entry (spec §4.2).
+	 * @return bool Whether the entry was valid and reached commit() — false
+	 *              when valid_entry() rejected it and nothing was written.
+	 *              A caller recording an in-scope install must treat a false
+	 *              return the same as a thrown exception (Codex review round
+	 *              1, Task 2): the install happened and could not be
+	 *              recorded, so coverage moves to a boundary.
 	 */
 	public static function append( array $entry ) {
 		$now    = self::now();
@@ -126,7 +132,7 @@ class Aura_Worker_Install_Ledger {
 		// Task 1 review round 1) — silently, on an append that has nothing to
 		// do with the bad row. Reject it here instead: nothing is written.
 		if ( ! self::valid_entry( $entry, $now ) ) {
-			return;
+			return false;
 		}
 		array_unshift( $entries, $entry );
 
@@ -163,6 +169,7 @@ class Aura_Worker_Install_Ledger {
 		// entries write would truncate the ring under the old edge. Losing
 		// this one entry is the stated cost of a failed write.
 		self::commit( $state, $kept, $now );
+		return true;
 	}
 
 	/**
@@ -335,6 +342,17 @@ class Aura_Worker_Install_Ledger {
 		self::$probe_overrides = $overrides;
 	}
 
+	/**
+	 * Test seam: how many pre-download frames are still held, this request
+	 * (Codex review round 1, Task 2) — a failed or ignored run must not leave
+	 * one behind for the rest of a long bulk request.
+	 *
+	 * @return int
+	 */
+	public static function _frame_count_for_tests() {
+		return count( self::$frames );
+	}
+
 	/** Clear every static (sa_reset_state()). */
 	public static function reset_for_tests() {
 		self::$probe_overrides = array();
@@ -435,7 +453,15 @@ class Aura_Worker_Install_Ledger {
 	 */
 	public static function on_install_result( $result, $hook_extra = array() ) {
 		try {
+			$token = self::token_of( $hook_extra );
 			if ( is_wp_error( $result ) || ! is_array( $result ) ) {
+				// A failed install: nothing to record, and the frame this token
+				// staked at pre-download must not outlive it — left in place, it
+				// would leak for the rest of a long bulk request (Codex review
+				// round 1, Task 2).
+				if ( null !== $token ) {
+					unset( self::$frames[ $token ] );
+				}
 				return $result;
 			}
 			$type = self::type_of( $hook_extra );
@@ -443,15 +469,14 @@ class Aura_Worker_Install_Ledger {
 				return $result;
 			}
 			$in_scope = true; // a plugin/theme package installed: from here a failure loses an install
-			$token    = self::token_of( $hook_extra );
-			$frame = null;
+			$frame    = null;
 			if ( null !== $token && isset( self::$frames[ $token ] ) ) {
 				$frame = self::$frames[ $token ];
 				unset( self::$frames[ $token ] );
 			}
 			$slug        = isset( $result['destination_name'] ) ? (string) $result['destination_name'] : '';
 			$destination = isset( $result['destination'] ) ? (string) $result['destination'] : '';
-			self::append(
+			$recorded    = self::append(
 				array_merge(
 					array(
 						'when'    => gmdate( 'c', self::now() ),
@@ -464,6 +489,14 @@ class Aura_Worker_Install_Ledger {
 					array( 'source' => null === $frame ? array( 'kind' => 'unknown' ) : $frame['source'] )
 				)
 			);
+			if ( ! $recorded ) {
+				// append() itself rejected the entry (valid_entry() failed) —
+				// no exception was thrown, so this is not caught below. The
+				// install still happened and still could not be recorded, so
+				// coverage moves to a boundary the same as a thrown probe
+				// would (Codex review round 1, Task 2).
+				self::mark_boundary();
+			}
 		} catch ( \Throwable $e ) {
 			// Recording never breaks an upgrade — but an install that could not
 			// be recorded moves coverage to NOW (Codex r10 on #595), so the
@@ -579,7 +612,7 @@ class Aura_Worker_Install_Ledger {
 
 		$route = null;
 		if ( $p['rest'] && is_string( $p['route'] ) && '' !== $p['route'] ) {
-			$route = self::clip( strtok( $p['route'], '?' ) );
+			$route = self::clip( explode( '?', $p['route'], 2 )[0] ); // never strtok(): it shares global tokenizer state
 		}
 
 		return array(
