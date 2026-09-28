@@ -331,13 +331,83 @@ final class ElementorReplayTest extends TestCase {
 			}
 		);
 
-		Aura_Worker_Elementor_Door::replay( $ref, null );
+		$out = Aura_Worker_Elementor_Door::replay( $ref, null );
 
 		$this->assertSame( 3, $asked, 'asked again before the callback' );
 		$this->assertSame( array(), $this->ran, 'nothing ran' );
 		$log = Aura_Worker_Door_Log::log_after( 0 );
 		$this->assertSame( 'refused', end( $log )['result'] );
 		$this->assertSame( 'autosave_appeared', end( $log )['reason'] );
+		$this->assertTrue( empty( end( $log )['ran'] ), 'refused before the ran witness (Codex r3)' );
+		// Retryable: the approval is given back, not spent.
+		$this->assertSame( 'retry_later', $out['reason'] );
+		$this->assertSame( 'aura_autosave_appeared', $out['code'] );
+		$this->assertNotNull( Aura_Worker_Door_Holds::get_held( $ref ), 'the hold is back for a retry' );
+	}
+
+	/** Codex r3 on #141: a non-page Elementor document is a `post` touch, and is re-checked too. */
+	public function test_the_late_autosave_check_covers_a_post_document(): void {
+		$GLOBALS['_posts'][8] = (object) array(
+			'ID'           => 8,
+			'post_type'    => 'post',
+			'post_status'  => 'draft',
+			'post_content' => '',
+		);
+		$this->registerAll();
+		$this->installRuleset( array() );
+		$ref   = $this->holdCall( 'elementor/publish-document', array( 'post_id' => 8 ) );
+		$asked = 0;
+		Aura_Worker_Elementor_Door::_set_autosave_probe_for_tests(
+			static function () use ( &$asked ) {
+				return ++$asked > 2;
+			}
+		);
+
+		$out = Aura_Worker_Elementor_Door::replay( $ref, null );
+
+		$this->assertSame( 3, $asked, 'the post document was asked about again' );
+		$this->assertSame( array(), $this->ran, 'nothing ran' );
+		$this->assertSame( 'retry_later', $out['reason'] );
+	}
+
+	/**
+	 * Codex r3 on #141: a custom_css WARN that only the wrapper's touches meet
+	 * was never acknowledged — the hold goes back with that rule to ack.
+	 */
+	public function test_a_warn_only_the_wrappers_touches_meet_answers_warn_changed(): void {
+		$this->registerAll();
+		$this->installRuleset( array() );
+		$ref = $this->holdCall();
+		$this->installRuleset(
+			array(
+				array(
+					'key'    => 'rule/css-warn',
+					'effect' => 'warn',
+					'target' => array(
+						'type' => 'custom_css',
+						'id'   => '7',
+					),
+					'reason' => 'careful with css',
+				),
+			)
+		);
+		$asked = 0;
+		Aura_Worker_Elementor_Door::_set_autosave_probe_for_tests(
+			static function () use ( &$asked ) {
+				return ++$asked > 1; // none when replay() judges; one when the wrapper does
+			}
+		);
+
+		$out = Aura_Worker_Elementor_Door::replay( $ref, null );
+
+		$this->assertFalse( $out['ok'] );
+		$this->assertSame( 'warn_changed', $out['reason'] );
+		$this->assertSame( 'rule/css-warn', $out['rule']['key'] );
+		$this->assertSame( array(), $this->ran, 'nothing ran' );
+		$held = Aura_Worker_Door_Holds::get_held( $ref );
+		$this->assertNotNull( $held, 'the hold is kept for the next approval' );
+		$this->assertSame( 'rule/css-warn', $held['rule']['key'] );
+		$this->assertContains( array( 'type' => 'custom_css', 'id' => '7' ), $held['touches'] );
 	}
 
 	/**

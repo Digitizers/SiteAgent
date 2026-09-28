@@ -47,7 +47,7 @@ class Aura_Worker_Elementor_Door {
 	 * snapshot that failed, a log row that could not be written, a creation
 	 * mutex another request holds, a hold queue that is busy.
 	 */
-	const RETRYABLE_CODES = array( 'aura_snapshot_failed', 'aura_log_failed', 'aura_log_full', 'aura_creation_busy', 'aura_hold_busy' );
+	const RETRYABLE_CODES = array( 'aura_snapshot_failed', 'aura_log_failed', 'aura_log_full', 'aura_creation_busy', 'aura_hold_busy', 'aura_autosave_appeared' );
 
 	const CPT_GLOBAL_CLASS  = 'e_global_class';
 	const CPT_DEFAULT_STYLE = 'e_default_style';
@@ -3019,7 +3019,8 @@ class Aura_Worker_Elementor_Door {
 			if ( isset( $t['type'] ) && 'custom_css' === $t['type'] ) {
 				return false; // already judged as a CSS write
 			}
-			if ( null === $page && isset( $t['type'], $t['id'] ) && 'page' === $t['type'] ) {
+			// A non-page Elementor document is a `post` touch (Codex r3 on #141).
+			if ( null === $page && isset( $t['type'], $t['id'] ) && in_array( $t['type'], array( 'page', 'post' ), true ) ) {
 				$page = (string) $t['id'];
 			}
 		}
@@ -4063,6 +4064,28 @@ class Aura_Worker_Elementor_Door {
 			return self::hold_call( $slug, $input, $touches, $actor, $verdict );
 		}
 
+		// A WARN THE OPERATOR HAS NOT ACKNOWLEDGED (Codex r3 on #141). replay()
+		// checks the ack against the verdict IT reached; the touches this
+		// wrapper computed can differ (an autosave that appeared in between
+		// adds a custom_css touch), and so can the warn. Refused before
+		// admission, so replay() gives the hold back carrying the rule to
+		// acknowledge next — never run on an approval of a different warn.
+		if ( null !== self::$replay_ack && 'warn' === $verdict['verdict'] ) {
+			$ev  = self::rule_evidence( $verdict['rule'] );
+			$ack = isset( self::$replay_ack['ack'] ) ? self::$replay_ack['ack'] : null;
+			if ( ! is_array( $ack ) || ! isset( $ack['key'], $ack['ruleHash'] ) || $ack['key'] !== $ev['key'] || $ack['ruleHash'] !== $ev['ruleHash'] ) {
+				return new WP_Error(
+					'aura_warn_changed',
+					'A rule warning the approval did not acknowledge now applies to this call; it was not run.',
+					array(
+						'status'  => 409,
+						'rule'    => $ev,
+						'touches' => $touches,
+					)
+				);
+			}
+		}
+
 		// allow (or a replay whose approval is spent): closed log?
 		if ( Aura_Worker_Door_Log::is_closed() ) {
 			Aura_Worker_Door_Log::bump_refused();
@@ -4346,6 +4369,36 @@ class Aura_Worker_Elementor_Door {
 			}
 		}
 
+		// THE AUTOSAVE, AGAIN (P7.2, Codex r2 on #141). A promoter judged
+		// without a custom_css touch was judged on "no autosave to promote";
+		// one saved since — during admission, the snapshot, or the hold —
+		// would go live unjudged. Asked once more as late as this request
+		// can: an autosave that appeared refuses the call, retryably, so the
+		// retry is judged with it. What is left is the gap between this read
+		// and Elementor's own, inside the callback, in this same request.
+		// BEFORE the `ran` witness (Codex r3): a replay reads `ran` to decide
+		// whether a refusal may give the approval back, and this one never
+		// entered the callback.
+		if ( self::autosave_appeared( $slug, $touches ) ) {
+			if ( $creating ) {
+				self::release_creation_mutex();
+			}
+			Aura_Worker_Door_Log::settle(
+				$seq,
+				array(
+					'result'       => 'refused',
+					'reason'       => 'autosave_appeared',
+					'may_have_run' => false,
+				)
+			);
+			self::$request = null;
+			return new WP_Error(
+				'aura_autosave_appeared',
+				'An autosave of this document appeared after the call was judged, and publishing would take it live; it was not run. Retry to have it judged.',
+				array( 'status' => 409 )
+			);
+		}
+
 		if ( 'warn' === $verdict['verdict'] ) {
 			Aura_Worker_Rules::record_warn( $slug, $verdict['rule'] );
 		}
@@ -4434,33 +4487,6 @@ class Aura_Worker_Elementor_Door {
 			// NOT a proven rebind — the fence simply could not be established.
 			// Retryable, and nothing ran.
 			return new WP_Error( 'aura_log_failed', 'This site could not establish which Aura binding this call belongs to; it was not run.', array( 'status' => 503 ) );
-		}
-
-		// THE AUTOSAVE, AGAIN (P7.2, Codex r2 on #141). A promoter judged
-		// without a custom_css touch was judged on "no autosave to promote";
-		// one saved since — during admission, the snapshot, or the hold —
-		// would go live unjudged. Asked once more as late as this request
-		// can: an autosave that appeared refuses the call, retryably, so the
-		// retry is judged with it. What is left is the gap between this read
-		// and Elementor's own, inside the callback, in this same request.
-		if ( self::autosave_appeared( $slug, $touches ) ) {
-			if ( $creating ) {
-				self::release_creation_mutex();
-			}
-			Aura_Worker_Door_Log::settle(
-				$seq,
-				array(
-					'result'       => 'refused',
-					'reason'       => 'autosave_appeared',
-					'may_have_run' => false,
-				)
-			);
-			self::$request = null;
-			return new WP_Error(
-				'aura_autosave_appeared',
-				'An autosave of this document appeared after the call was judged, and publishing would take it live; it was not run. Retry to have it judged.',
-				array( 'status' => 409 )
-			);
 		}
 
 		// THE CALLBACK IS ABOUT TO BE ENTERED (Ruling P33). The `ran` witness
@@ -5080,6 +5106,25 @@ class Aura_Worker_Elementor_Door {
 				// Never admitted: a closed log, a log row that could not be
 				// written, a target that stopped being attributable while the
 				// call waited. Nothing ran, so nothing needs a rollback.
+				if ( 'aura_warn_changed' === $code ) {
+					// The wrapper met a warn this approval did not acknowledge
+					// (Codex r3 on #141): the hold goes back, showing the
+					// touches and the rule to acknowledge next.
+					$data = (array) $result->get_error_data();
+					$back = self::give_back( $ref, $code, $result->get_error_message(), $slug, (array) $held['actor'], $touches );
+					if ( 'retry_later' !== $back['reason'] || ! empty( $back['claim_retained'] ) ) {
+						return $back;
+					}
+					if ( isset( $data['touches'] ) && is_array( $data['touches'] ) ) {
+						Aura_Worker_Door_Holds::refresh_touches( $ref, $data['touches'] );
+					}
+					Aura_Worker_Door_Holds::refresh_rule( $ref, (array) $data['rule'] );
+					return array(
+						'ok'     => false,
+						'reason' => 'warn_changed',
+						'rule'   => $data['rule'],
+					);
+				}
 				if ( is_wp_error( $result ) ) {
 					return in_array( $code, self::RETRYABLE_CODES, true )
 						? self::give_back( $ref, $code, $result->get_error_message(), $slug, (array) $held['actor'], $touches )
