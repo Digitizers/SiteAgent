@@ -204,6 +204,7 @@ class Aura_Worker_Elementor_Door {
 		self::$seq_lease           = null;
 		self::$schema_reader       = null;
 		self::$autosave_probe      = null;
+		self::$autosave_user       = null;
 		Aura_Worker_Door_Log::forget_live_identity();
 		// $GLOBALS['_sa_force_door'] — active()'s test override, standing in
 		// for the module class this suite cannot define — is reset by
@@ -2952,6 +2953,18 @@ class Aura_Worker_Elementor_Door {
 	/** @var callable|null test seam: fn( string $id ): bool — will this call promote an autosave? @since 2.23.0 */
 	private static $autosave_probe = null;
 
+	/**
+	 * Whose autosave a replay will promote: the HELD actor's user id while
+	 * replay() runs, else null (the current user). replay() judges its
+	 * touches BEFORE it switches to the held actor, and govern() memoises that
+	 * verdict for the wrapper, so asking the approver's autosave there would
+	 * judge an autosave Elementor never promotes (Codex r1 on #141).
+	 *
+	 * @var int|null
+	 * @since 2.23.0
+	 */
+	private static $autosave_user = null;
+
 	/** @since 2.23.0 */
 	public static function _set_autosave_probe_for_tests( $fn ) {
 		self::$autosave_probe = $fn;
@@ -2984,7 +2997,8 @@ class Aura_Worker_Elementor_Door {
 		if ( ! function_exists( 'wp_get_post_autosave' ) ) {
 			return true;
 		}
-		return (bool) wp_get_post_autosave( (int) $id, get_current_user_id() );
+		$user = null !== self::$autosave_user ? self::$autosave_user : get_current_user_id();
+		return (bool) wp_get_post_autosave( (int) $id, $user );
 	}
 
 	/** CSS-capable property names (spec §4.1 guard). @since 2.20.0 */
@@ -4703,6 +4717,9 @@ class Aura_Worker_Elementor_Door {
 		$rec                  = Aura_Worker_Rules::current_uncached();
 		self::$pinned_ruleset = $rec;
 		self::$memo           = array();
+		// The autosave publish-document promotes is the HELD actor's — the
+		// user the ability runs as below — never the approver's (P7.2).
+		self::$autosave_user  = isset( $held['actor']['user_id'] ) ? (int) $held['actor']['user_id'] : 0;
 		$prev_user            = get_current_user_id();
 		// WHO IS APPROVING — read NOW, before wp_set_current_user() below
 		// switches this request to the held actor (Ruling P36). Afterwards
@@ -5090,6 +5107,7 @@ class Aura_Worker_Elementor_Door {
 			self::$replay_ack     = null;
 			self::$pinned_ruleset = null;
 			self::$memo           = array();
+			self::$autosave_user  = null;
 			wp_set_current_user( (int) $prev_user );
 		}
 	}

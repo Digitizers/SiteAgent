@@ -280,6 +280,68 @@ final class ElementorReplayTest extends TestCase {
 	// (c) a block delivered since the hold
 	// -----------------------------------------------------------------------
 
+	/**
+	 * P7.2, Codex r1 on #141: publish-document promotes the HELD actor's
+	 * autosave, since that is the user it runs as. replay() judges before it
+	 * switches users, so the autosave probe must ask about the held actor,
+	 * never the approver.
+	 */
+	public function test_replay_judges_the_held_actors_autosave_not_the_approvers(): void {
+		$this->registerAll();
+		$this->installRuleset( array() );
+		$ref = $this->holdCall(); // held as user 3
+		$this->installRuleset(
+			array(
+				array(
+					'key'    => 'rule/css',
+					'effect' => 'block',
+					'target' => array(
+						'type' => 'custom_css',
+						'id'   => '7',
+					),
+					'reason' => 'no css',
+				),
+			)
+		);
+		$GLOBALS['_sa_autosaves'][7][3] = (object) array( 'ID' => 900 ); // the held actor's, made during the hold
+		$GLOBALS['_current_user_id']    = 5; // the approver, who has none
+
+		$out = Aura_Worker_Elementor_Door::replay( $ref, null );
+
+		$this->assertFalse( $out['ok'] );
+		$this->assertSame( 'refused_by_current_rule', $out['reason'] );
+		$this->assertSame( 'rule/css', $out['rule_key'] );
+		$this->assertSame( array(), $this->ran, 'nothing ran' );
+		$this->assertSame( 5, get_current_user_id(), 'the approver is restored' );
+	}
+
+	public function test_replay_ignores_an_autosave_only_the_approver_holds(): void {
+		$this->registerAll();
+		$this->installRuleset( array() );
+		$ref = $this->holdCall(); // held as user 3
+		$this->installRuleset(
+			array(
+				array(
+					'key'    => 'rule/css',
+					'effect' => 'block',
+					'target' => array(
+						'type' => 'custom_css',
+						'id'   => '7',
+					),
+					'reason' => 'no css',
+				),
+			)
+		);
+		$GLOBALS['_sa_autosaves'][7][5] = (object) array( 'ID' => 901 ); // the approver's: never promoted
+		$GLOBALS['_current_user_id']    = 5;
+
+		$out = Aura_Worker_Elementor_Door::replay( $ref, null );
+
+		$this->assertNotSame( 'refused_by_current_rule', $out['reason'] ?? null );
+		$this->assertSame( 1, $this->ran['elementor/publish-document'] ?? 0, 'the approved call ran' );
+		$this->assertSame( 3, $this->seen['elementor/publish-document'], 'as the held actor' );
+	}
+
 	public function test_a_block_delivered_since_the_hold_refuses_and_rejects_the_hold(): void {
 		$this->registerAll();
 		$this->installRuleset( array() );
