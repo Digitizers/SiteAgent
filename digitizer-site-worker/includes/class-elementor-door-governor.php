@@ -3001,6 +3001,31 @@ class Aura_Worker_Elementor_Door {
 		return (bool) wp_get_post_autosave( (int) $id, $user );
 	}
 
+	/**
+	 * Was a promoter judged CSS-free, and is there now an autosave for it to
+	 * promote? The pre-execute re-check (Codex r2 on #141).
+	 *
+	 * @since 2.23.0
+	 * @param string $slug    Ability.
+	 * @param array  $touches The touches the call was judged on.
+	 * @return bool
+	 */
+	private static function autosave_appeared( $slug, array $touches ) {
+		if ( ! in_array( $slug, self::AUTOSAVE_PROMOTERS, true ) ) {
+			return false;
+		}
+		$page = null;
+		foreach ( $touches as $t ) {
+			if ( isset( $t['type'] ) && 'custom_css' === $t['type'] ) {
+				return false; // already judged as a CSS write
+			}
+			if ( null === $page && isset( $t['type'], $t['id'] ) && 'page' === $t['type'] ) {
+				$page = (string) $t['id'];
+			}
+		}
+		return null !== $page && self::promotes_autosave( $page );
+	}
+
 	/** CSS-capable property names (spec §4.1 guard). @since 2.20.0 */
 	const CSS_PROPERTY_NAMES = array( 'custom_css', 'css', 'style', 'settings', 'page_settings', 'elements', 'structure', 'xml_structure', 'element_config' );
 
@@ -3532,15 +3557,21 @@ class Aura_Worker_Elementor_Door {
 	}
 
 	/**
-	 * The verdict, once per request per (ability, input).
+	 * The verdict, once per request per (ability, input, touches).
+	 *
+	 * The touches are part of the key (2.23.0, Codex r1/r2 on #141): the same
+	 * input can resolve to different touches within one request — replay()
+	 * judges before the wrapper recomputes, and an autosave-promoting write
+	 * gains a custom_css touch when an autosave appears between the two — and
+	 * a verdict reached on one set of touches must never answer for another.
 	 *
 	 * @param string $slug    Ability.
 	 * @param array  $touches Touches.
-	 * @param array  $input   Input (memo key only).
+	 * @param array  $input   Input.
 	 * @return array { effect: block|hold|allow, rule: array|null, verdict: none|warn|rules_unavailable|block|allow }
 	 */
 	public static function govern( $slug, array $touches, array $input ) {
-		$key = self::memo_key( $slug, $input );
+		$key = self::memo_key( $slug, $input ) . '|' . hash( 'sha256', (string) wp_json_encode( $touches ) );
 		if ( isset( self::$memo[ $key ] ) ) {
 			return self::$memo[ $key ];
 		}
@@ -4403,6 +4434,33 @@ class Aura_Worker_Elementor_Door {
 			// NOT a proven rebind — the fence simply could not be established.
 			// Retryable, and nothing ran.
 			return new WP_Error( 'aura_log_failed', 'This site could not establish which Aura binding this call belongs to; it was not run.', array( 'status' => 503 ) );
+		}
+
+		// THE AUTOSAVE, AGAIN (P7.2, Codex r2 on #141). A promoter judged
+		// without a custom_css touch was judged on "no autosave to promote";
+		// one saved since — during admission, the snapshot, or the hold —
+		// would go live unjudged. Asked once more as late as this request
+		// can: an autosave that appeared refuses the call, retryably, so the
+		// retry is judged with it. What is left is the gap between this read
+		// and Elementor's own, inside the callback, in this same request.
+		if ( self::autosave_appeared( $slug, $touches ) ) {
+			if ( $creating ) {
+				self::release_creation_mutex();
+			}
+			Aura_Worker_Door_Log::settle(
+				$seq,
+				array(
+					'result'       => 'refused',
+					'reason'       => 'autosave_appeared',
+					'may_have_run' => false,
+				)
+			);
+			self::$request = null;
+			return new WP_Error(
+				'aura_autosave_appeared',
+				'An autosave of this document appeared after the call was judged, and publishing would take it live; it was not run. Retry to have it judged.',
+				array( 'status' => 409 )
+			);
 		}
 
 		// THE CALLBACK IS ABOUT TO BE ENTERED (Ruling P33). The `ran` witness

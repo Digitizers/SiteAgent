@@ -315,6 +315,81 @@ final class ElementorReplayTest extends TestCase {
 		$this->assertSame( 5, get_current_user_id(), 'the approver is restored' );
 	}
 
+	/**
+	 * Codex r2 on #141: an autosave saved after the judgement (here, between
+	 * replay()'s judgement and the callback) refuses the call before it runs,
+	 * retryably, instead of going live unjudged.
+	 */
+	public function test_an_autosave_that_appears_after_judgement_refuses_before_the_callback(): void {
+		$this->registerAll();
+		$this->installRuleset( array() );
+		$ref = $this->holdCall();
+		$asked = 0;
+		Aura_Worker_Elementor_Door::_set_autosave_probe_for_tests(
+			static function () use ( &$asked ) {
+				return ++$asked > 2; // none at replay()'s and the wrapper's judgement; one by the time it would run
+			}
+		);
+
+		Aura_Worker_Elementor_Door::replay( $ref, null );
+
+		$this->assertSame( 3, $asked, 'asked again before the callback' );
+		$this->assertSame( array(), $this->ran, 'nothing ran' );
+		$log = Aura_Worker_Door_Log::log_after( 0 );
+		$this->assertSame( 'refused', end( $log )['result'] );
+		$this->assertSame( 'autosave_appeared', end( $log )['reason'] );
+	}
+
+	/**
+	 * Codex r1 on #141, the memo half: an autosave that appears between
+	 * replay()'s judgement and the wrapper's gives the wrapper a custom_css
+	 * touch, and the wrapper judges THOSE touches — replay()'s CSS-free
+	 * verdict is not reused for them.
+	 */
+	public function test_the_wrapper_rejudges_touches_that_changed_since_replay_judged(): void {
+		$this->registerAll();
+		$this->installRuleset( array() );
+		$ref = $this->holdCall();
+		$this->installRuleset(
+			array(
+				array(
+					'key'    => 'rule/css',
+					'effect' => 'block',
+					'target' => array(
+						'type' => 'custom_css',
+						'id'   => '7',
+					),
+					'reason' => 'no css',
+				),
+			)
+		);
+		$asked = 0;
+		Aura_Worker_Elementor_Door::_set_autosave_probe_for_tests(
+			static function () use ( &$asked ) {
+				return ++$asked > 1; // none when replay() judges; one when the wrapper does
+			}
+		);
+
+		Aura_Worker_Elementor_Door::replay( $ref, null );
+
+		$this->assertSame( array(), $this->ran, 'the block on the CSS the wrapper saw held' );
+	}
+
+	public function test_no_late_autosave_lets_the_approved_call_run(): void {
+		$this->registerAll();
+		$this->installRuleset( array() );
+		$ref = $this->holdCall();
+		Aura_Worker_Elementor_Door::_set_autosave_probe_for_tests(
+			static function () {
+				return false;
+			}
+		);
+
+		Aura_Worker_Elementor_Door::replay( $ref, null );
+
+		$this->assertSame( 1, $this->ran['elementor/publish-document'] ?? 0 );
+	}
+
 	public function test_replay_ignores_an_autosave_only_the_approver_holds(): void {
 		$this->registerAll();
 		$this->installRuleset( array() );
