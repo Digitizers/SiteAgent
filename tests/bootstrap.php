@@ -622,6 +622,17 @@ if ( ! function_exists( 'get_current_user_id' ) ) {
 	}
 }
 
+/**
+ * wp_get_post_autosave(): $GLOBALS['_sa_autosaves'][ $post_id ][ $user_id ]
+ * holds the autosave a test models (any truthy value), else false — the
+ * answer on a document nobody has autosaved. Since 2.23.0 (P7.2).
+ */
+if ( ! function_exists( 'wp_get_post_autosave' ) ) {
+	function wp_get_post_autosave( $post_id, $user_id = 0 ) {
+		return $GLOBALS['_sa_autosaves'][ (int) $post_id ][ (int) $user_id ] ?? false;
+	}
+}
+
 if ( ! function_exists( 'register_setting' ) ) {
 	function register_setting( string $group, string $option, $args = array() ): void {
 		$GLOBALS['_registered_settings'][ $group ][] = $option;
@@ -4053,6 +4064,7 @@ if ( ! class_exists( 'SA_Test_Wpdb' ) ) {
 	$GLOBALS['_sa_after_wp_cache_delete'] = array(); // Keyed by OPTION NAME: runs immediately after that wp_cache_delete() call, once (Ruling S18).
 	$GLOBALS['_sa_after_computed_state_steady'] = null; // Fires once right after sync_computed_state()'s own steady-state verdict (Ruling S28).
 	$GLOBALS['_sa_after_rows_read'] = array(); // Keyed by PREFIX: runs immediately after that rows-by-prefix read completes, once (Ruling S20).
+	$GLOBALS['_sa_autosaves']         = array();   // wp_get_post_autosave() stub (2.23.0, P7.2).
 	$GLOBALS['_sa_force_door']        = false;   // Aura_Worker_Elementor_Door::active()'s override (2.16.0): stands in for Elementor's MCP module class, which this suite cannot define. A test that wants the module present sets it.
 	// Aura_Worker_Elementor_Door::kit_id()'s override (2.16.0): Elementor's
 	// kits_manager cannot be instantiated here, so a test that needs an active
@@ -5382,6 +5394,7 @@ function sa_reset_state(): void {
 	$GLOBALS['_sa_after_wp_cache_delete'] = array(); // Keyed by OPTION NAME: runs immediately after that wp_cache_delete() call, once (Ruling S18).
 	$GLOBALS['_sa_after_computed_state_steady'] = null; // Fires once right after sync_computed_state()'s own steady-state verdict (Ruling S28).
 	$GLOBALS['_sa_after_rows_read'] = array(); // Keyed by PREFIX: runs immediately after that rows-by-prefix read completes, once (Ruling S20).
+	$GLOBALS['_sa_autosaves']         = array();   // wp_get_post_autosave() stub (2.23.0, P7.2).
 	$GLOBALS['_sa_force_door']        = false;   // Aura_Worker_Elementor_Door::active()'s override (2.16.0): stands in for Elementor's MCP module class, which this suite cannot define. A test that wants the module present sets it.
 	// Aura_Worker_Elementor_Door::kit_id()'s override (2.16.0): Elementor's
 	// kits_manager cannot be instantiated here, so a test that needs an active

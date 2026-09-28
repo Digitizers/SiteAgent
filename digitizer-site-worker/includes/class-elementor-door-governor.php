@@ -203,6 +203,7 @@ class Aura_Worker_Elementor_Door {
 		self::$active              = null;
 		self::$seq_lease           = null;
 		self::$schema_reader       = null;
+		self::$autosave_probe      = null;
 		Aura_Worker_Door_Log::forget_live_identity();
 		// $GLOBALS['_sa_force_door'] — active()'s test override, standing in
 		// for the module class this suite cannot define — is reset by
@@ -2923,7 +2924,7 @@ class Aura_Worker_Elementor_Door {
 	 * @since 2.20.0
 	 */
 	const NO_CSS = array(
-		'elementor/publish-document'       => array( 'reason' => 'promotes an already-judged autosave', 'exempt' => array() ),
+		'elementor/publish-document'       => array( 'reason' => 'its INPUT carries no CSS; what it promotes is judged separately (AUTOSAVE_PROMOTERS)', 'exempt' => array() ),
 		'elementor/create-preview-link'    => array( 'reason' => 'mints a preview URL; writes no content', 'exempt' => array() ),
 		'elementor/create-page'            => array( 'reason' => 'creates an empty document', 'exempt' => array() ),
 		'elementor/manage-classes'         => array( 'reason' => 'global-class CSS — design_system (R1)', 'exempt' => array( 'operations[].css' ) ),
@@ -2931,6 +2932,60 @@ class Aura_Worker_Elementor_Door {
 		'elementor/reorder-classes'        => array( 'reason' => 'reorders class ids; no style content', 'exempt' => array() ),
 		'elementor/manage-global-variable' => array( 'reason' => 'a variable value, not a stylesheet', 'exempt' => array() ),
 	);
+
+	/**
+	 * NO_CSS writes that nevertheless take stored content live: since Elementor
+	 * 4.3.2, `publish-document` promotes the CALLING user's pending autosave
+	 * onto the document before publishing (Publish_Document_Ability::
+	 * promote_pending_autosave(), wp_get_post_autosave( $id,
+	 * get_current_user_id() )). That autosave may have been made by hand in
+	 * the editor and judged by no rule, so it may carry page or element CSS
+	 * the input never shows. Such a call declares a conservative custom_css
+	 * touch whenever an autosave is there to promote (P7.2, references
+	 * reverification-2026-09-28 §4; owner decision: conservative only when an
+	 * autosave exists, no content diff).
+	 *
+	 * @since 2.23.0
+	 */
+	const AUTOSAVE_PROMOTERS = array( 'elementor/publish-document' );
+
+	/** @var callable|null test seam: fn( string $id ): bool — will this call promote an autosave? @since 2.23.0 */
+	private static $autosave_probe = null;
+
+	/** @since 2.23.0 */
+	public static function _set_autosave_probe_for_tests( $fn ) {
+		self::$autosave_probe = $fn;
+	}
+
+	/**
+	 * Would an autosave-promoting write take stored content live on $id?
+	 *
+	 * True when the calling user holds an autosave of the document and the
+	 * running Elementor promotes it. An Elementor whose ability class is
+	 * loaded without the promotion (before 4.3.2) promotes nothing: false. A
+	 * target that is not a post id (`*`) cannot be checked: true, so a block
+	 * rule is never bypassed by an unresolved target.
+	 *
+	 * @since 2.23.0
+	 * @param string $id Resolved post id, or '*'.
+	 * @return bool
+	 */
+	private static function promotes_autosave( $id ) {
+		if ( null !== self::$autosave_probe ) {
+			return (bool) call_user_func( self::$autosave_probe, (string) $id );
+		}
+		if ( ! ctype_digit( (string) $id ) ) {
+			return true;
+		}
+		$class = 'Elementor\\Modules\\Mcp\\Abilities\\Publish_Document_Ability';
+		if ( class_exists( $class, false ) && ! method_exists( $class, 'promote_pending_autosave' ) ) {
+			return false;
+		}
+		if ( ! function_exists( 'wp_get_post_autosave' ) ) {
+			return true;
+		}
+		return (bool) wp_get_post_autosave( (int) $id, get_current_user_id() );
+	}
 
 	/** CSS-capable property names (spec §4.1 guard). @since 2.20.0 */
 	const CSS_PROPERTY_NAMES = array( 'custom_css', 'css', 'style', 'settings', 'page_settings', 'elements', 'structure', 'xml_structure', 'element_config' );
@@ -3133,7 +3188,8 @@ class Aura_Worker_Elementor_Door {
 
 	/**
 	 * The custom_css touches a door write declares, in addition to its
-	 * page/post/design_system ones. Pure.
+	 * page/post/design_system ones. Pure, except that an AUTOSAVE_PROMOTERS
+	 * write asks whether the calling user holds an autosave (2.23.0).
 	 *
 	 * @since 2.20.0
 	 * @param string $slug  Ability.
@@ -3150,6 +3206,10 @@ class Aura_Worker_Elementor_Door {
 			// let a custom_css block rule be bypassed.
 			$schema = self::live_input_schema( $slug );
 			if ( is_array( $schema ) && array() !== array_diff( self::css_capable_paths( $schema ), self::NO_CSS[ $slug ]['exempt'] ) ) {
+				return array( array( 'type' => 'custom_css', 'id' => $id ) );
+			}
+			// Its input carries no CSS, but it may take a stored autosave live.
+			if ( in_array( $slug, self::AUTOSAVE_PROMOTERS, true ) && self::promotes_autosave( $id ) ) {
 				return array( array( 'type' => 'custom_css', 'id' => $id ) );
 			}
 			return array();
