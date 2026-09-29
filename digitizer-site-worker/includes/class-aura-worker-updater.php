@@ -1765,15 +1765,24 @@ class Aura_Worker_Updater {
 	 */
 	private function upgrade_plugin_keeping_activation( $plugin_file ) {
 		if ( self::SELF_PLUGIN_FILE === $plugin_file ) {
-			return array(
-				'success' => false,
-				'code'    => 'aura_use_self_update',
-				'error'   => __( 'SiteAgent cannot update itself through the generic plugin update: it would be deactivated mid-update and lose its own routes. Use POST /aura/v1/self-update.', 'digitizer-site-worker' ),
-			);
+			return $this->self_target_refusal();
 		}
 
 		$offer = $this->offered_update( $plugin_file );
 		if ( null === $offer ) {
+			// wp_update_plugins() returns early while last_checked is inside
+			// its timeout and no installed version changed (Codex r1 on #143),
+			// so the list is forced stale first. Written back, never deleted:
+			// deleting would drop every other plugin's offer.
+			// The key is WordPress core's, not this plugin's: named through a
+			// variable so UninstallCoverageTest counts it as an acknowledged
+			// foreign write, never as a key uninstall.php must sweep.
+			$core_key = 'update_plugins';
+			$stale    = get_site_transient( $core_key );
+			if ( is_object( $stale ) ) {
+				$stale->last_checked = 0;
+				set_site_transient( $core_key, $stale );
+			}
 			wp_update_plugins();
 			$offer = $this->offered_update( $plugin_file );
 		}
@@ -1837,6 +1846,20 @@ class Aura_Worker_Updater {
 			$out['offered_version'] = (string) $offer->new_version;
 		}
 		return $out;
+	}
+
+	/**
+	 * The refusal the generic update paths answer for SiteAgent's own file
+	 * (2.23.1): it updates itself only through POST /aura/v1/self-update.
+	 *
+	 * @return array { success: false, code: aura_use_self_update, error }
+	 */
+	private function self_target_refusal() {
+		return array(
+			'success' => false,
+			'code'    => 'aura_use_self_update',
+			'error'   => __( 'SiteAgent cannot update itself through the generic plugin update: it would be deactivated mid-update and lose its own routes. Use POST /aura/v1/self-update.', 'digitizer-site-worker' ),
+		);
 	}
 
 	/**
@@ -2059,6 +2082,21 @@ class Aura_Worker_Updater {
 					$verdict = $this->host_php_writes_verdict();
 				}
 				$entry = $this->guarding_self( $plugin_file, function ( $fence ) use ( $plugin_file, &$rollback, $health, $create_backup ) {
+					// SiteAgent's own entry is refused here (Codex r1 on #143):
+					// before the recovery helper is built and before
+					// batch_update_one() backs it up — an unwritable backup
+					// directory must not turn this into a backup failure. The
+					// multisite, host and busy refusals above still come first;
+					// the shared helper refuses it again (defence in depth).
+					if ( self::SELF_PLUGIN_FILE === $plugin_file ) {
+						$refusal = $this->self_target_refusal();
+						return array(
+							'plugin' => $plugin_file,
+							'status' => 'failed',
+							'detail' => $refusal['error'],
+							'code'   => $refusal['code'],
+						);
+					}
 					if ( null === $rollback ) {
 						$rollback = $this->new_rollback();
 					}

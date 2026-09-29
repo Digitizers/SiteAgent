@@ -204,16 +204,25 @@ update of SiteAgent itself removed every `aura/*` route.
   (`aura_self_update_multisite_unsupported`), the host refusal and the busy claim
   (`in_progress: true`) keep their precedence. A batch refuses only that entry
   (`status: failed`, `code`); the other entries run. There is no internal re-route
-  to `self_update()`. Note that a batch entry with `create_backup` still backs up
-  before the refusal (`batch_update_one()` backs up before it updates).
+  to `self_update()`. On the batch path the entry is refused in
+  `batch_update_plugins()`'s guarded work, **before** the recovery helper is built
+  and before `batch_update_one()`'s backup (Codex r1 on #143) — no backup of
+  SiteAgent is taken, and an unwritable backup directory still answers
+  `aura_use_self_update`. The shared helper refuses it again (defence in depth).
+  The SA#80 lease/heartbeat for a SiteAgent batch entry is therefore unreachable;
+  the in-phase heartbeat tests drive `self_update()`'s `install()` instead.
 - **The result.** `null` is `run()` failing (core's `$result` has no default and
   run()'s `WP_Error` is discarded): `aura_update_failed`, `error` = "Update failed:"
   plus the skin's reason (`get_errors()` where the skin has it, then the last three
   `get_upgrade_messages()`), never "No update available". `false` is
   `aura_no_update_offered` (REST `409`, not `500`). A `WP_Error` keeps its code and
   message (REST `500`).
-- **The offer.** When `update_plugins->response[$f]` is missing, `wp_update_plugins()`
-  runs once and the transient is re-read before `upgrade()` (the GitHub-hosted
+- **The offer.** When `update_plugins->response[$f]` is missing, the list is forced
+  stale — `last_checked = 0` written back with `set_site_transient()`, never deleted
+  (that would drop every other plugin's offer), because `wp_update_plugins()` returns
+  early inside its timeout (Codex r1 on #143) — then `wp_update_plugins()`
+  runs once and the transient is re-read before `upgrade()`. That write is core's
+  key, acknowledged as a foreign dynamic write in `UninstallCoverageTest` (the GitHub-hosted
   plugins' entries are injected at read time, by code that may not be loaded).
   `offered_version` (the entry's `new_version`) is reported when there is an entry.
 - **Tests.** `UpdatePluginPreservesActivationTest`, `UpdatePluginSelfRefusalTest`,

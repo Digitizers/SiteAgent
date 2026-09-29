@@ -92,6 +92,11 @@ final class UninstallCoverageTest extends TestCase {
 	 *   the ONE dynamic write that is not the plugin's own storage: it RESTORES
 	 *   a site option a snapshot captured, so the key belongs to WordPress or to
 	 *   another plugin and uninstall must never remove it.
+	 * - includes/class-aura-worker-updater.php — set_site_transient( $core_key )
+	 *   is the second foreign write (2.23.1, Codex r1 on #143): it writes
+	 *   WordPress core's own `update_plugins` back with last_checked = 0 so
+	 *   wp_update_plugins() actually refreshes. Core's key; uninstall must
+	 *   never remove it.
 	 */
 	private const ACKNOWLEDGED_DYNAMIC_WRITES = array(
 		'includes/boot-beacon.php'                 => 1,
@@ -99,6 +104,7 @@ final class UninstallCoverageTest extends TestCase {
 		'includes/class-aura-worker-rules.php'     => 2,
 		'includes/class-aura-worker-security.php'  => 1,
 		'includes/class-aura-worker-snapshots.php' => 1,
+		'includes/class-aura-worker-updater.php'   => 1,
 	);
 
 	/**

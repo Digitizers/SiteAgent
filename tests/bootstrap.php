@@ -1648,6 +1648,17 @@ if ( ! function_exists( 'get_site_transient' ) ) {
 	}
 }
 
+if ( ! function_exists( 'set_site_transient' ) ) {
+	// Writes `_site_transients`; logged in `_updater_calls` as
+	// `set_site_transient:<key>` (Codex r1 on #143: the forced-stale write
+	// must land before wp_update_plugins()).
+	function set_site_transient( $key, $value, $expiration = 0 ) {
+		$GLOBALS['_site_transients'][ $key ] = $value;
+		$GLOBALS['_updater_calls'][]         = 'set_site_transient:' . $key;
+		return true;
+	}
+}
+
 if ( ! function_exists( 'wp_update_plugins' ) ) {
 	// Logged in `_updater_calls` (beside Plugin_Upgrader::upgrade, so a test
 	// can assert the order); `_wp_update_plugins_effect` models what the

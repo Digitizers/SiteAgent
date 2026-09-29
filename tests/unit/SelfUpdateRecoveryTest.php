@@ -1362,98 +1362,109 @@ final class SelfUpdateRecoveryTest extends TestCase {
 		$this->assertNull( sa_read_option_uncached( Aura_Worker_Updater::SELF_UPDATE_LOCK ), 'the guarded restore releases what it took' );
 	}
 
-	public function test_a_batch_entry_for_siteagent_that_outlives_its_lease_stops_before_the_health_check(): void {
-		// SA#80: the generic batch entry ran backup → update → health → rollback
-		// under a claim it never renewed. Model the update phase running past the
-		// takeover window and a successor seizing the claim: the entry must stop
-		// there — no health check, no rollback over the successor's files — and
-		// must not remove the successor's claim on its way out.
-		$successor = '';
-		$updater   = new class( $successor ) extends Aura_Worker_Updater {
-			private $successor;
-			public function __construct( &$successor ) { $this->successor = &$successor; }
-			protected function update_single_plugin( $plugin_file ) {
-				$held  = (string) sa_read_option_uncached( Aura_Worker_Updater::SELF_UPDATE_LOCK );
-				$fence = substr( $held, 0, strpos( $held, '|' ) );
-				update_option( Aura_Worker_Updater::SELF_UPDATE_LOCK, $fence . '|' . ( time() - 11 * MINUTE_IN_SECONDS ) );
-				$this->successor = Aura_Worker_Magic_Link::take_claim( Aura_Worker_Updater::SELF_UPDATE_LOCK, 10 * MINUTE_IN_SECONDS );
-				return array( 'success' => true );
-			}
+	/*
+	 * Retired in 2.23.1 (Codex r1 on #143): three tests drove SiteAgent's own
+	 * entry through the generic BATCH to exercise the SA#80 lease between its
+	 * phases — outliving the lease before the health check, renewing it
+	 * between phases, and a claim seized during the health probe. The batch
+	 * now refuses that entry (aura_use_self_update) before any backup, lease
+	 * phase or probe, so none of it can happen in production. The same
+	 * guarantees on the path that still runs are pinned by
+	 * test_the_claim_is_renewed_between_phases_so_a_live_update_is_never_seizable,
+	 * test_a_self_update_whose_claim_was_seized_during_install_neither_restores_nor_probes
+	 * and test_a_self_update_whose_claim_is_seized_during_the_verdict_does_not_roll_back.
+	 * The three in-phase heartbeat tests below moved from the batch to the
+	 * self-update's install(), which runs inside the same heartbeat_during().
+	 */
+
+	/** A self-update whose heartbeat is unthrottled, so every sub-phase filter beats. */
+	private function heartbeatingSelfUpdate(): array {
+		$updater = new class() extends Aura_Worker_Updater {
+			const LEASE_HEARTBEAT_SECONDS = 0; // no throttle in the model
 		};
-
-		$out = $updater->batch_update_plugins( array( Aura_Worker_Updater::SELF_PLUGIN_FILE ), 5, false );
-
-		$entry = $out['results'][0];
-		$this->assertSame( 'failed', $entry['status'] );
-		$this->assertStringContainsString( 'Lost the self-update claim', $entry['detail'] );
-		$this->assertNotSame( '', $successor, 'the aged claim must be seizable' );
-		$this->assertStringStartsWith( $successor . '|', (string) sa_read_option_uncached( Aura_Worker_Updater::SELF_UPDATE_LOCK ), 'the outlived entry must not remove its successor\'s claim' );
-		$this->assertSame( array(), array_filter( $GLOBALS['_wp_http_calls'] ), 'no health probe after the claim was lost' );
+		return $updater->self_update( 'https://github.com/Digitizers/SiteAgent/releases/download/v9.9.9/x.zip' );
 	}
 
-	public function test_a_batch_entry_for_siteagent_renews_its_lease_between_phases(): void {
-		// The lease is renewed after the backup and after the update, so a slow
-		// phase is never mistaken for a dead holder. Observable as the claim's
-		// timestamp moving forward across the entry.
-		$stamps  = array();
-		$updater = new class( $stamps ) extends Aura_Worker_Updater {
-			private $stamps;
-			public function __construct( &$stamps ) { $this->stamps = &$stamps; }
-			protected function update_single_plugin( $plugin_file ) {
-				// Age the lease by a minute inside the phase; the renewal after
-				// this phase must bring it back to "now".
-				$held  = (string) sa_read_option_uncached( Aura_Worker_Updater::SELF_UPDATE_LOCK );
-				$fence = substr( $held, 0, strpos( $held, '|' ) );
-				update_option( Aura_Worker_Updater::SELF_UPDATE_LOCK, $fence . '|' . ( time() - MINUTE_IN_SECONDS ) );
-				$this->stamps['aged'] = (string) sa_read_option_uncached( Aura_Worker_Updater::SELF_UPDATE_LOCK );
-				return array( 'success' => true );
-			}
-			protected function batch_update_one( $plugin_file, $rollback, $health, $create_backup, $fence = '' ) {
-				$entry                   = parent::batch_update_one( $plugin_file, $rollback, $health, $create_backup, $fence );
-				$this->stamps['renewed'] = (string) sa_read_option_uncached( Aura_Worker_Updater::SELF_UPDATE_LOCK );
-				return $entry;
-			}
-		};
-
-		$out = $updater->batch_update_plugins( array( Aura_Worker_Updater::SELF_PLUGIN_FILE ), 5, false );
-
-		$this->assertSame( 'updated', $out['results'][0]['status'], $out['results'][0]['detail'] );
-		$aged    = (int) substr( $stamps['aged'], strpos( $stamps['aged'], '|' ) + 1 );
-		$renewed = (int) substr( $stamps['renewed'], strpos( $stamps['renewed'], '|' ) + 1 );
-		$this->assertGreaterThan( $aged, $renewed, 'the lease was renewed after the update phase' );
-		$this->assertNull( sa_read_option_uncached( Aura_Worker_Updater::SELF_UPDATE_LOCK ), 'released on exit' );
-	}
-
-	public function test_the_lease_is_heartbeaten_inside_the_update_phase_through_the_upgraders_filters(): void {
+	public function test_the_lease_is_heartbeaten_inside_the_install_phase_through_the_upgraders_filters(): void {
 		// Codex #91 round-2 P1: renewing only BETWEEN phases leaves a phase
 		// that runs past the window seizable. The upgrader fires its own
-		// sub-phase filters (download → source selection → pre-install →
-		// post-install); a throttled heartbeat hooked on them keeps the lease
-		// alive while the phase runs. Modelled: the phase ages the lease, then
-		// fires a sub-phase filter; the lease must be fresh again after it.
-		$stamps  = array();
-		$updater = new class( $stamps ) extends Aura_Worker_Updater {
-			const LEASE_HEARTBEAT_SECONDS = 0; // no throttle in the model
-			private $stamps;
-			public function __construct( &$stamps ) { $this->stamps = &$stamps; }
-			protected function update_single_plugin( $plugin_file ) {
-				$held  = (string) sa_read_option_uncached( Aura_Worker_Updater::SELF_UPDATE_LOCK );
-				$fence = substr( $held, 0, strpos( $held, '|' ) );
-				update_option( Aura_Worker_Updater::SELF_UPDATE_LOCK, $fence . '|' . ( time() - 5 * MINUTE_IN_SECONDS ) );
-				$this->stamps['aged'] = (string) sa_read_option_uncached( Aura_Worker_Updater::SELF_UPDATE_LOCK );
-				apply_filters( 'upgrader_pre_install', true, array() ); // what Plugin_Upgrader fires mid-phase
-				$this->stamps['beat'] = (string) sa_read_option_uncached( Aura_Worker_Updater::SELF_UPDATE_LOCK );
-				return array( 'success' => true );
-			}
+		// sub-phase filters; a throttled heartbeat hooked on them keeps the
+		// lease alive while install() runs. Modelled: the install ages the
+		// lease, then fires a sub-phase filter; the lease is fresh after it.
+		$stamps = array();
+		$GLOBALS['_install_effect'] = function () use ( &$stamps ) {
+			$held  = (string) sa_read_option_uncached( Aura_Worker_Updater::SELF_UPDATE_LOCK );
+			$fence = substr( $held, 0, strpos( $held, '|' ) );
+			update_option( Aura_Worker_Updater::SELF_UPDATE_LOCK, $fence . '|' . ( time() - 5 * MINUTE_IN_SECONDS ) );
+			$stamps['aged'] = (string) sa_read_option_uncached( Aura_Worker_Updater::SELF_UPDATE_LOCK );
+			apply_filters( 'upgrader_pre_install', true, array() ); // what the upgrader fires mid-phase
+			$stamps['beat'] = (string) sa_read_option_uncached( Aura_Worker_Updater::SELF_UPDATE_LOCK );
+			$this->installNewBuild( true );
 		};
 
-		$out = $updater->batch_update_plugins( array( Aura_Worker_Updater::SELF_PLUGIN_FILE ), 5, false );
+		$res = $this->heartbeatingSelfUpdate();
 
-		$this->assertSame( 'updated', $out['results'][0]['status'], $out['results'][0]['detail'] );
+		$this->assertTrue( $res['success'], $res['error'] ?? '' );
 		$aged = (int) substr( $stamps['aged'], strpos( $stamps['aged'], '|' ) + 1 );
 		$beat = (int) substr( $stamps['beat'], strpos( $stamps['beat'], '|' ) + 1 );
 		$this->assertGreaterThan( $aged, $beat, 'the sub-phase filter renewed the lease inside the phase' );
 		$this->assertSame( array(), array_filter( $GLOBALS['_filters']['upgrader_pre_install'] ?? array() ), 'the heartbeat filter is removed after the phase' );
+	}
+
+	public function test_a_heartbeat_that_loses_the_claim_aborts_the_upgraders_pre_stages_and_passes_post_install_through(): void {
+		// Codex #94 round-3 P1: the three pre-stage filters are WordPress's own
+		// abort points (a WP_Error there runs nothing), so the heartbeat
+		// answers one from the first failed check on; post-install, which
+		// fires after the files are replaced, passes through and the check
+		// after the phase stops the self-update.
+		$stamps = array();
+		$GLOBALS['_install_effect'] = function () use ( &$stamps ) {
+			$held  = (string) sa_read_option_uncached( Aura_Worker_Updater::SELF_UPDATE_LOCK );
+			$fence = substr( $held, 0, strpos( $held, '|' ) );
+			update_option( Aura_Worker_Updater::SELF_UPDATE_LOCK, $fence . '|' . ( time() - 11 * MINUTE_IN_SECONDS ) );
+			$stamps['successor'] = Aura_Worker_Magic_Link::take_claim( Aura_Worker_Updater::SELF_UPDATE_LOCK, 10 * MINUTE_IN_SECONDS );
+			$stamps['pre']       = apply_filters( 'upgrader_pre_install', true, array() );
+			$stamps['post']      = apply_filters( 'upgrader_post_install', true, array(), array() );
+			$stamps['pre_again'] = apply_filters( 'upgrader_pre_download', false, 'pkg', null, array() );
+		};
+
+		$res = $this->heartbeatingSelfUpdate();
+
+		$this->assertNotSame( '', $stamps['successor'], 'the aged claim must be seizable' );
+		$this->assertInstanceOf( WP_Error::class, $stamps['pre'], 'a lost claim aborts the pre-install stage' );
+		$this->assertSame( 'aura_self_update_claim_lost', $stamps['pre']->get_error_code() );
+		$this->assertTrue( $stamps['post'], 'post-install passes its value through — the files are already replaced' );
+		$this->assertInstanceOf( WP_Error::class, $stamps['pre_again'], 'once lost, every later pre-stage aborts without re-checking' );
+		$this->assertFalse( $res['success'] );
+		$this->assertTrue( $res['in_progress'] );
+		$this->assertFalse( $res['rolled_back'] );
+		$this->assertStringStartsWith( $stamps['successor'] . '|', (string) sa_read_option_uncached( Aura_Worker_Updater::SELF_UPDATE_LOCK ), 'the successor\'s claim is untouched' );
+	}
+
+	public function test_a_claim_seized_between_pre_install_and_the_clear_aborts_before_the_old_directory_is_deleted(): void {
+		// Codex #94 round-8 P1: upgrader_clear_destination is WordPress's own
+		// filter immediately before the delete (which runs inside it, at
+		// priority 10); the beat at priority 1 renews there and a lost claim
+		// answers a WP_Error that stops the phase with the old files untouched.
+		$stamps = array();
+		$GLOBALS['_install_effect'] = function () use ( &$stamps ) {
+			$stamps['pre'] = apply_filters( 'upgrader_pre_install', true, array() ); // still ours
+			$held  = (string) sa_read_option_uncached( Aura_Worker_Updater::SELF_UPDATE_LOCK );
+			$fence = substr( $held, 0, strpos( $held, '|' ) );
+			update_option( Aura_Worker_Updater::SELF_UPDATE_LOCK, $fence . '|' . ( time() - 11 * MINUTE_IN_SECONDS ) ); // the clear runs long
+			$stamps['successor'] = Aura_Worker_Magic_Link::take_claim( Aura_Worker_Updater::SELF_UPDATE_LOCK, 10 * MINUTE_IN_SECONDS );
+			$stamps['clear']     = apply_filters( 'upgrader_clear_destination', true, '/local', '/remote', array() );
+		};
+
+		$res = $this->heartbeatingSelfUpdate();
+
+		$this->assertTrue( $stamps['pre'], 'pre-install passed while the claim was ours' );
+		$this->assertNotSame( '', $stamps['successor'], 'the aged claim must be seizable' );
+		$this->assertInstanceOf( WP_Error::class, $stamps['clear'], 'a lost claim aborts at the clear, before the old directory is deleted' );
+		$this->assertSame( 'aura_self_update_claim_lost', $stamps['clear']->get_error_code() );
+		$this->assertFalse( $res['success'] );
+		$this->assertTrue( $res['in_progress'] );
+		$this->assertSame( array(), array_filter( $GLOBALS['_filters']['upgrader_clear_destination'] ?? array() ), 'the beat is removed after the phase' );
 	}
 
 	public function test_a_seized_claim_after_a_null_install_result_reports_installed_false(): void {
@@ -1476,78 +1487,6 @@ final class SelfUpdateRecoveryTest extends TestCase {
 		$this->assertFalse( $res['health_checked'] );
 	}
 
-	public function test_a_heartbeat_that_loses_the_claim_aborts_the_upgraders_pre_stages_and_passes_post_install_through(): void {
-		// Codex #94 round-3 P1: a claim seized between two sub-phases used to
-		// be noticed only after the whole phase. The three pre-stage filters
-		// are WordPress's own abort points (a WP_Error there runs nothing), so
-		// the heartbeat answers one from the first failed check on; the
-		// post-install filter, which fires after the files are replaced,
-		// passes through and the boundary check stops the entry.
-		$stamps  = array();
-		$updater = new class( $stamps ) extends Aura_Worker_Updater {
-			const LEASE_HEARTBEAT_SECONDS = 0;
-			private $stamps;
-			public function __construct( &$stamps ) { $this->stamps = &$stamps; }
-			protected function update_single_plugin( $plugin_file ) {
-				$held  = (string) sa_read_option_uncached( Aura_Worker_Updater::SELF_UPDATE_LOCK );
-				$fence = substr( $held, 0, strpos( $held, '|' ) );
-				update_option( Aura_Worker_Updater::SELF_UPDATE_LOCK, $fence . '|' . ( time() - 11 * MINUTE_IN_SECONDS ) );
-				$this->stamps['successor'] = Aura_Worker_Magic_Link::take_claim( Aura_Worker_Updater::SELF_UPDATE_LOCK, 10 * MINUTE_IN_SECONDS );
-				$this->stamps['pre']       = apply_filters( 'upgrader_pre_install', true, array() );
-				$this->stamps['post']      = apply_filters( 'upgrader_post_install', true, array(), array() );
-				$this->stamps['pre_again'] = apply_filters( 'upgrader_pre_download', false, 'pkg', null, array() );
-				return array( 'success' => true );
-			}
-		};
-
-		$out = $updater->batch_update_plugins( array( Aura_Worker_Updater::SELF_PLUGIN_FILE ), 5, false );
-
-		$this->assertNotSame( '', $stamps['successor'], 'the aged claim must be seizable' );
-		$this->assertInstanceOf( WP_Error::class, $stamps['pre'], 'a lost claim aborts the pre-install stage' );
-		$this->assertSame( 'aura_self_update_claim_lost', $stamps['pre']->get_error_code() );
-		$this->assertTrue( $stamps['post'], 'post-install passes its value through — the files are already replaced' );
-		$this->assertInstanceOf( WP_Error::class, $stamps['pre_again'], 'once lost, every later pre-stage aborts without re-checking' );
-		$this->assertSame( 'failed', $out['results'][0]['status'] );
-		$this->assertStringContainsString( 'Lost the self-update claim', $out['results'][0]['detail'] );
-		$this->assertStringStartsWith( $stamps['successor'] . '|', (string) sa_read_option_uncached( Aura_Worker_Updater::SELF_UPDATE_LOCK ), 'the successor\'s claim is untouched' );
-	}
-
-	public function test_a_claim_seized_between_pre_install_and_the_clear_aborts_before_the_old_directory_is_deleted(): void {
-		// Codex #94 round-8 P1: the beats sat only on the pre-stages and
-		// post-install, so a claim seized after upgrader_pre_install was
-		// noticed only after the install had already cleared and rewritten
-		// the directory beside its successor. upgrader_clear_destination is
-		// WordPress's own filter immediately before the delete (the delete
-		// itself runs inside it, at priority 10); the beat at priority 1 renews
-		// there and a lost claim answers a WP_Error that stops the phase with
-		// the old files untouched.
-		$stamps  = array();
-		$updater = new class( $stamps ) extends Aura_Worker_Updater {
-			const LEASE_HEARTBEAT_SECONDS = 0;
-			private $stamps;
-			public function __construct( &$stamps ) { $this->stamps = &$stamps; }
-			protected function update_single_plugin( $plugin_file ) {
-				$this->stamps['pre'] = apply_filters( 'upgrader_pre_install', true, array() ); // still ours
-				$held  = (string) sa_read_option_uncached( Aura_Worker_Updater::SELF_UPDATE_LOCK );
-				$fence = substr( $held, 0, strpos( $held, '|' ) );
-				update_option( Aura_Worker_Updater::SELF_UPDATE_LOCK, $fence . '|' . ( time() - 11 * MINUTE_IN_SECONDS ) ); // the clear runs long
-				$this->stamps['successor'] = Aura_Worker_Magic_Link::take_claim( Aura_Worker_Updater::SELF_UPDATE_LOCK, 10 * MINUTE_IN_SECONDS );
-				$this->stamps['clear']     = apply_filters( 'upgrader_clear_destination', true, '/local', '/remote', array() );
-				return array( 'success' => true );
-			}
-		};
-
-		$out = $updater->batch_update_plugins( array( Aura_Worker_Updater::SELF_PLUGIN_FILE ), 5, false );
-
-		$this->assertTrue( $stamps['pre'], 'pre-install passed while the claim was ours' );
-		$this->assertNotSame( '', $stamps['successor'], 'the aged claim must be seizable' );
-		$this->assertInstanceOf( WP_Error::class, $stamps['clear'], 'a lost claim aborts at the clear, before the old directory is deleted' );
-		$this->assertSame( 'aura_self_update_claim_lost', $stamps['clear']->get_error_code() );
-		$this->assertSame( 'failed', $out['results'][0]['status'] );
-		$this->assertStringContainsString( 'Lost the self-update claim', $out['results'][0]['detail'] );
-		$this->assertSame( array(), array_filter( $GLOBALS['_filters']['upgrader_clear_destination'] ?? array() ), 'the beat is removed after the phase' );
-	}
-
 	public function test_a_generic_single_update_of_siteagent_has_no_upgrade_phase_to_lose_its_claim_in(): void {
 		// Codex #94 round-5 P2 made update_plugin() check its claim after the
 		// upgrade phase, so a claim seized mid-phase was never reported as
@@ -1567,36 +1506,6 @@ final class SelfUpdateRecoveryTest extends TestCase {
 		$this->assertFalse( $res['success'] );
 		$this->assertSame( 'aura_use_self_update', $res['code'] );
 		$this->assertNull( sa_read_option_uncached( Aura_Worker_Updater::SELF_UPDATE_LOCK ) );
-	}
-
-	public function test_a_batch_entry_whose_claim_is_seized_during_the_health_probe_does_not_roll_back(): void {
-		// SA#93 (closed): the probe is a loopback request; a claim lost across
-		// it means the rollback belongs to the successor.
-		$successor = '';
-		$GLOBALS['_http_response'] = array( 'response' => array( 'code' => 500 ), 'body' => '' ); // the verdict would roll back
-		$GLOBALS['_http_effect']   = function () use ( &$successor ) {
-			if ( '' !== $successor ) {
-				return;
-			}
-			$held  = (string) sa_read_option_uncached( Aura_Worker_Updater::SELF_UPDATE_LOCK );
-			$fence = substr( $held, 0, strpos( $held, '|' ) );
-			update_option( Aura_Worker_Updater::SELF_UPDATE_LOCK, $fence . '|' . ( time() - 11 * MINUTE_IN_SECONDS ) );
-			$successor = Aura_Worker_Magic_Link::take_claim( Aura_Worker_Updater::SELF_UPDATE_LOCK, 10 * MINUTE_IN_SECONDS );
-		};
-		$updater = new class extends Aura_Worker_Updater {
-			protected function update_single_plugin( $plugin_file ) {
-				file_put_contents( WP_PLUGIN_DIR . '/digitizer-site-worker/digitizer-site-worker.php', "<?php\n// NEW BUILD 9.9.9\n" );
-				return array( 'success' => true );
-			}
-		};
-
-		$out = $updater->batch_update_plugins( array( Aura_Worker_Updater::SELF_PLUGIN_FILE ), 5, true );
-
-		$this->assertNotSame( '', $successor, 'the claim was seized during the probe' );
-		$this->assertSame( 'failed', $out['results'][0]['status'] );
-		$this->assertStringContainsString( 'Lost the self-update claim', $out['results'][0]['detail'] );
-		$this->assertStringContainsString( 'NEW BUILD', file_get_contents( WP_PLUGIN_DIR . '/digitizer-site-worker/digitizer-site-worker.php' ), 'no rollback over the successor\'s files' );
-		$this->assertStringStartsWith( $successor . '|', (string) sa_read_option_uncached( Aura_Worker_Updater::SELF_UPDATE_LOCK ) );
 	}
 
 	public function test_a_self_update_whose_claim_is_seized_during_the_verdict_does_not_roll_back(): void {

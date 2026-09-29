@@ -110,6 +110,39 @@ final class UpdatePluginResultMappingTest extends TestCase {
 		$this->assertSame( '3.1', $res['offered_version'], 'the offer is re-read after the refresh' );
 	}
 
+	public function test_a_missing_offer_forces_the_list_stale_before_the_refresh_and_keeps_the_other_entries(): void {
+		// Codex r1 on #143: wp_update_plugins() returns early while
+		// last_checked is inside its timeout and no installed version changed,
+		// so a plain call refreshes nothing. The list is forced stale first —
+		// last_checked = 0, written back, never deleted (the other plugins'
+		// entries must survive).
+		$recent = time() - 60;
+		$GLOBALS['_site_transients']['update_plugins'] = (object) array(
+			'last_checked' => $recent,
+			'response'     => array( 'other/other.php' => (object) array( 'new_version' => '9.0' ) ),
+		);
+		$seen = null;
+		$GLOBALS['_wp_update_plugins_effect'] = function () use ( &$seen ) {
+			$seen = get_site_transient( 'update_plugins' );
+		};
+
+		( new Aura_Worker_Updater() )->update_plugin( self::PLUGIN );
+
+		$this->assertIsObject( $seen, 'the transient was not deleted' );
+		$this->assertSame( 0, $seen->last_checked, 'wp_update_plugins() saw the list forced stale' );
+		$this->assertArrayHasKey( 'other/other.php', $seen->response, 'the other plugins\' entries survive' );
+		$this->assertSame(
+			array( 'set_site_transient:update_plugins', 'wp_update_plugins', 'Plugin_Upgrader::upgrade:' . self::PLUGIN ),
+			$GLOBALS['_updater_calls']
+		);
+	}
+
+	public function test_no_transient_at_all_is_refreshed_without_writing_one(): void {
+		( new Aura_Worker_Updater() )->update_plugin( self::PLUGIN );
+
+		$this->assertSame( array( 'wp_update_plugins', 'Plugin_Upgrader::upgrade:' . self::PLUGIN ), $GLOBALS['_updater_calls'] );
+	}
+
 	public function test_a_refresh_that_still_offers_nothing_upgrades_once_and_says_not_offered(): void {
 		$GLOBALS['_upgrade_result'] = false; // what core answers with no entry
 
