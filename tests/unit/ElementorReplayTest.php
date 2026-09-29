@@ -445,6 +445,64 @@ final class ElementorReplayTest extends TestCase {
 		$this->assertSame( array(), $this->ran, 'the block on the CSS the wrapper saw held' );
 	}
 
+	/** Register every governed slug; publish-document's callback records the autosave Elementor would promote. */
+	private function registerAllRecordingAutosave( array &$saw ): void {
+		foreach ( array_merge( Aura_Worker_Elementor_Door::READ_ALLOWLIST, array_keys( Aura_Worker_Elementor_Door::WRITE_TABLE ) ) as $slug ) {
+			if ( 'elementor/publish-document' === $slug ) {
+				$this->register(
+					$slug,
+					static function ( $input ) use ( &$saw ) {
+						$saw[] = wp_get_post_autosave( (int) $input['post_id'], get_current_user_id() );
+						return array( 'ok' => true );
+					}
+				);
+				continue;
+			}
+			$this->register( $slug );
+		}
+		do_action( 'wp_abilities_api_init' );
+	}
+
+	/**
+	 * Codex r4 on #141: an autosave saved after the last check cannot be
+	 * promoted by a publish judged CSS-free — Elementor's lookup is pinned to
+	 * "none" for the callback, and only for the callback.
+	 */
+	public function test_a_publish_judged_css_free_cannot_promote_an_autosave(): void {
+		$saw = array();
+		$this->registerAllRecordingAutosave( $saw );
+		$this->installRuleset( array() );
+		$ref = $this->holdCall();
+		Aura_Worker_Elementor_Door::_set_autosave_probe_for_tests(
+			static function () {
+				return false; // every check saw none
+			}
+		);
+		$GLOBALS['_sa_autosaves'][7][3] = (object) array( 'ID' => 900 ); // …yet one is there when Elementor looks
+
+		Aura_Worker_Elementor_Door::replay( $ref, null );
+
+		$this->assertSame( array( false ), $saw, 'Elementor found no autosave to promote' );
+		$this->assertEquals( (object) array( 'ID' => 900 ), wp_get_post_autosave( 7, 3 ), 'the pin ends with the callback; the autosave stays staged' );
+	}
+
+	public function test_a_publish_judged_as_a_css_write_is_not_pinned(): void {
+		$saw = array();
+		$this->registerAllRecordingAutosave( $saw );
+		$this->installRuleset( array() );
+		$ref = $this->holdCall();
+		Aura_Worker_Elementor_Door::_set_autosave_probe_for_tests(
+			static function () {
+				return true;
+			}
+		);
+		$GLOBALS['_sa_autosaves'][7][3] = (object) array( 'ID' => 900 );
+
+		Aura_Worker_Elementor_Door::replay( $ref, null );
+
+		$this->assertEquals( array( (object) array( 'ID' => 900 ) ), $saw, 'judged with its autosave, it promotes it' );
+	}
+
 	public function test_no_late_autosave_lets_the_approved_call_run(): void {
 		$this->registerAll();
 		$this->installRuleset( array() );

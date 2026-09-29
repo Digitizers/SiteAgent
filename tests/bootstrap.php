@@ -629,6 +629,21 @@ if ( ! function_exists( 'get_current_user_id' ) ) {
  */
 if ( ! function_exists( 'wp_get_post_autosave' ) ) {
 	function wp_get_post_autosave( $post_id, $user_id = 0 ) {
+		// WP 6.4+ looks the autosave up through WP_Query, so `posts_pre_query`
+		// can answer first — the seam the door pins a judged publish with.
+		$query = (object) array(
+			'query_vars' => array(
+				'post_type'   => 'revision',
+				'post_status' => 'inherit',
+				'post_parent' => (int) $post_id,
+				'name'        => (int) $post_id . '-autosave-v1',
+				'author'      => (int) $user_id,
+			),
+		);
+		$pre = apply_filters( 'posts_pre_query', null, $query );
+		if ( is_array( $pre ) ) {
+			return empty( $pre ) ? false : $pre[0];
+		}
 		return $GLOBALS['_sa_autosaves'][ (int) $post_id ][ (int) $user_id ] ?? false;
 	}
 }

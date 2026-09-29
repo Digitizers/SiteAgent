@@ -3027,6 +3027,54 @@ class Aura_Worker_Elementor_Door {
 		return null !== $page && self::promotes_autosave( $page );
 	}
 
+	/**
+	 * Pin a promoter judged CSS-free to the autosave it was judged on: none.
+	 *
+	 * While the callback runs, a `posts_pre_query` filter answers Elementor's
+	 * own `wp_get_post_autosave()` lookup for this document with no posts —
+	 * since WP 6.4 that lookup is a WP_Query (the abilities API needs 6.9), so
+	 * no autosave saved after the judgement can be promoted by this call. It
+	 * stays staged, and the next publish is judged with it. Only the autosave
+	 * query of the judged document is answered; every other query passes.
+	 *
+	 * @since 2.23.0
+	 * @param string $slug    Ability.
+	 * @param array  $touches The touches the call was judged on.
+	 * @return callable|null The filter to remove after the callback, or null.
+	 */
+	private static function pin_no_autosave( $slug, array $touches ) {
+		if ( ! in_array( $slug, self::AUTOSAVE_PROMOTERS, true ) ) {
+			return null;
+		}
+		$doc = null;
+		foreach ( $touches as $t ) {
+			if ( isset( $t['type'] ) && 'custom_css' === $t['type'] ) {
+				return null; // judged as a CSS write: whatever it promotes was judged
+			}
+			if ( null === $doc && isset( $t['type'], $t['id'] ) && in_array( $t['type'], array( 'page', 'post' ), true ) && ctype_digit( (string) $t['id'] ) ) {
+				$doc = (int) $t['id'];
+			}
+		}
+		if ( null === $doc ) {
+			return null;
+		}
+		$pin = static function ( $posts, $query ) use ( $doc ) {
+			if ( null !== $posts || ! is_object( $query ) || ! isset( $query->query_vars ) || ! is_array( $query->query_vars ) ) {
+				return $posts;
+			}
+			$qv = $query->query_vars;
+			if ( isset( $qv['post_type'], $qv['post_parent'], $qv['name'] )
+				&& 'revision' === $qv['post_type']
+				&& $doc === (int) $qv['post_parent']
+				&& $doc . '-autosave-v1' === (string) $qv['name'] ) {
+				return array();
+			}
+			return $posts;
+		};
+		add_filter( 'posts_pre_query', $pin, PHP_INT_MAX, 2 );
+		return $pin;
+	}
+
 	/** CSS-capable property names (spec §4.1 guard). @since 2.20.0 */
 	const CSS_PROPERTY_NAMES = array( 'custom_css', 'css', 'style', 'settings', 'page_settings', 'elements', 'structure', 'xml_structure', 'element_config' );
 
@@ -4375,7 +4423,10 @@ class Aura_Worker_Elementor_Door {
 		// would go live unjudged. Asked once more as late as this request
 		// can: an autosave that appeared refuses the call, retryably, so the
 		// retry is judged with it. What is left is the gap between this read
-		// and Elementor's own, inside the callback, in this same request.
+		// and Elementor's own, inside the callback — closed by the pin at the
+		// callback (pin_no_autosave()); this check makes the common case a
+		// retry that is judged WITH the autosave rather than a publish that
+		// leaves it behind.
 		// BEFORE the `ran` witness (Codex r3): a replay reads `ran` to decide
 		// whether a refusal may give the approval back, and this one never
 		// entered the callback.
@@ -4497,7 +4548,18 @@ class Aura_Worker_Elementor_Door {
 		// snapshot, the mutex, the watermark, the witness patch) can throw
 		// without the callback ever being reached.
 		self::$request['entered'] = true;
-		$result = is_callable( $inner ) ? call_user_func( $inner, $input ) : new WP_Error( 'ability_invalid_execute_callback', 'no callback' );
+		// PINNED TO WHAT WAS JUDGED (Codex r4 on #141): a promoter judged
+		// CSS-free runs with its autosave lookup answered "none", so an
+		// autosave saved after the last check above is left staged for the
+		// next — judged — publish instead of going live unjudged.
+		$pin = self::pin_no_autosave( $slug, $touches );
+		try {
+			$result = is_callable( $inner ) ? call_user_func( $inner, $input ) : new WP_Error( 'ability_invalid_execute_callback', 'no callback' );
+		} finally {
+			if ( null !== $pin ) {
+				remove_filter( 'posts_pre_query', $pin, PHP_INT_MAX );
+			}
+		}
 		do_action( 'sa_test_inner_ran', $slug ); // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- test seam only (ordering: snapshot before the write); no listener in production.
 
 		$failed   = is_wp_error( $result ) || ( is_array( $result ) && 'error' === ( isset( $result['status'] ) ? $result['status'] : '' ) );
