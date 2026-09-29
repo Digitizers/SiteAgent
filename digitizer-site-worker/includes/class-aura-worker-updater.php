@@ -1834,6 +1834,19 @@ class Aura_Worker_Updater {
 					? sprintf( __( 'Update failed: %s', 'digitizer-site-worker' ), $reason )
 					: __( 'Update failed: the upgrader gave no reason.', 'digitizer-site-worker' ),
 			);
+		} elseif ( null !== $react_error ) {
+			// The files changed but the plugin is left disabled (Codex r2 on
+			// #143): not a success. `updated` says the upgrade itself landed.
+			$out = array(
+				'success' => false,
+				'code'    => 'aura_reactivation_failed',
+				'updated' => true,
+				'error'   => sprintf(
+					/* translators: %s: activate_plugin()'s error message */
+					__( 'The plugin was updated but could not be re-activated: %s. Activate it from wp-admin.', 'digitizer-site-worker' ),
+					rtrim( $react_error, '.' )
+				),
+			);
 		} else {
 			$out = array( 'success' => true );
 		}

@@ -68,6 +68,22 @@ final class RestUpdatePluginStatusTest extends TestCase {
 		$this->assertSame( 'aura_update_failed', $res->get_data()['code'] );
 	}
 
+	public function test_a_failed_reactivation_is_500(): void {
+		// Codex r2 on #143: the files changed but the plugin is left disabled —
+		// the site needs attention, so not 200 and not a caller error.
+		$GLOBALS['_active_plugins']['akismet/akismet.php'] = true;
+		$GLOBALS['_activate_plugin_result']                 = new WP_Error( 'plugin_invalid', 'Plugin file does not exist.' );
+		$GLOBALS['_upgrade_effect']                          = static function () {
+			unset( $GLOBALS['_active_plugins']['akismet/akismet.php'] );
+		};
+
+		$res = $this->call( 'akismet/akismet.php' );
+
+		$this->assertSame( 500, $res->get_status() );
+		$this->assertSame( 'aura_reactivation_failed', $res->get_data()['code'] );
+		$this->assertTrue( $res->get_data()['updated'] );
+	}
+
 	public function test_success_is_200_and_carries_reactivated(): void {
 		$GLOBALS['_active_plugins']['akismet/akismet.php'] = true;
 		$GLOBALS['_upgrade_effect']                          = static function () {

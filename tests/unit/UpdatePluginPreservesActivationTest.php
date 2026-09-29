@@ -161,6 +161,69 @@ final class UpdatePluginPreservesActivationTest extends TestCase {
 		$this->assertCount( 1, $GLOBALS['_activate_plugin_calls'] );
 	}
 
+	// ----- a failed re-activation fails the update (Codex r2 on #143) ----------
+
+	public function test_an_update_whose_reactivation_fails_is_a_failure_that_says_the_files_changed(): void {
+		$GLOBALS['_active_plugins'][ self::PLUGIN ] = true;
+		$GLOBALS['_activate_plugin_result']          = new WP_Error( 'plugin_invalid', 'Plugin file does not exist.' );
+		$this->deactivate_during_upgrade();
+
+		$res = ( new Aura_Worker_Updater() )->update_plugin( self::PLUGIN );
+
+		$this->assertFalse( $res['success'], 'a plugin left disabled is not a successful update' );
+		$this->assertSame( 'aura_reactivation_failed', $res['code'] );
+		$this->assertTrue( $res['updated'], 'the files did change' );
+		$this->assertStringContainsString( 'could not be re-activated', $res['error'] );
+		$this->assertStringContainsString( 'Plugin file does not exist.', $res['error'] );
+		$this->assertSame( 'Plugin file does not exist.', $res['reactivation_error'] );
+		$this->assertArrayNotHasKey( 'message', $res );
+	}
+
+	public function test_a_failed_upgrade_with_a_failed_reactivation_keeps_the_upgrades_code(): void {
+		$GLOBALS['_active_plugins'][ self::PLUGIN ] = true;
+		$GLOBALS['_upgrade_result']                  = new WP_Error( 'copy_failed', 'Could not copy file.' );
+		$GLOBALS['_activate_plugin_result']          = new WP_Error( 'plugin_invalid', 'Plugin file does not exist.' );
+		$this->deactivate_during_upgrade();
+
+		$res = ( new Aura_Worker_Updater() )->update_plugin( self::PLUGIN );
+
+		$this->assertFalse( $res['success'] );
+		$this->assertSame( 'copy_failed', $res['code'], 'the upgrade failure is the primary code' );
+		$this->assertSame( 'Could not copy file.', $res['error'] );
+		$this->assertSame( 'Plugin file does not exist.', $res['reactivation_error'] );
+		$this->assertArrayNotHasKey( 'updated', $res );
+	}
+
+	public function test_a_batch_entry_whose_reactivation_fails_is_failed_with_the_code(): void {
+		$GLOBALS['_active_plugins'][ self::PLUGIN ] = true;
+		$GLOBALS['_activate_plugin_result']          = new WP_Error( 'plugin_invalid', 'Plugin file does not exist.' );
+		$this->deactivate_during_upgrade();
+
+		$entry = $this->batch_entry( ( new Aura_Worker_Updater() )->batch_update_plugins( array( self::PLUGIN ), 5, false ) );
+
+		$this->assertSame( 'failed', $entry['status'] );
+		$this->assertSame( 'aura_reactivation_failed', $entry['code'] );
+		$this->assertStringContainsString( 'could not be re-activated', $entry['detail'] );
+		$this->assertSame( 'Plugin file does not exist.', $entry['reactivation_error'] );
+	}
+
+	public function test_update_plugin_safely_reports_a_failed_reactivation_as_a_failure(): void {
+		$GLOBALS['_installed_plugins']              = array( self::PLUGIN => array( 'Name' => 'Akismet', 'Version' => '1.0' ) );
+		$GLOBALS['_active_plugins'][ self::PLUGIN ] = true;
+		$GLOBALS['_activate_plugin_result']          = new WP_Error( 'plugin_invalid', 'Plugin file does not exist.' );
+		$this->deactivate_during_upgrade();
+
+		try {
+			$res = ( new Aura_Tool_Update_Plugin_Safely() )->execute( array( 'plugin_slug' => 'akismet', 'create_backup' => false ) );
+		} finally {
+			unset( $GLOBALS['_installed_plugins'] );
+		}
+
+		$this->assertFalse( $res['success'] );
+		$this->assertSame( 'aura_reactivation_failed', $res['code'] );
+		$this->assertStringContainsString( 'Plugin file does not exist.', $res['error'] );
+	}
+
 	public function test_a_successful_reactivation_carries_no_reactivation_error(): void {
 		$GLOBALS['_active_plugins'][ self::PLUGIN ] = true;
 		$this->deactivate_during_upgrade();

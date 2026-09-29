@@ -128,7 +128,7 @@ All routes are under `/wp-json/aura/v1/`.
 | Method | Endpoint | Parameters | Description |
 |--------|----------|------------|-------------|
 | `POST` | `/update/core` | — | Update WordPress core |
-| `POST` | `/update/plugin` | `plugin` (required, string) | Update a specific plugin by file path (e.g. `akismet/akismet.php`). Keeps an active plugin active (`reactivated`); `409 aura_use_self_update` for SiteAgent itself, `409 aura_no_update_offered`, `500 aura_update_failed` — see "Generic plugin updates keep the plugin active" |
+| `POST` | `/update/plugin` | `plugin` (required, string) | Update a specific plugin by file path (e.g. `akismet/akismet.php`). Keeps an active plugin active (`reactivated`); `409 aura_use_self_update` for SiteAgent itself, `409 aura_no_update_offered`, `500 aura_update_failed`, `500 aura_reactivation_failed` (updated, but left inactive) — see "Generic plugin updates keep the plugin active" |
 | `POST` | `/update/theme` | `theme` (required, string) | Update a specific theme by slug |
 | `POST` | `/update/translations` | — | Bulk update all translations |
 | `POST` | `/update/database` | — | Run `wp_upgrade()` / `dbDelta()` |
@@ -196,7 +196,14 @@ update of SiteAgent itself removed every `aura/*` route.
   not now gets `activate_plugin( $f, '', $was_network, true )` (silent). A plugin
   that was inactive is never activated. Results carry `reactivated` (true only when
   re-activation was needed and succeeded) and `reactivation_error` (the activation
-  `WP_Error`'s message) when it failed; batch entries copy both.
+  `WP_Error`'s message) when it failed; batch entries copy both. **A failed
+  re-activation fails the update** (Codex r2 on #143): after a successful upgrade it
+  answers `success: false`, `code: aura_reactivation_failed` (REST `500` — the site
+  needs attention), `updated: true` (the files did change) and an `error` naming the
+  activation message and "Activate it from wp-admin"; the batch entry is `failed`
+  with that code and `update_plugin_safely` reports the failure. When the upgrade
+  itself failed too, the upgrade's code and error stay primary and
+  `reactivation_error` is attached beside them.
 - **SiteAgent is refused.** `SELF_PLUGIN_FILE` answers
   `{ success: false, code: aura_use_self_update }` (REST `409`, message pointing at
   `POST /aura/v1/self-update`) and never reaches the upgrader or the refresh. The
