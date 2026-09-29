@@ -280,6 +280,271 @@ final class ElementorReplayTest extends TestCase {
 	// (c) a block delivered since the hold
 	// -----------------------------------------------------------------------
 
+	/**
+	 * P7.2, Codex r1 on #141: publish-document promotes the HELD actor's
+	 * autosave, since that is the user it runs as. replay() judges before it
+	 * switches users, so the autosave probe must ask about the held actor,
+	 * never the approver.
+	 */
+	public function test_replay_judges_the_held_actors_autosave_not_the_approvers(): void {
+		$this->registerAll();
+		$this->installRuleset( array() );
+		$ref = $this->holdCall(); // held as user 3
+		$this->installRuleset(
+			array(
+				array(
+					'key'    => 'rule/css',
+					'effect' => 'block',
+					'target' => array(
+						'type' => 'custom_css',
+						'id'   => '7',
+					),
+					'reason' => 'no css',
+				),
+			)
+		);
+		$GLOBALS['_sa_autosaves'][7][3] = (object) array( 'ID' => 900 ); // the held actor's, made during the hold
+		$GLOBALS['_current_user_id']    = 5; // the approver, who has none
+
+		$out = Aura_Worker_Elementor_Door::replay( $ref, null );
+
+		$this->assertFalse( $out['ok'] );
+		$this->assertSame( 'refused_by_current_rule', $out['reason'] );
+		$this->assertSame( 'rule/css', $out['rule_key'] );
+		$this->assertSame( array(), $this->ran, 'nothing ran' );
+		$this->assertSame( 5, get_current_user_id(), 'the approver is restored' );
+	}
+
+	/**
+	 * Codex r2 on #141: an autosave saved after the judgement (here, between
+	 * replay()'s judgement and the callback) refuses the call before it runs,
+	 * retryably, instead of going live unjudged.
+	 */
+	public function test_an_autosave_that_appears_after_judgement_refuses_before_the_callback(): void {
+		$this->registerAll();
+		$this->installRuleset( array() );
+		$ref = $this->holdCall();
+		$asked = 0;
+		Aura_Worker_Elementor_Door::_set_autosave_probe_for_tests(
+			static function () use ( &$asked ) {
+				return ++$asked > 2; // none at replay()'s and the wrapper's judgement; one by the time it would run
+			}
+		);
+
+		$out = Aura_Worker_Elementor_Door::replay( $ref, null );
+
+		$this->assertSame( 3, $asked, 'asked again before the callback' );
+		$this->assertSame( array(), $this->ran, 'nothing ran' );
+		$log = Aura_Worker_Door_Log::log_after( 0 );
+		$this->assertSame( 'refused', end( $log )['result'] );
+		$this->assertSame( 'autosave_appeared', end( $log )['reason'] );
+		$this->assertTrue( empty( end( $log )['ran'] ), 'refused before the ran witness (Codex r3)' );
+		// Retryable: the approval is given back, not spent.
+		$this->assertSame( 'retry_later', $out['reason'] );
+		$this->assertSame( 'aura_autosave_appeared', $out['code'] );
+		$this->assertNotNull( Aura_Worker_Door_Holds::get_held( $ref ), 'the hold is back for a retry' );
+	}
+
+	/** Codex r3 on #141: a non-page Elementor document is a `post` touch, and is re-checked too. */
+	public function test_the_late_autosave_check_covers_a_post_document(): void {
+		$GLOBALS['_posts'][8] = (object) array(
+			'ID'           => 8,
+			'post_type'    => 'post',
+			'post_status'  => 'draft',
+			'post_content' => '',
+		);
+		$this->registerAll();
+		$this->installRuleset( array() );
+		$ref   = $this->holdCall( 'elementor/publish-document', array( 'post_id' => 8 ) );
+		$asked = 0;
+		Aura_Worker_Elementor_Door::_set_autosave_probe_for_tests(
+			static function () use ( &$asked ) {
+				return ++$asked > 2;
+			}
+		);
+
+		$out = Aura_Worker_Elementor_Door::replay( $ref, null );
+
+		$this->assertSame( 3, $asked, 'the post document was asked about again' );
+		$this->assertSame( array(), $this->ran, 'nothing ran' );
+		$this->assertSame( 'retry_later', $out['reason'] );
+	}
+
+	/**
+	 * Codex r3 on #141: a custom_css WARN that only the wrapper's touches meet
+	 * was never acknowledged — the hold goes back with that rule to ack.
+	 */
+	public function test_a_warn_only_the_wrappers_touches_meet_answers_warn_changed(): void {
+		$this->registerAll();
+		$this->installRuleset( array() );
+		$ref = $this->holdCall();
+		$this->installRuleset(
+			array(
+				array(
+					'key'    => 'rule/css-warn',
+					'effect' => 'warn',
+					'target' => array(
+						'type' => 'custom_css',
+						'id'   => '7',
+					),
+					'reason' => 'careful with css',
+				),
+			)
+		);
+		$asked = 0;
+		Aura_Worker_Elementor_Door::_set_autosave_probe_for_tests(
+			static function () use ( &$asked ) {
+				return ++$asked > 1; // none when replay() judges; one when the wrapper does
+			}
+		);
+
+		$out = Aura_Worker_Elementor_Door::replay( $ref, null );
+
+		$this->assertFalse( $out['ok'] );
+		$this->assertSame( 'warn_changed', $out['reason'] );
+		$this->assertSame( 'rule/css-warn', $out['rule']['key'] );
+		$this->assertSame( array(), $this->ran, 'nothing ran' );
+		$held = Aura_Worker_Door_Holds::get_held( $ref );
+		$this->assertNotNull( $held, 'the hold is kept for the next approval' );
+		$this->assertSame( 'rule/css-warn', $held['rule']['key'] );
+		$this->assertContains( array( 'type' => 'custom_css', 'id' => '7' ), $held['touches'] );
+	}
+
+	/**
+	 * Codex r1 on #141, the memo half: an autosave that appears between
+	 * replay()'s judgement and the wrapper's gives the wrapper a custom_css
+	 * touch, and the wrapper judges THOSE touches — replay()'s CSS-free
+	 * verdict is not reused for them.
+	 */
+	public function test_the_wrapper_rejudges_touches_that_changed_since_replay_judged(): void {
+		$this->registerAll();
+		$this->installRuleset( array() );
+		$ref = $this->holdCall();
+		$this->installRuleset(
+			array(
+				array(
+					'key'    => 'rule/css',
+					'effect' => 'block',
+					'target' => array(
+						'type' => 'custom_css',
+						'id'   => '7',
+					),
+					'reason' => 'no css',
+				),
+			)
+		);
+		$asked = 0;
+		Aura_Worker_Elementor_Door::_set_autosave_probe_for_tests(
+			static function () use ( &$asked ) {
+				return ++$asked > 1; // none when replay() judges; one when the wrapper does
+			}
+		);
+
+		Aura_Worker_Elementor_Door::replay( $ref, null );
+
+		$this->assertSame( array(), $this->ran, 'the block on the CSS the wrapper saw held' );
+	}
+
+	/** Register every governed slug; publish-document's callback records the autosave Elementor would promote. */
+	private function registerAllRecordingAutosave( array &$saw ): void {
+		foreach ( array_merge( Aura_Worker_Elementor_Door::READ_ALLOWLIST, array_keys( Aura_Worker_Elementor_Door::WRITE_TABLE ) ) as $slug ) {
+			if ( 'elementor/publish-document' === $slug ) {
+				$this->register(
+					$slug,
+					static function ( $input ) use ( &$saw ) {
+						$saw[] = wp_get_post_autosave( (int) $input['post_id'], get_current_user_id() );
+						return array( 'ok' => true );
+					}
+				);
+				continue;
+			}
+			$this->register( $slug );
+		}
+		do_action( 'wp_abilities_api_init' );
+	}
+
+	/**
+	 * Codex r4 on #141: an autosave saved after the last check cannot be
+	 * promoted by a publish judged CSS-free — Elementor's lookup is pinned to
+	 * "none" for the callback, and only for the callback.
+	 */
+	public function test_a_publish_judged_css_free_cannot_promote_an_autosave(): void {
+		$saw = array();
+		$this->registerAllRecordingAutosave( $saw );
+		$this->installRuleset( array() );
+		$ref = $this->holdCall();
+		Aura_Worker_Elementor_Door::_set_autosave_probe_for_tests(
+			static function () {
+				return false; // every check saw none
+			}
+		);
+		$GLOBALS['_sa_autosaves'][7][3] = (object) array( 'ID' => 900 ); // …yet one is there when Elementor looks
+
+		Aura_Worker_Elementor_Door::replay( $ref, null );
+
+		$this->assertSame( array( false ), $saw, 'Elementor found no autosave to promote' );
+		$this->assertEquals( (object) array( 'ID' => 900 ), wp_get_post_autosave( 7, 3 ), 'the pin ends with the callback; the autosave stays staged' );
+	}
+
+	public function test_a_publish_judged_as_a_css_write_is_not_pinned(): void {
+		$saw = array();
+		$this->registerAllRecordingAutosave( $saw );
+		$this->installRuleset( array() );
+		$ref = $this->holdCall();
+		Aura_Worker_Elementor_Door::_set_autosave_probe_for_tests(
+			static function () {
+				return true;
+			}
+		);
+		$GLOBALS['_sa_autosaves'][7][3] = (object) array( 'ID' => 900 );
+
+		Aura_Worker_Elementor_Door::replay( $ref, null );
+
+		$this->assertEquals( array( (object) array( 'ID' => 900 ) ), $saw, 'judged with its autosave, it promotes it' );
+	}
+
+	public function test_no_late_autosave_lets_the_approved_call_run(): void {
+		$this->registerAll();
+		$this->installRuleset( array() );
+		$ref = $this->holdCall();
+		Aura_Worker_Elementor_Door::_set_autosave_probe_for_tests(
+			static function () {
+				return false;
+			}
+		);
+
+		Aura_Worker_Elementor_Door::replay( $ref, null );
+
+		$this->assertSame( 1, $this->ran['elementor/publish-document'] ?? 0 );
+	}
+
+	public function test_replay_ignores_an_autosave_only_the_approver_holds(): void {
+		$this->registerAll();
+		$this->installRuleset( array() );
+		$ref = $this->holdCall(); // held as user 3
+		$this->installRuleset(
+			array(
+				array(
+					'key'    => 'rule/css',
+					'effect' => 'block',
+					'target' => array(
+						'type' => 'custom_css',
+						'id'   => '7',
+					),
+					'reason' => 'no css',
+				),
+			)
+		);
+		$GLOBALS['_sa_autosaves'][7][5] = (object) array( 'ID' => 901 ); // the approver's: never promoted
+		$GLOBALS['_current_user_id']    = 5;
+
+		$out = Aura_Worker_Elementor_Door::replay( $ref, null );
+
+		$this->assertNotSame( 'refused_by_current_rule', $out['reason'] ?? null );
+		$this->assertSame( 1, $this->ran['elementor/publish-document'] ?? 0, 'the approved call ran' );
+		$this->assertSame( 3, $this->seen['elementor/publish-document'], 'as the held actor' );
+	}
+
 	public function test_a_block_delivered_since_the_hold_refuses_and_rejects_the_hold(): void {
 		$this->registerAll();
 		$this->installRuleset( array() );

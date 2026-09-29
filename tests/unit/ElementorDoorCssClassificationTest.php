@@ -280,4 +280,86 @@ final class ElementorDoorCssClassificationTest extends TestCase {
 		} );
 		$this->assertSame( array( array( 'type' => 'custom_css', 'id' => '*' ) ), Aura_Worker_Elementor_Door::css_touches_for( 'elementor/manage-classes', array(), '*' ) );
 	}
+
+	// ---------------------------------------------------------------------
+	// P7.2 (2.23.0): publish-document promotes the caller's autosave (4.3.2)
+	// ---------------------------------------------------------------------
+
+	public function test_publish_without_an_autosave_declares_no_css(): void {
+		$GLOBALS['_current_user_id'] = 3;
+		$this->assertSame( array(), Aura_Worker_Elementor_Door::css_touches_for( 'elementor/publish-document', array( 'post_id' => 42 ), '42' ) );
+	}
+
+	public function test_publish_with_the_callers_autosave_is_conservative_css(): void {
+		$GLOBALS['_current_user_id']    = 3;
+		$GLOBALS['_sa_autosaves'][42][3] = (object) array( 'ID' => 900 );
+
+		$this->assertSame(
+			array( array( 'type' => 'custom_css', 'id' => '42' ) ),
+			Aura_Worker_Elementor_Door::css_touches_for( 'elementor/publish-document', array( 'post_id' => 42 ), '42' ),
+			'The autosave may hold CSS no rule judged: conservative, never precise or css_only.'
+		);
+	}
+
+	public function test_another_users_autosave_is_not_promoted(): void {
+		$GLOBALS['_current_user_id']    = 3;
+		$GLOBALS['_sa_autosaves'][42][8] = (object) array( 'ID' => 901 );
+
+		$this->assertSame( array(), Aura_Worker_Elementor_Door::css_touches_for( 'elementor/publish-document', array( 'post_id' => 42 ), '42' ), 'Elementor promotes only the calling user\'s autosave.' );
+	}
+
+	public function test_an_unresolved_target_is_conservative(): void {
+		$this->assertSame(
+			array( array( 'type' => 'custom_css', 'id' => '*' ) ),
+			Aura_Worker_Elementor_Door::css_touches_for( 'elementor/publish-document', array(), '*' ),
+			'No post id to check: a block rule must not be bypassed by an unresolved target.'
+		);
+	}
+
+	public function test_touches_for_carries_the_css_touch_beside_the_page(): void {
+		$GLOBALS['_current_user_id']    = 3;
+		$GLOBALS['_sa_autosaves'][42][3] = (object) array( 'ID' => 900 );
+		$GLOBALS['_posts'][42]           = (object) array( 'ID' => 42, 'post_type' => 'page', 'post_status' => 'draft', 'post_content' => '' );
+
+		$touches = Aura_Worker_Elementor_Door::touches_for( 'elementor/publish-document', array( 'post_id' => 42 ) );
+
+		$this->assertIsArray( $touches );
+		$this->assertContains( array( 'type' => 'custom_css', 'id' => '42' ), $touches );
+	}
+
+	public function test_only_listed_promoters_consult_the_autosave(): void {
+		$GLOBALS['_current_user_id']    = 3;
+		$GLOBALS['_sa_autosaves'][42][3] = (object) array( 'ID' => 900 );
+
+		$this->assertSame( array( 'elementor/publish-document' ), Aura_Worker_Elementor_Door::AUTOSAVE_PROMOTERS );
+		$this->assertSame( array(), Aura_Worker_Elementor_Door::css_touches_for( 'elementor/create-preview-link', array( 'post_id' => 42 ), '42' ) );
+	}
+
+	/**
+	 * An Elementor whose ability is loaded without the promotion (before
+	 * 4.3.2) promotes nothing, so an autosave there carries no CSS live.
+	 * Defining the class is permanent for the process.
+	 *
+	 * @runInSeparateProcess
+	 * @preserveGlobalState disabled
+	 */
+	public function test_an_elementor_that_does_not_promote_declares_no_css(): void {
+		eval( 'namespace Elementor\\Modules\\Mcp\\Abilities; class Publish_Document_Ability {}' );
+		$GLOBALS['_current_user_id']    = 3;
+		$GLOBALS['_sa_autosaves'][42][3] = (object) array( 'ID' => 900 );
+
+		$this->assertSame( array(), Aura_Worker_Elementor_Door::css_touches_for( 'elementor/publish-document', array( 'post_id' => 42 ), '42' ) );
+	}
+
+	/**
+	 * @runInSeparateProcess
+	 * @preserveGlobalState disabled
+	 */
+	public function test_an_elementor_that_promotes_consults_the_autosave(): void {
+		eval( 'namespace Elementor\\Modules\\Mcp\\Abilities; class Publish_Document_Ability { private function promote_pending_autosave( int $id ): void {} }' );
+		$GLOBALS['_current_user_id']    = 3;
+		$GLOBALS['_sa_autosaves'][42][3] = (object) array( 'ID' => 900 );
+
+		$this->assertSame( array( array( 'type' => 'custom_css', 'id' => '42' ) ), Aura_Worker_Elementor_Door::css_touches_for( 'elementor/publish-document', array( 'post_id' => 42 ), '42' ) );
+	}
 }

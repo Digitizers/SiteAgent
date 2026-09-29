@@ -47,7 +47,7 @@ class Aura_Worker_Elementor_Door {
 	 * snapshot that failed, a log row that could not be written, a creation
 	 * mutex another request holds, a hold queue that is busy.
 	 */
-	const RETRYABLE_CODES = array( 'aura_snapshot_failed', 'aura_log_failed', 'aura_log_full', 'aura_creation_busy', 'aura_hold_busy' );
+	const RETRYABLE_CODES = array( 'aura_snapshot_failed', 'aura_log_failed', 'aura_log_full', 'aura_creation_busy', 'aura_hold_busy', 'aura_autosave_appeared' );
 
 	const CPT_GLOBAL_CLASS  = 'e_global_class';
 	const CPT_DEFAULT_STYLE = 'e_default_style';
@@ -203,6 +203,8 @@ class Aura_Worker_Elementor_Door {
 		self::$active              = null;
 		self::$seq_lease           = null;
 		self::$schema_reader       = null;
+		self::$autosave_probe      = null;
+		self::$autosave_user       = null;
 		Aura_Worker_Door_Log::forget_live_identity();
 		// $GLOBALS['_sa_force_door'] — active()'s test override, standing in
 		// for the module class this suite cannot define — is reset by
@@ -2923,7 +2925,7 @@ class Aura_Worker_Elementor_Door {
 	 * @since 2.20.0
 	 */
 	const NO_CSS = array(
-		'elementor/publish-document'       => array( 'reason' => 'promotes an already-judged autosave', 'exempt' => array() ),
+		'elementor/publish-document'       => array( 'reason' => 'its INPUT carries no CSS; what it promotes is judged separately (AUTOSAVE_PROMOTERS)', 'exempt' => array() ),
 		'elementor/create-preview-link'    => array( 'reason' => 'mints a preview URL; writes no content', 'exempt' => array() ),
 		'elementor/create-page'            => array( 'reason' => 'creates an empty document', 'exempt' => array() ),
 		'elementor/manage-classes'         => array( 'reason' => 'global-class CSS — design_system (R1)', 'exempt' => array( 'operations[].css' ) ),
@@ -2931,6 +2933,147 @@ class Aura_Worker_Elementor_Door {
 		'elementor/reorder-classes'        => array( 'reason' => 'reorders class ids; no style content', 'exempt' => array() ),
 		'elementor/manage-global-variable' => array( 'reason' => 'a variable value, not a stylesheet', 'exempt' => array() ),
 	);
+
+	/**
+	 * NO_CSS writes that nevertheless take stored content live: since Elementor
+	 * 4.3.2, `publish-document` promotes the CALLING user's pending autosave
+	 * onto the document before publishing (Publish_Document_Ability::
+	 * promote_pending_autosave(), wp_get_post_autosave( $id,
+	 * get_current_user_id() )). That autosave may have been made by hand in
+	 * the editor and judged by no rule, so it may carry page or element CSS
+	 * the input never shows. Such a call declares a conservative custom_css
+	 * touch whenever an autosave is there to promote (P7.2, references
+	 * reverification-2026-09-28 §4; owner decision: conservative only when an
+	 * autosave exists, no content diff).
+	 *
+	 * @since 2.23.0
+	 */
+	const AUTOSAVE_PROMOTERS = array( 'elementor/publish-document' );
+
+	/** @var callable|null test seam: fn( string $id ): bool — will this call promote an autosave? @since 2.23.0 */
+	private static $autosave_probe = null;
+
+	/**
+	 * Whose autosave a replay will promote: the HELD actor's user id while
+	 * replay() runs, else null (the current user). replay() judges its
+	 * touches BEFORE it switches to the held actor, and govern() memoises that
+	 * verdict for the wrapper, so asking the approver's autosave there would
+	 * judge an autosave Elementor never promotes (Codex r1 on #141).
+	 *
+	 * @var int|null
+	 * @since 2.23.0
+	 */
+	private static $autosave_user = null;
+
+	/** @since 2.23.0 */
+	public static function _set_autosave_probe_for_tests( $fn ) {
+		self::$autosave_probe = $fn;
+	}
+
+	/**
+	 * Would an autosave-promoting write take stored content live on $id?
+	 *
+	 * True when the calling user holds an autosave of the document and the
+	 * running Elementor promotes it. An Elementor whose ability class is
+	 * loaded without the promotion (before 4.3.2) promotes nothing: false. A
+	 * target that is not a post id (`*`) cannot be checked: true, so a block
+	 * rule is never bypassed by an unresolved target.
+	 *
+	 * @since 2.23.0
+	 * @param string $id Resolved post id, or '*'.
+	 * @return bool
+	 */
+	private static function promotes_autosave( $id ) {
+		if ( null !== self::$autosave_probe ) {
+			return (bool) call_user_func( self::$autosave_probe, (string) $id );
+		}
+		if ( ! ctype_digit( (string) $id ) ) {
+			return true;
+		}
+		$class = 'Elementor\\Modules\\Mcp\\Abilities\\Publish_Document_Ability';
+		if ( class_exists( $class, false ) && ! method_exists( $class, 'promote_pending_autosave' ) ) {
+			return false;
+		}
+		if ( ! function_exists( 'wp_get_post_autosave' ) ) {
+			return true;
+		}
+		$user = null !== self::$autosave_user ? self::$autosave_user : get_current_user_id();
+		return (bool) wp_get_post_autosave( (int) $id, $user );
+	}
+
+	/**
+	 * Was a promoter judged CSS-free, and is there now an autosave for it to
+	 * promote? The pre-execute re-check (Codex r2 on #141).
+	 *
+	 * @since 2.23.0
+	 * @param string $slug    Ability.
+	 * @param array  $touches The touches the call was judged on.
+	 * @return bool
+	 */
+	private static function autosave_appeared( $slug, array $touches ) {
+		if ( ! in_array( $slug, self::AUTOSAVE_PROMOTERS, true ) ) {
+			return false;
+		}
+		$page = null;
+		foreach ( $touches as $t ) {
+			if ( isset( $t['type'] ) && 'custom_css' === $t['type'] ) {
+				return false; // already judged as a CSS write
+			}
+			// A non-page Elementor document is a `post` touch (Codex r3 on #141).
+			if ( null === $page && isset( $t['type'], $t['id'] ) && in_array( $t['type'], array( 'page', 'post' ), true ) ) {
+				$page = (string) $t['id'];
+			}
+		}
+		return null !== $page && self::promotes_autosave( $page );
+	}
+
+	/**
+	 * Pin a promoter judged CSS-free to the autosave it was judged on: none.
+	 *
+	 * While the callback runs, a `posts_pre_query` filter answers Elementor's
+	 * own `wp_get_post_autosave()` lookup for this document with no posts —
+	 * since WP 6.4 that lookup is a WP_Query (the abilities API needs 6.9), so
+	 * no autosave saved after the judgement can be promoted by this call. It
+	 * stays staged, and the next publish is judged with it. Only the autosave
+	 * query of the judged document is answered; every other query passes.
+	 *
+	 * @since 2.23.0
+	 * @param string $slug    Ability.
+	 * @param array  $touches The touches the call was judged on.
+	 * @return callable|null The filter to remove after the callback, or null.
+	 */
+	private static function pin_no_autosave( $slug, array $touches ) {
+		if ( ! in_array( $slug, self::AUTOSAVE_PROMOTERS, true ) ) {
+			return null;
+		}
+		$doc = null;
+		foreach ( $touches as $t ) {
+			if ( isset( $t['type'] ) && 'custom_css' === $t['type'] ) {
+				return null; // judged as a CSS write: whatever it promotes was judged
+			}
+			if ( null === $doc && isset( $t['type'], $t['id'] ) && in_array( $t['type'], array( 'page', 'post' ), true ) && ctype_digit( (string) $t['id'] ) ) {
+				$doc = (int) $t['id'];
+			}
+		}
+		if ( null === $doc ) {
+			return null;
+		}
+		$pin = static function ( $posts, $query ) use ( $doc ) {
+			if ( null !== $posts || ! is_object( $query ) || ! isset( $query->query_vars ) || ! is_array( $query->query_vars ) ) {
+				return $posts;
+			}
+			$qv = $query->query_vars;
+			if ( isset( $qv['post_type'], $qv['post_parent'], $qv['name'] )
+				&& 'revision' === $qv['post_type']
+				&& $doc === (int) $qv['post_parent']
+				&& $doc . '-autosave-v1' === (string) $qv['name'] ) {
+				return array();
+			}
+			return $posts;
+		};
+		add_filter( 'posts_pre_query', $pin, PHP_INT_MAX, 2 );
+		return $pin;
+	}
 
 	/** CSS-capable property names (spec §4.1 guard). @since 2.20.0 */
 	const CSS_PROPERTY_NAMES = array( 'custom_css', 'css', 'style', 'settings', 'page_settings', 'elements', 'structure', 'xml_structure', 'element_config' );
@@ -3133,7 +3276,8 @@ class Aura_Worker_Elementor_Door {
 
 	/**
 	 * The custom_css touches a door write declares, in addition to its
-	 * page/post/design_system ones. Pure.
+	 * page/post/design_system ones. Pure, except that an AUTOSAVE_PROMOTERS
+	 * write asks whether the calling user holds an autosave (2.23.0).
 	 *
 	 * @since 2.20.0
 	 * @param string $slug  Ability.
@@ -3150,6 +3294,10 @@ class Aura_Worker_Elementor_Door {
 			// let a custom_css block rule be bypassed.
 			$schema = self::live_input_schema( $slug );
 			if ( is_array( $schema ) && array() !== array_diff( self::css_capable_paths( $schema ), self::NO_CSS[ $slug ]['exempt'] ) ) {
+				return array( array( 'type' => 'custom_css', 'id' => $id ) );
+			}
+			// Its input carries no CSS, but it may take a stored autosave live.
+			if ( in_array( $slug, self::AUTOSAVE_PROMOTERS, true ) && self::promotes_autosave( $id ) ) {
 				return array( array( 'type' => 'custom_css', 'id' => $id ) );
 			}
 			return array();
@@ -3458,15 +3606,21 @@ class Aura_Worker_Elementor_Door {
 	}
 
 	/**
-	 * The verdict, once per request per (ability, input).
+	 * The verdict, once per request per (ability, input, touches).
+	 *
+	 * The touches are part of the key (2.23.0, Codex r1/r2 on #141): the same
+	 * input can resolve to different touches within one request — replay()
+	 * judges before the wrapper recomputes, and an autosave-promoting write
+	 * gains a custom_css touch when an autosave appears between the two — and
+	 * a verdict reached on one set of touches must never answer for another.
 	 *
 	 * @param string $slug    Ability.
 	 * @param array  $touches Touches.
-	 * @param array  $input   Input (memo key only).
+	 * @param array  $input   Input.
 	 * @return array { effect: block|hold|allow, rule: array|null, verdict: none|warn|rules_unavailable|block|allow }
 	 */
 	public static function govern( $slug, array $touches, array $input ) {
-		$key = self::memo_key( $slug, $input );
+		$key = self::memo_key( $slug, $input ) . '|' . hash( 'sha256', (string) wp_json_encode( $touches ) );
 		if ( isset( self::$memo[ $key ] ) ) {
 			return self::$memo[ $key ];
 		}
@@ -3958,6 +4112,28 @@ class Aura_Worker_Elementor_Door {
 			return self::hold_call( $slug, $input, $touches, $actor, $verdict );
 		}
 
+		// A WARN THE OPERATOR HAS NOT ACKNOWLEDGED (Codex r3 on #141). replay()
+		// checks the ack against the verdict IT reached; the touches this
+		// wrapper computed can differ (an autosave that appeared in between
+		// adds a custom_css touch), and so can the warn. Refused before
+		// admission, so replay() gives the hold back carrying the rule to
+		// acknowledge next — never run on an approval of a different warn.
+		if ( null !== self::$replay_ack && 'warn' === $verdict['verdict'] ) {
+			$ev  = self::rule_evidence( $verdict['rule'] );
+			$ack = isset( self::$replay_ack['ack'] ) ? self::$replay_ack['ack'] : null;
+			if ( ! is_array( $ack ) || ! isset( $ack['key'], $ack['ruleHash'] ) || $ack['key'] !== $ev['key'] || $ack['ruleHash'] !== $ev['ruleHash'] ) {
+				return new WP_Error(
+					'aura_warn_changed',
+					'A rule warning the approval did not acknowledge now applies to this call; it was not run.',
+					array(
+						'status'  => 409,
+						'rule'    => $ev,
+						'touches' => $touches,
+					)
+				);
+			}
+		}
+
 		// allow (or a replay whose approval is spent): closed log?
 		if ( Aura_Worker_Door_Log::is_closed() ) {
 			Aura_Worker_Door_Log::bump_refused();
@@ -4241,6 +4417,39 @@ class Aura_Worker_Elementor_Door {
 			}
 		}
 
+		// THE AUTOSAVE, AGAIN (P7.2, Codex r2 on #141). A promoter judged
+		// without a custom_css touch was judged on "no autosave to promote";
+		// one saved since — during admission, the snapshot, or the hold —
+		// would go live unjudged. Asked once more as late as this request
+		// can: an autosave that appeared refuses the call, retryably, so the
+		// retry is judged with it. What is left is the gap between this read
+		// and Elementor's own, inside the callback — closed by the pin at the
+		// callback (pin_no_autosave()); this check makes the common case a
+		// retry that is judged WITH the autosave rather than a publish that
+		// leaves it behind.
+		// BEFORE the `ran` witness (Codex r3): a replay reads `ran` to decide
+		// whether a refusal may give the approval back, and this one never
+		// entered the callback.
+		if ( self::autosave_appeared( $slug, $touches ) ) {
+			if ( $creating ) {
+				self::release_creation_mutex();
+			}
+			Aura_Worker_Door_Log::settle(
+				$seq,
+				array(
+					'result'       => 'refused',
+					'reason'       => 'autosave_appeared',
+					'may_have_run' => false,
+				)
+			);
+			self::$request = null;
+			return new WP_Error(
+				'aura_autosave_appeared',
+				'An autosave of this document appeared after the call was judged, and publishing would take it live; it was not run. Retry to have it judged.',
+				array( 'status' => 409 )
+			);
+		}
+
 		if ( 'warn' === $verdict['verdict'] ) {
 			Aura_Worker_Rules::record_warn( $slug, $verdict['rule'] );
 		}
@@ -4339,7 +4548,18 @@ class Aura_Worker_Elementor_Door {
 		// snapshot, the mutex, the watermark, the witness patch) can throw
 		// without the callback ever being reached.
 		self::$request['entered'] = true;
-		$result = is_callable( $inner ) ? call_user_func( $inner, $input ) : new WP_Error( 'ability_invalid_execute_callback', 'no callback' );
+		// PINNED TO WHAT WAS JUDGED (Codex r4 on #141): a promoter judged
+		// CSS-free runs with its autosave lookup answered "none", so an
+		// autosave saved after the last check above is left staged for the
+		// next — judged — publish instead of going live unjudged.
+		$pin = self::pin_no_autosave( $slug, $touches );
+		try {
+			$result = is_callable( $inner ) ? call_user_func( $inner, $input ) : new WP_Error( 'ability_invalid_execute_callback', 'no callback' );
+		} finally {
+			if ( null !== $pin ) {
+				remove_filter( 'posts_pre_query', $pin, PHP_INT_MAX );
+			}
+		}
 		do_action( 'sa_test_inner_ran', $slug ); // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- test seam only (ordering: snapshot before the write); no listener in production.
 
 		$failed   = is_wp_error( $result ) || ( is_array( $result ) && 'error' === ( isset( $result['status'] ) ? $result['status'] : '' ) );
@@ -4643,6 +4863,9 @@ class Aura_Worker_Elementor_Door {
 		$rec                  = Aura_Worker_Rules::current_uncached();
 		self::$pinned_ruleset = $rec;
 		self::$memo           = array();
+		// The autosave publish-document promotes is the HELD actor's — the
+		// user the ability runs as below — never the approver's (P7.2).
+		self::$autosave_user  = isset( $held['actor']['user_id'] ) ? (int) $held['actor']['user_id'] : 0;
 		$prev_user            = get_current_user_id();
 		// WHO IS APPROVING — read NOW, before wp_set_current_user() below
 		// switches this request to the held actor (Ruling P36). Afterwards
@@ -4945,6 +5168,25 @@ class Aura_Worker_Elementor_Door {
 				// Never admitted: a closed log, a log row that could not be
 				// written, a target that stopped being attributable while the
 				// call waited. Nothing ran, so nothing needs a rollback.
+				if ( 'aura_warn_changed' === $code ) {
+					// The wrapper met a warn this approval did not acknowledge
+					// (Codex r3 on #141): the hold goes back, showing the
+					// touches and the rule to acknowledge next.
+					$data = (array) $result->get_error_data();
+					$back = self::give_back( $ref, $code, $result->get_error_message(), $slug, (array) $held['actor'], $touches );
+					if ( 'retry_later' !== $back['reason'] || ! empty( $back['claim_retained'] ) ) {
+						return $back;
+					}
+					if ( isset( $data['touches'] ) && is_array( $data['touches'] ) ) {
+						Aura_Worker_Door_Holds::refresh_touches( $ref, $data['touches'] );
+					}
+					Aura_Worker_Door_Holds::refresh_rule( $ref, (array) $data['rule'] );
+					return array(
+						'ok'     => false,
+						'reason' => 'warn_changed',
+						'rule'   => $data['rule'],
+					);
+				}
 				if ( is_wp_error( $result ) ) {
 					return in_array( $code, self::RETRYABLE_CODES, true )
 						? self::give_back( $ref, $code, $result->get_error_message(), $slug, (array) $held['actor'], $touches )
@@ -5030,6 +5272,7 @@ class Aura_Worker_Elementor_Door {
 			self::$replay_ack     = null;
 			self::$pinned_ruleset = null;
 			self::$memo           = array();
+			self::$autosave_user  = null;
 			wp_set_current_user( (int) $prev_user );
 		}
 	}
