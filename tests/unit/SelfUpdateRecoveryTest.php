@@ -1307,8 +1307,12 @@ final class SelfUpdateRecoveryTest extends TestCase {
 	}
 
 	public function test_the_generic_single_update_of_siteagent_takes_and_releases_the_claim(): void {
+		// 2.23.1: the generic path refuses SiteAgent's own file under the claim
+		// (after the multisite and busy refusals) — it no longer succeeds —
+		// and still releases what it took.
 		$res = ( new Aura_Worker_Updater() )->update_plugin( Aura_Worker_Updater::SELF_PLUGIN_FILE );
-		$this->assertTrue( $res['success'] );
+		$this->assertFalse( $res['success'] );
+		$this->assertSame( 'aura_use_self_update', $res['code'] );
 		$this->assertNull( sa_read_option_uncached( Aura_Worker_Updater::SELF_UPDATE_LOCK ), 'the generic path releases what it took' );
 	}
 
@@ -1544,16 +1548,14 @@ final class SelfUpdateRecoveryTest extends TestCase {
 		$this->assertSame( array(), array_filter( $GLOBALS['_filters']['upgrader_clear_destination'] ?? array() ), 'the beat is removed after the phase' );
 	}
 
-	public function test_a_generic_single_update_that_loses_its_claim_during_the_phase_is_not_reported_as_success(): void {
-		// Codex #94 round-5 P2: update_plugin() had no check after its phase,
-		// so a claim seized after upgrader_pre_install (post-install passes
-		// through) came back as success while the successor owned the files.
-		$successor = '';
-		$GLOBALS['_upgrade_effect'] = function () use ( &$successor ) {
-			$held  = (string) sa_read_option_uncached( Aura_Worker_Updater::SELF_UPDATE_LOCK );
-			$fence = substr( $held, 0, strpos( $held, '|' ) );
-			update_option( Aura_Worker_Updater::SELF_UPDATE_LOCK, $fence . '|' . ( time() - 11 * MINUTE_IN_SECONDS ) );
-			$successor = Aura_Worker_Magic_Link::take_claim( Aura_Worker_Updater::SELF_UPDATE_LOCK, 10 * MINUTE_IN_SECONDS );
+	public function test_a_generic_single_update_of_siteagent_has_no_upgrade_phase_to_lose_its_claim_in(): void {
+		// Codex #94 round-5 P2 made update_plugin() check its claim after the
+		// upgrade phase, so a claim seized mid-phase was never reported as
+		// success. Since 2.23.1 the generic path refuses SiteAgent's own file
+		// before the upgrader: the phase that could lose the claim never runs.
+		$ran = false;
+		$GLOBALS['_upgrade_effect'] = function () use ( &$ran ) {
+			$ran = true;
 		};
 		try {
 			$res = ( new Aura_Worker_Updater() )->update_plugin( Aura_Worker_Updater::SELF_PLUGIN_FILE );
@@ -1561,10 +1563,10 @@ final class SelfUpdateRecoveryTest extends TestCase {
 			unset( $GLOBALS['_upgrade_effect'] );
 		}
 
-		$this->assertNotSame( '', $successor );
+		$this->assertFalse( $ran, 'the upgrader is never reached for SiteAgent' );
 		$this->assertFalse( $res['success'] );
-		$this->assertTrue( $res['in_progress'], 'a successor owns the files; the outcome is its to report' );
-		$this->assertStringStartsWith( $successor . '|', (string) sa_read_option_uncached( Aura_Worker_Updater::SELF_UPDATE_LOCK ) );
+		$this->assertSame( 'aura_use_self_update', $res['code'] );
+		$this->assertNull( sa_read_option_uncached( Aura_Worker_Updater::SELF_UPDATE_LOCK ) );
 	}
 
 	public function test_a_batch_entry_whose_claim_is_seized_during_the_health_probe_does_not_roll_back(): void {

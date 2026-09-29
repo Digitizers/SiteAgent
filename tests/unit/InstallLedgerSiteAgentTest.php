@@ -211,6 +211,9 @@ final class InstallLedgerSiteAgentTest extends TestCase {
 			$this->assertSame( 0, preg_match( '/\}\s*(,\s*\$\w+\s*){0,2}\)\s*;/', substr( $before, $opened ) ), "an upgrader call in {$func}() runs outside as_siteagent()" );
 			$wrapped++;
 		}
-		$this->assertSame( 4, $wrapped ); // self-update install, update_plugin, update_theme, update_single_plugin
+		// Self-update install, update_theme, and the one generic plugin upgrade
+		// (2.23.1: update_plugin and update_single_plugin both call
+		// upgrade_plugin_keeping_activation(), so their two call sites are one).
+		$this->assertSame( 3, $wrapped );
 	}
 }

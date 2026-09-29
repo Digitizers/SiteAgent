@@ -1600,8 +1600,10 @@ if ( ! function_exists( 'get_plugins' ) ) {
 }
 
 if ( ! function_exists( 'is_plugin_active' ) ) {
+	// Core's own rule: active on this site, OR network-active on a multisite.
 	function is_plugin_active( $plugin ) {
-		return isset( $GLOBALS['_active_plugins'][ $plugin ] );
+		return isset( $GLOBALS['_active_plugins'][ $plugin ] )
+			|| ( is_multisite() && isset( $GLOBALS['_network_active_plugins'][ $plugin ] ) );
 	}
 }
 
@@ -1616,9 +1618,45 @@ if ( ! function_exists( 'is_plugin_active_for_network' ) ) {
 }
 
 if ( ! function_exists( 'activate_plugin' ) ) {
-	function activate_plugin( $plugin ) {
-		$GLOBALS['_active_plugins'][ $plugin ] = true;
-		$GLOBALS['_mutations'][]               = 'activate_plugin';
+	// Core's signature. Every call is recorded in `_activate_plugin_calls`
+	// (plugin, redirect, network_wide, silent); a WP_Error in
+	// `_activate_plugin_result` is returned and nothing is activated (2.23.1).
+	function activate_plugin( $plugin, $redirect = '', $network_wide = false, $silent = false ) {
+		$GLOBALS['_activate_plugin_calls'][] = array(
+			'plugin'       => $plugin,
+			'redirect'     => $redirect,
+			'network_wide' => $network_wide,
+			'silent'       => $silent,
+		);
+		$GLOBALS['_mutations'][] = 'activate_plugin';
+		if ( isset( $GLOBALS['_activate_plugin_result'] ) && is_wp_error( $GLOBALS['_activate_plugin_result'] ) ) {
+			return $GLOBALS['_activate_plugin_result'];
+		}
+		if ( $network_wide ) {
+			$GLOBALS['_network_active_plugins'][ $plugin ] = true;
+		} else {
+			$GLOBALS['_active_plugins'][ $plugin ] = true;
+		}
+		return null;
+	}
+}
+
+if ( ! function_exists( 'get_site_transient' ) ) {
+	// `_site_transients` store (2.23.1: the updater reads `update_plugins`).
+	function get_site_transient( $key ) {
+		return isset( $GLOBALS['_site_transients'][ $key ] ) ? $GLOBALS['_site_transients'][ $key ] : false;
+	}
+}
+
+if ( ! function_exists( 'wp_update_plugins' ) ) {
+	// Logged in `_updater_calls` (beside Plugin_Upgrader::upgrade, so a test
+	// can assert the order); `_wp_update_plugins_effect` models what the
+	// check writes into the `update_plugins` site transient.
+	function wp_update_plugins( $extra_stats = array() ) {
+		$GLOBALS['_updater_calls'][] = 'wp_update_plugins';
+		if ( isset( $GLOBALS['_wp_update_plugins_effect'] ) && is_callable( $GLOBALS['_wp_update_plugins_effect'] ) ) {
+			call_user_func( $GLOBALS['_wp_update_plugins_effect'] );
+		}
 	}
 }
 
@@ -1731,8 +1769,9 @@ if ( ! function_exists( 'wp_upgrade' ) ) {
 
 if ( ! class_exists( 'Automatic_Upgrader_Skin' ) ) {
 	class Automatic_Upgrader_Skin {
+		// `_upgrade_messages`: what the skin collected during the run (2.23.1).
 		public function get_upgrade_messages() {
-			return array();
+			return isset( $GLOBALS['_upgrade_messages'] ) ? (array) $GLOBALS['_upgrade_messages'] : array();
 		}
 	}
 }
@@ -1742,13 +1781,16 @@ if ( ! class_exists( 'Plugin_Upgrader' ) ) {
 		public function __construct( $skin = null ) {}
 
 		public function upgrade( $plugin_file ) {
-			$GLOBALS['_mutations'][] = 'Plugin_Upgrader::upgrade';
+			$GLOBALS['_mutations'][]     = 'Plugin_Upgrader::upgrade';
+			$GLOBALS['_updater_calls'][] = 'Plugin_Upgrader::upgrade:' . $plugin_file;
 			// `_upgrade_effect` models what happens WHILE the upgrade runs (a
-			// claim seized mid-phase), the way `_install_effect` does for install().
+			// claim seized mid-phase, core's pre_install deactivation), the way
+			// `_install_effect` does for install(). It may throw.
 			if ( isset( $GLOBALS['_upgrade_effect'] ) && is_callable( $GLOBALS['_upgrade_effect'] ) ) {
-				call_user_func( $GLOBALS['_upgrade_effect'], $this );
+				call_user_func( $GLOBALS['_upgrade_effect'], $this, $plugin_file );
 			}
-			return true;
+			// array_key_exists, not ??: null models run() failing (core's $result has no default).
+			return array_key_exists( '_upgrade_result', $GLOBALS ) ? $GLOBALS['_upgrade_result'] : true;
 		}
 
 		public function install( $package, $args = array() ) {
@@ -5457,6 +5499,13 @@ function sa_reset_state(): void {
 	$GLOBALS['_is_admin']       = false; // is_admin() — see the stub above.
 	$GLOBALS['_is_multisite']   = false;
 	$GLOBALS['_network_active_plugins'] = array(); // is_plugin_active_for_network() — see the stub above.
+	// The generic plugin update (2.23.1) — see the stubs above.
+	$GLOBALS['_active_plugins']        = array();
+	$GLOBALS['_activate_plugin_calls'] = array();
+	$GLOBALS['_site_transients']       = array();
+	$GLOBALS['_updater_calls']         = array();
+	$GLOBALS['_upgrade_messages']      = array();
+	unset( $GLOBALS['_activate_plugin_result'], $GLOBALS['_upgrade_result'], $GLOBALS['_upgrade_effect'], $GLOBALS['_wp_update_plugins_effect'] );
 	$GLOBALS['_current_blog_id'] = 1; // get_current_blog_id() — core's own default on a single site.
 	$GLOBALS['_main_site_id']  = 1; // is_main_site() — which blog of a network is the main one (Ruling P39).
 	$GLOBALS['_site_options']   = array();

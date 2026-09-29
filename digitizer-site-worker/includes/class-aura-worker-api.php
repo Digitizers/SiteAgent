@@ -747,8 +747,16 @@ class Aura_Worker_API {
 			) ), 404 );
 		}
 
+		// 409, not 500, for the two outcomes that are not a broken site
+		// (2.23.1): nothing is offered to install (`aura_no_update_offered`),
+		// and SiteAgent's own file, which updates only through POST
+		// /aura/v1/self-update (`aura_use_self_update`).
 		$result = $this->updater->update_plugin( $plugin_file );
-		$status = $result['success'] ? 200 : 500;
+		$status = 200;
+		if ( ! $result['success'] ) {
+			$code   = isset( $result['code'] ) ? (string) $result['code'] : '';
+			$status = in_array( $code, array( 'aura_no_update_offered', 'aura_use_self_update' ), true ) ? 409 : 500;
+		}
 		return new WP_REST_Response( Aura_Worker_Rules::with_warnings( $result ), $status );
 	}
 

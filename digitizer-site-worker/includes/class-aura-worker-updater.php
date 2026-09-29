@@ -1497,9 +1497,19 @@ class Aura_Worker_Updater {
 		$update_result = $this->heartbeat_during( $fence, function () use ( $plugin_file ) {
 			return $this->update_single_plugin( $plugin_file );
 		} );
+		// 2.23.1: whether the plugin had to be turned back on, on success and
+		// failure alike.
+		foreach ( array( 'reactivated', 'reactivation_error' ) as $key ) {
+			if ( array_key_exists( $key, $update_result ) ) {
+				$entry[ $key ] = $update_result[ $key ];
+			}
+		}
 		if ( ! $update_result['success'] ) {
 			$entry['status'] = 'failed';
 			$entry['detail'] = $update_result['error'];
+			if ( isset( $update_result['code'] ) ) {
+				$entry['code'] = (string) $update_result['code'];
+			}
 			return $entry;
 		}
 
@@ -1685,24 +1695,25 @@ class Aura_Worker_Updater {
 	/**
 	 * Update a specific plugin.
 	 *
+	 * Never SiteAgent itself (2.23.1): that file answers `aura_use_self_update`
+	 * after the multisite, host and busy-claim refusals, and the upgrader is
+	 * never reached — see upgrade_plugin_keeping_activation().
+	 *
 	 * @param string $plugin_file Plugin file path (e.g., "akismet/akismet.php").
-	 * @return array Result with success status and message.
+	 * @return array Result with success status and message; see
+	 *               upgrade_plugin_keeping_activation() for the keys.
 	 */
 	public function update_plugin( $plugin_file ) {
 		$this->load_upgrade_dependencies();
 
-		// This plugin's own update goes under the self-update claim, like every
-		// other path that can replace these files (Codex round-23 P1): a generic
-		// update landing between a self-update's backup, install and probe would
-		// have the beacon describing one build and the rollback restoring another.
+		// This plugin's own file still goes under the self-update claim, like
+		// every other path that can replace these files (Codex round-23 P1), so
+		// the multisite and busy refusals keep their precedence over the
+		// aura_use_self_update refusal the work answers.
 		$lost   = false;
 		$result = $this->guarding_self( $plugin_file, function ( $fence ) use ( $plugin_file, &$lost ) {
 			$r = $this->heartbeat_during( $fence, function () use ( $plugin_file ) {
-				$skin     = new Automatic_Upgrader_Skin();
-				$upgrader = new Plugin_Upgrader( $skin );
-				return Aura_Worker_Install_Ledger::as_siteagent( function () use ( $upgrader, $plugin_file ) {
-					return $upgrader->upgrade( $plugin_file );
-				}, $upgrader );
+				return $this->upgrade_plugin_keeping_activation( $plugin_file );
 			} );
 			// A claim lost during the phase (a heartbeat that fired only at
 			// post-install passes through) is a successor owning these files:
@@ -1720,31 +1731,160 @@ class Aura_Worker_Updater {
 			return $this->self_update_busy();
 		}
 
-		if ( is_wp_error( $result ) ) {
+		if ( $result['success'] ) {
+			$result['message'] = __( 'Plugin updated successfully.', 'digitizer-site-worker' );
+		}
+		return $result;
+	}
+
+	/**
+	 * The one place a generic plugin update calls Plugin_Upgrader::upgrade()
+	 * (2.23.1) — the single update and every batch entry (and so
+	 * `update_plugin_safely`) come through here.
+	 *
+	 * 1. SiteAgent's own file is refused (`aura_use_self_update`): upgrade()
+	 *    deactivates its target at pre_install, and a deactivated SiteAgent
+	 *    has no routes left for Aura to repair it with. It updates itself only
+	 *    through `POST /aura/v1/self-update`.
+	 * 2. A plugin with no entry in `update_plugins->response` gets one
+	 *    `wp_update_plugins()` and a re-read before the upgrade: the entries
+	 *    for GitHub-hosted plugins are injected when the transient is read, by
+	 *    code that may not be loaded now.
+	 * 3. The activation state is recorded before the upgrade and restored in a
+	 *    `finally` — on success, on failure and on a throw. Core's
+	 *    `deactivate_plugin_before_upgrade` deactivates the target outside
+	 *    cron, and only wp-admin's skin turns it back on. A plugin that was
+	 *    inactive is never activated.
+	 * 4. The result is mapped: `false` is "not offered"
+	 *    (`aura_no_update_offered`); `null` is run() failing
+	 *    (`aura_update_failed`, with the skin's reason — core discards the
+	 *    WP_Error); a WP_Error keeps its code and message.
+	 *
+	 * @param string $plugin_file Plugin file path.
+	 * @return array { success, error?, code?, reactivated?, reactivation_error?, offered_version? }
+	 */
+	private function upgrade_plugin_keeping_activation( $plugin_file ) {
+		if ( self::SELF_PLUGIN_FILE === $plugin_file ) {
 			return array(
 				'success' => false,
+				'code'    => 'aura_use_self_update',
+				'error'   => __( 'SiteAgent cannot update itself through the generic plugin update: it would be deactivated mid-update and lose its own routes. Use POST /aura/v1/self-update.', 'digitizer-site-worker' ),
+			);
+		}
+
+		$offer = $this->offered_update( $plugin_file );
+		if ( null === $offer ) {
+			wp_update_plugins();
+			$offer = $this->offered_update( $plugin_file );
+		}
+
+		$was_network = function_exists( 'is_multisite' ) && is_multisite() && is_plugin_active_for_network( $plugin_file );
+		$was_active  = $was_network || is_plugin_active( $plugin_file );
+		$reactivated = false;
+		$react_error = null;
+
+		$skin     = new Automatic_Upgrader_Skin();
+		$upgrader = new Plugin_Upgrader( $skin );
+		try {
+			$result = Aura_Worker_Install_Ledger::as_siteagent( function () use ( $upgrader, $plugin_file ) {
+				return $upgrader->upgrade( $plugin_file );
+			}, $upgrader );
+		} finally {
+			if ( $was_active ) {
+				$active_now = $was_network ? is_plugin_active_for_network( $plugin_file ) : is_plugin_active( $plugin_file );
+				if ( ! $active_now ) {
+					$activated = activate_plugin( $plugin_file, '', $was_network, true );
+					if ( is_wp_error( $activated ) ) {
+						$react_error = $activated->get_error_message();
+					} else {
+						$reactivated = true;
+					}
+				}
+			}
+		}
+
+		if ( is_wp_error( $result ) ) {
+			$out = array(
+				'success' => false,
+				'code'    => (string) $result->get_error_code(),
 				'error'   => $result->get_error_message(),
 			);
-		}
-
-		if ( false === $result ) {
-			return array(
+		} elseif ( false === $result ) {
+			$out = array(
 				'success' => false,
-				'error'   => __( 'Update failed. The plugin may not have an update available.', 'digitizer-site-worker' ),
+				'code'    => 'aura_no_update_offered',
+				'error'   => __( 'No update is offered for this plugin: WordPress\'s update list has no entry for it, even after a refresh. Nothing was changed.', 'digitizer-site-worker' ),
 			);
-		}
-
-		if ( null === $result ) {
-			return array(
+		} elseif ( null === $result ) {
+			$reason = $this->upgrade_failure_reason( $skin );
+			$out    = array(
 				'success' => false,
-				'error'   => __( 'No update available for this plugin.', 'digitizer-site-worker' ),
+				'code'    => 'aura_update_failed',
+				'error'   => '' !== $reason
+					/* translators: %s: the upgrader's own messages */
+					? sprintf( __( 'Update failed: %s', 'digitizer-site-worker' ), $reason )
+					: __( 'Update failed: the upgrader gave no reason.', 'digitizer-site-worker' ),
 			);
+		} else {
+			$out = array( 'success' => true );
 		}
 
-		return array(
-			'success' => true,
-			'message' => __( 'Plugin updated successfully.', 'digitizer-site-worker' ),
-		);
+		$out['reactivated'] = $reactivated;
+		if ( null !== $react_error ) {
+			$out['reactivation_error'] = $react_error;
+		}
+		if ( null !== $offer && isset( $offer->new_version ) ) {
+			$out['offered_version'] = (string) $offer->new_version;
+		}
+		return $out;
+	}
+
+	/**
+	 * The `update_plugins` entry offering $plugin_file, or null.
+	 *
+	 * @param string $plugin_file Plugin file path.
+	 * @return object|null
+	 */
+	private function offered_update( $plugin_file ) {
+		$transient = get_site_transient( 'update_plugins' );
+		if ( ! is_object( $transient ) || empty( $transient->response ) || ! is_array( $transient->response ) ) {
+			return null;
+		}
+		$entry = isset( $transient->response[ $plugin_file ] ) ? $transient->response[ $plugin_file ] : null;
+		return is_object( $entry ) ? $entry : null;
+	}
+
+	/**
+	 * Why a run() failed, from what the skin collected: `get_errors()` where
+	 * the skin has it, then the last of `get_upgrade_messages()` (core's
+	 * Automatic_Upgrader_Skin feeds a WP_Error's message into those).
+	 *
+	 * @param object $skin The upgrader skin.
+	 * @return string '' when the skin kept nothing.
+	 */
+	private function upgrade_failure_reason( $skin ) {
+		$parts = array();
+		if ( method_exists( $skin, 'get_errors' ) ) {
+			$errors = $skin->get_errors();
+			if ( is_wp_error( $errors ) ) {
+				foreach ( $errors->get_error_messages() as $m ) {
+					$parts[] = $m;
+				}
+			}
+		}
+		if ( method_exists( $skin, 'get_upgrade_messages' ) ) {
+			foreach ( array_slice( (array) $skin->get_upgrade_messages(), -3 ) as $m ) {
+				$parts[] = $m;
+			}
+		}
+		$clean = array();
+		foreach ( $parts as $m ) {
+			$m = trim( html_entity_decode( wp_strip_all_tags( (string) $m ), ENT_QUOTES, 'UTF-8' ) );
+			if ( '' !== $m && ! in_array( $m, $clean, true ) ) {
+				$clean[] = $m;
+			}
+		}
+		return implode( ' ', $clean );
 	}
 
 	/**
@@ -1867,29 +2007,15 @@ class Aura_Worker_Updater {
 	}
 
 	/**
-	 * Update a single plugin using Plugin_Upgrader.
+	 * Update a single plugin (a batch entry) using Plugin_Upgrader, through
+	 * upgrade_plugin_keeping_activation() — SiteAgent's own file is refused.
 	 *
 	 * @param string $plugin_file Plugin file path (e.g., "akismet/akismet.php").
-	 * @return array { success: bool, error?: string }
+	 * @return array { success: bool, error?: string, code?: string, reactivated?: bool, ... }
 	 */
 	protected function update_single_plugin( $plugin_file ) {
 		$this->load_upgrade_dependencies();
-
-		$skin     = new Automatic_Upgrader_Skin();
-		$upgrader = new Plugin_Upgrader( $skin );
-		$result   = Aura_Worker_Install_Ledger::as_siteagent( function () use ( $upgrader, $plugin_file ) {
-			return $upgrader->upgrade( $plugin_file );
-		}, $upgrader );
-
-		if ( is_wp_error( $result ) ) {
-			return array( 'success' => false, 'error' => $result->get_error_message() );
-		}
-
-		if ( false === $result || null === $result ) {
-			return array( 'success' => false, 'error' => __( 'Update failed or no update available.', 'digitizer-site-worker' ) );
-		}
-
-		return array( 'success' => true );
+		return $this->upgrade_plugin_keeping_activation( $plugin_file );
 	}
 
 	/**
