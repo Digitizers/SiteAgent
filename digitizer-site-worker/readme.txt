@@ -4,7 +4,7 @@ Tags: ai, automation, maintenance, updates, wordpress management
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.23.0
+Stable tag: 2.23.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -252,6 +252,11 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 7. Connections: provider connections (Cloudways, Cloudflare, Bunny, Hostinger, Vultr, xCloud) with resource counts, status, and credential-rotation reminders.
 
 == Changelog ==
+
+= 2.23.1 =
+* Fix: updating a plugin through Aura no longer leaves it deactivated. WordPress switches a plugin off while it updates it, and only its own admin screen switches it back on; SiteAgent now turns an active plugin back on after the update, whether the update worked or failed. An inactive plugin stays inactive.
+* SiteAgent no longer updates itself through the generic plugin update, which could switch it off and cut Aura off from the site. It updates itself only through its own protected self-update.
+* A failed update now reports WordPress's actual reason instead of "No update available", and an update that is not on offer is reported as such rather than as an error. The update list is refreshed once before updating when the plugin is missing from it.
 
 = 2.23.0 =
 * Operator rules about custom CSS now also cover Elementor's publish-document when publishing would take a pending autosave live, since that autosave can carry CSS no rule has seen. A publish with no autosave is unaffected. If an autosave appears while a call is being approved or run, the call is stopped and can be retried, or it publishes without that autosave, which stays waiting for the next publish. No new settings.
