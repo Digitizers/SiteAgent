@@ -4,7 +4,7 @@ Tags: ai, automation, maintenance, updates, wordpress management
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.22.0
+Stable tag: 2.23.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -252,6 +252,9 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 7. Connections: provider connections (Cloudways, Cloudflare, Bunny, Hostinger, Vultr, xCloud) with resource counts, status, and credential-rotation reminders.
 
 == Changelog ==
+
+= 2.23.0 =
+* Operator rules about custom CSS now also cover Elementor's publish-document when publishing would take a pending autosave live, since that autosave can carry CSS no rule has seen. A publish with no autosave is unaffected. If an autosave appears while a call is being approved or run, the call is stopped and can be retried, or it publishes without that autosave, which stays waiting for the next publish. No new settings.
 
 = 2.22.0 =
 * New: an install ledger. Every plugin and theme install or update is recorded with how it arrived (wp-admin, REST, WP-CLI, cron, a WordPress auto-update, or SiteAgent itself), which user and application password, and where the package came from, so Aura can flag packages an AI agent installed. It only observes; it never blocks an install. Nothing to configure.
