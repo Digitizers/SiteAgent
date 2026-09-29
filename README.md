@@ -17,7 +17,7 @@
   </a>
   <img src="https://img.shields.io/badge/WordPress-6.2%E2%80%937.1-21759b?logo=wordpress" alt="WordPress" />
   <img src="https://img.shields.io/badge/PHP-7.4%2B-777bb4?logo=php" alt="PHP" />
-  <img src="https://img.shields.io/badge/Stable-2.22.0-green" alt="Stable" />
+  <img src="https://img.shields.io/badge/Stable-2.23.0-green" alt="Stable" />
 </p>
 
 ---
@@ -238,6 +238,11 @@ These plug straight into **Aura's Fleet MCP Gateway**: read tools run on demand,
 ---
 
 ## Changelog
+
+### 2.23.0
+
+- **`publish-document` promoting an autosave is a custom-CSS write** (P7.2, references re-verification 2026-09-28 §4). Elementor 4.3.2's `publish-document` restores the calling user's pending autosave, page settings and CSS included, so a listed promoter (`AUTOSAVE_PROMOTERS`) declares a conservative `custom_css` touch when — and only when — an autosave exists to promote (owner decision). An Elementor without `promote_pending_autosave` promotes nothing; an unresolved target or a missing `wp_get_post_autosave()` fails conservative. (#141)
+- **The judgement stays true to what Elementor promotes.** A replay asks about the held actor's autosave, not the approver's; `govern()`'s per-request memo is keyed on the touches too; a warn the wrapper meets that the approval did not acknowledge answers `warn_changed` and keeps the hold; an autosave that appears before the callback refuses retryably (`409 aura_autosave_appeared`, approval given back); and while a CSS-free publish runs, a `posts_pre_query` filter answers Elementor's own autosave lookup (a `WP_Query` since WP 6.4) with none, so a later autosave stays staged for the next judged publish. (#141)
 
 ### 2.22.0
 
