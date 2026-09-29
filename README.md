@@ -17,7 +17,7 @@
   </a>
   <img src="https://img.shields.io/badge/WordPress-6.2%E2%80%937.1-21759b?logo=wordpress" alt="WordPress" />
   <img src="https://img.shields.io/badge/PHP-7.4%2B-777bb4?logo=php" alt="PHP" />
-  <img src="https://img.shields.io/badge/Stable-2.23.0-green" alt="Stable" />
+  <img src="https://img.shields.io/badge/Stable-2.23.1-green" alt="Stable" />
 </p>
 
 ---
@@ -238,6 +238,12 @@ These plug straight into **Aura's Fleet MCP Gateway**: read tools run on demand,
 ---
 
 ## Changelog
+
+### 2.23.1
+
+- **A generic plugin update keeps the plugin active.** `Plugin_Upgrader::upgrade()` deactivates its target at `upgrader_pre_install` outside cron, and only wp-admin's skin re-activates it, so every plugin updated through `POST /aura/v1/update/plugin`, `POST /aura/v2/update/batch` or `update_plugin_safely` came back inactive. One helper now records the activation state (network activation included) before the upgrade and re-activates silently in a `finally` — on success, failure and a throw — and never activates a plugin that was inactive. Results carry `reactivated` and, when activation fails, `reactivation_error`.
+- **SiteAgent is refused on the generic paths.** Its own file answers `aura_use_self_update` (REST `409`, pointing at `POST /aura/v1/self-update`) after the multisite, host and busy-claim refusals; the upgrader is never reached. A batch refuses only that entry.
+- **The upgrader's result is reported truthfully.** `null` (a failed `run()`) is `aura_update_failed` with the skin's reason, never "No update available"; `false` is `aura_no_update_offered` (REST `409`, not `500`); a `WP_Error` keeps its code and message. A plugin missing from `update_plugins` gets one `wp_update_plugins()` before the upgrade, and results carry `offered_version` when an update is offered.
 
 ### 2.23.0
 

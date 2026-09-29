@@ -76,7 +76,7 @@ To create an installable ZIP: `cd` to the repo root and run `zip -r digitizer-si
 | `Aura_Worker_Redact` | `includes/class-aura-worker-redact.php` | Agent read redaction (2.18.0, #419): detectors (`redact`, `redact_text`), audience (`is_audience`), the `rest_pre_echo_response` read seam (`filter_echo`), the `rest_request_before_callbacks` placeholder guard and unredacted-grant check (`before_callbacks`, `grant_shape`), counters, `status_fragment` |
 | `Aura_Worker_Redact_Decode` | `includes/class-aura-worker-redact-decode.php` | Redaction stage 2 (2.18.2, #113), pure: `decode_layers()` (the raw run, then every pass whose result changed, up to `MAX_DECODE_PASSES` layers of HTML5 character references, `%XX` and JSON escapes — `\\`, `\/`, `\uXXXX`; null past the check pass or the `MAX_DECODE_GROWTH` bound), `decode_run()` (its last layer), `decode_pass()`, `html5_code_point()`, `utf8()` |
 | `Aura_Worker_Redact_Idna` | `includes/class-aura-worker-redact-idna.php` | Redaction stage 2 view 2 (2.18.3, #116), pure, GENERATED — `map()` applies Unicode 18.0.0's UTS-46 hostname mappings and deletions with one `strtr()`; regenerate with `php bin/generate-idna-map.php` (pinned URL + SHA-256), then run the tests; to move to a new Unicode version, bump `IDNA_VERSION`, `IDNA_URL` and `IDNA_SHA256` in the script, regenerate, then update the three counts AND the MAP content pin in `RedactIdnaTest` |
-| `Aura_Worker_Install_Ledger` | `includes/class-aura-worker-install-ledger.php` | The install ledger (2.22.0, Aura spec 2026-09-21 §4): observes `upgrader_package_options` (per-run token in `hook_extra`), `upgrader_pre_download` (`PHP_INT_MAX`: source + context under the token) and `upgrader_install_package_result` (the entry) for plugin/theme runs only; records and never decides. Ring of 200 entries / 90 days in `aura_worker_install_ledger` (+ `_state`), not autoloaded, network options on multisite; `report()` is `audit_agent_code`'s `installs`. `as_siteagent()` wraps the updater's four upgrader calls. `auto_update` = `doing_action( 'wp_maybe_auto_update' )`, never the skin (EMCP Pro installs with `Automatic_Upgrader_Skin`) |
+| `Aura_Worker_Install_Ledger` | `includes/class-aura-worker-install-ledger.php` | The install ledger (2.22.0, Aura spec 2026-09-21 §4): observes `upgrader_package_options` (per-run token in `hook_extra`), `upgrader_pre_download` (`PHP_INT_MAX`: source + context under the token) and `upgrader_install_package_result` (the entry) for plugin/theme runs only; records and never decides. Ring of 200 entries / 90 days in `aura_worker_install_ledger` (+ `_state`), not autoloaded, network options on multisite; `report()` is `audit_agent_code`'s `installs`. `as_siteagent()` wraps the updater's three upgrader calls (self-update install, theme upgrade, and `upgrade_plugin_keeping_activation()` — the one generic plugin upgrade since 2.23.1). `auto_update` = `doing_action( 'wp_maybe_auto_update' )`, never the skin (EMCP Pro installs with `Automatic_Upgrader_Skin`) |
 
 ### Initialization Flow
 
@@ -128,7 +128,7 @@ All routes are under `/wp-json/aura/v1/`.
 | Method | Endpoint | Parameters | Description |
 |--------|----------|------------|-------------|
 | `POST` | `/update/core` | — | Update WordPress core |
-| `POST` | `/update/plugin` | `plugin` (required, string) | Update a specific plugin by file path (e.g. `akismet/akismet.php`) |
+| `POST` | `/update/plugin` | `plugin` (required, string) | Update a specific plugin by file path (e.g. `akismet/akismet.php`). Keeps an active plugin active (`reactivated`); `409 aura_use_self_update` for SiteAgent itself, `409 aura_no_update_offered`, `500 aura_update_failed` — see "Generic plugin updates keep the plugin active" |
 | `POST` | `/update/theme` | `theme` (required, string) | Update a specific theme by slug |
 | `POST` | `/update/translations` | — | Bulk update all translations |
 | `POST` | `/update/database` | — | Run `wp_upgrade()` / `dbDelta()` |
@@ -175,6 +175,54 @@ form and for an already-unbound site), `aura_ruleset_wrong_site` (403),
 and `app_password_probe_unproven: { count, at, owner }` (bounded, saturating) when a probe
 could not prove an Application Password gone. Both are always JSON **objects** — the key's
 presence is the signal, and the shape must not change with its contents.
+
+### Generic plugin updates keep the plugin active (2.23.1)
+
+`Plugin_Upgrader::upgrade()` hooks core's `deactivate_plugin_before_upgrade` at
+`upgrader_pre_install`, which silently deactivates the target whenever
+`wp_doing_cron()` is false — a REST request included. wp-admin pairs it with the
+skin's re-activation iframe; nothing on the REST path did, so every plugin updated
+through `/aura/v1/update/plugin`, `/aura/v2/update/batch` or `update_plugin_safely`
+came back **inactive** (on success, and on a failure after pre_install), and an
+update of SiteAgent itself removed every `aura/*` route.
+
+- **One call site.** `Aura_Worker_Updater::upgrade_plugin_keeping_activation()` is
+  the only generic `Plugin_Upgrader::upgrade()` call for plugins; `update_plugin()`
+  (inside `guarding_self()` + `heartbeat_during()`) and `update_single_plugin()`
+  (the batch entry) both go through it, under `Aura_Worker_Install_Ledger::as_siteagent()`.
+- **Activation.** It records `is_plugin_active()` and, on multisite,
+  `is_plugin_active_for_network()` before the upgrade; in a `finally` — success,
+  failure, a `WP_Error`, `null`/`false`, a throw — a plugin that was active and is
+  not now gets `activate_plugin( $f, '', $was_network, true )` (silent). A plugin
+  that was inactive is never activated. Results carry `reactivated` (true only when
+  re-activation was needed and succeeded) and `reactivation_error` (the activation
+  `WP_Error`'s message) when it failed; batch entries copy both.
+- **SiteAgent is refused.** `SELF_PLUGIN_FILE` answers
+  `{ success: false, code: aura_use_self_update }` (REST `409`, message pointing at
+  `POST /aura/v1/self-update`) and never reaches the upgrader or the refresh. The
+  refusal sits inside the work, so the multisite refusal
+  (`aura_self_update_multisite_unsupported`), the host refusal and the busy claim
+  (`in_progress: true`) keep their precedence. A batch refuses only that entry
+  (`status: failed`, `code`); the other entries run. There is no internal re-route
+  to `self_update()`. Note that a batch entry with `create_backup` still backs up
+  before the refusal (`batch_update_one()` backs up before it updates).
+- **The result.** `null` is `run()` failing (core's `$result` has no default and
+  run()'s `WP_Error` is discarded): `aura_update_failed`, `error` = "Update failed:"
+  plus the skin's reason (`get_errors()` where the skin has it, then the last three
+  `get_upgrade_messages()`), never "No update available". `false` is
+  `aura_no_update_offered` (REST `409`, not `500`). A `WP_Error` keeps its code and
+  message (REST `500`).
+- **The offer.** When `update_plugins->response[$f]` is missing, `wp_update_plugins()`
+  runs once and the transient is re-read before `upgrade()` (the GitHub-hosted
+  plugins' entries are injected at read time, by code that may not be loaded).
+  `offered_version` (the entry's `new_version`) is reported when there is an entry.
+- **Tests.** `UpdatePluginPreservesActivationTest`, `UpdatePluginSelfRefusalTest`,
+  `UpdatePluginResultMappingTest`, `RestUpdatePluginStatusTest`. Stubs:
+  `_upgrade_result` (upgrade()'s return; `null` is a failed run), `_upgrade_effect`
+  (receives the upgrader and the plugin file; models the pre_install deactivation),
+  `_upgrade_messages`, `_activate_plugin_calls` / `_activate_plugin_result`,
+  `_site_transients`, `_wp_update_plugins_effect`, and `_updater_calls` (the order of
+  `wp_update_plugins` and `Plugin_Upgrader::upgrade:<file>`).
 
 ### Plugin-file mutations on hosts that block `.php` writes (SA#95)
 
@@ -661,13 +709,13 @@ All options are cleaned up in `uninstall.php`.
 - **Always use `sanitize_text_field()`** or appropriate sanitizer on user input
 - **Always use `esc_attr()`, `esc_html()`, `esc_url()`** for output escaping
 - **Use `hash_equals()`** for all token/secret comparisons (timing-safe)
-- **Validate WordPress Upgrader return values thoroughly** — `Plugin_Upgrader::upgrade()` can return `true`, `false`, `null`, `WP_Error`, or an array depending on the outcome. Always check for `is_wp_error()`, `false === $result`, and `null === $result` before assuming success.
+- **Validate WordPress Upgrader return values thoroughly** — `Plugin_Upgrader::upgrade()` can return `true`, `false`, `null`, `WP_Error`, or an array depending on the outcome. Always check for `is_wp_error()`, `false === $result`, and `null === $result` before assuming success. For `upgrade()`, `false` means nothing is offered (no `update_plugins` entry; nothing touched) and `null` means `run()` failed — the reason is only in the skin. `upgrade()` also deactivates its target at pre_install; plugin upgrades go through `upgrade_plugin_keeping_activation()` (2.23.1).
 - **Use `wp_unslash()` before `sanitize_*()`** on `$_SERVER` values
 
 ### Error Handling
 
 - Return structured arrays from updater methods: `array( 'success' => bool, 'message' => string )` or `array( 'success' => false, 'error' => string )`
-- REST handlers wrap results in `WP_REST_Response` with appropriate HTTP status codes (200, 404, 500)
+- REST handlers wrap results in `WP_REST_Response` with appropriate HTTP status codes (200, 404, 409, 500) — a designated "nothing to do / wrong path" code is 409, not 500 (e.g. `aura_no_update_offered`, `aura_use_self_update` on `/update/plugin`)
 - Use `WP_Error` objects in security/permission callbacks — WordPress REST API will convert these to proper error responses
 
 ### Dependency Loading
