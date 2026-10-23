@@ -184,6 +184,7 @@ class Aura_Worker_Elementor_Door {
 		add_filter( 'wp_register_ability_args', array( __CLASS__, 'wrap_args' ), PHP_INT_MAX, 2 );
 		add_action( 'wp_abilities_api_init', array( __CLASS__, 'verify_coverage' ), PHP_INT_MAX );
 		add_filter( 'rest_request_before_callbacks', array( __CLASS__, 'close_transport' ), 2, 3 );
+		add_action( 'wp_before_execute_ability', array( __CLASS__, 'guard_execution' ), PHP_INT_MIN, 1 );
 		add_action( 'wp_insert_post', array( __CLASS__, 'observe_insert' ), 1, 3 );
 		add_action( 'elementor/global_classes/cleanup', array( __CLASS__, 'capture_class_cleanup' ), 1, 2 );
 	}
@@ -2867,6 +2868,51 @@ class Aura_Worker_Elementor_Door {
 				'status' => 503,
 				'reason' => self::$seam_reason,
 			)
+		);
+	}
+
+	/**
+	 * The transport-independent closure (2.23.2): an `elementor/*` write that
+	 * is about to run without our wrapper is refused, whatever route, server
+	 * or in-process caller asked for it.
+	 *
+	 * `close_transport()` closes only the routes it can name, and any MCP
+	 * server built on the WordPress MCP adapter runs the same registered
+	 * callback from a route of its own: Atarim 5.1.8 serves every registered
+	 * third-party ability on `/atarim/mcp`, and the adapter's default server,
+	 * Respira's adapter server and WP-CLI do the same. On a build where
+	 * coverage holds, those paths are governed already — the registered
+	 * callback IS the wrapper. This is the fail-closed half for the build
+	 * where it does not.
+	 *
+	 * `wp_before_execute_ability` fires in `WP_Ability::execute()` after the
+	 * permission check, on every path, and cannot return a refusal, so this
+	 * throws: the adapter catches it and answers the call with an error, and
+	 * nothing runs. The same predicate the replay asks (`wrapper_is_installed`,
+	 * Ruling P42) — so an `unavailable` seam closes every write, as it closes
+	 * both routes, and an ability whose stored callback is not our closure is
+	 * refused even where the seam was never checked. Reads (`READ_ALLOWLIST`)
+	 * are untouched here; the two routes still close them. Elementor's cookie
+	 * proxy never reaches `WP_Ability::execute()` (it calls the ability
+	 * object's own `execute_guarded()`), so the editor is unaffected.
+	 *
+	 * @param string $name The ability about to run.
+	 * @throws Aura_Worker_Door_Ungoverned_Exception When it would run ungoverned.
+	 */
+	public static function guard_execution( $name ) {
+		$name = (string) $name;
+		if ( 0 !== strpos( $name, 'elementor/' ) || in_array( $name, self::READ_ALLOWLIST, true ) ) {
+			return;
+		}
+		if ( ! self::active() ) {
+			return; // a door that does not exist is not closed
+		}
+		$ability = function_exists( 'wp_get_ability' ) ? wp_get_ability( $name ) : null;
+		if ( is_object( $ability ) && self::wrapper_is_installed( $name, $ability ) ) {
+			return;
+		}
+		throw new Aura_Worker_Door_Ungoverned_Exception(
+			esc_html__( 'Aura governs this door and cannot verify its coverage on this build; the door is closed until SiteAgent is updated', 'digitizer-site-worker' )
 		);
 	}
 

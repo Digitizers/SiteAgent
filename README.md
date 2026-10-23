@@ -17,7 +17,7 @@
   </a>
   <img src="https://img.shields.io/badge/WordPress-6.2%E2%80%937.1-21759b?logo=wordpress" alt="WordPress" />
   <img src="https://img.shields.io/badge/PHP-7.4%2B-777bb4?logo=php" alt="PHP" />
-  <img src="https://img.shields.io/badge/Stable-2.23.1-green" alt="Stable" />
+  <img src="https://img.shields.io/badge/Stable-2.23.2-green" alt="Stable" />
 </p>
 
 ---
@@ -238,6 +238,10 @@ These plug straight into **Aura's Fleet MCP Gateway**: read tools run on demand,
 ---
 
 ## Changelog
+
+### 2.23.2
+
+- **The door's fail-closed covers every transport.** `close_transport()`'s `503 aura_door_ungoverned` names only `/elementor/mcp` and the abilities server, but any MCP server built on the adapter runs the same registered callback from its own route — Atarim 5.1.8 serves every registered third-party ability on `/atarim/mcp` (references re-verification 2026-10-23 §1), and the adapter's default server, Respira's adapter server and WP-CLI do too. `guard_execution()` on core's `wp_before_execute_ability` (`PHP_INT_MIN`) now refuses an `elementor/*` write whose stored callback is not our wrapper, or any write while the seam is `unavailable` — the predicate the replay already asks (`wrapper_is_installed`, Ruling P42). The action cannot return a refusal, so it throws `Aura_Worker_Door_Ungoverned_Exception`, which the adapter answers as a tool error; nothing runs. Reads stay out of it, and the cookie proxy never reaches `WP_Ability::execute()`.
 
 ### 2.23.1
 
