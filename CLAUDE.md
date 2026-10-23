@@ -607,6 +607,17 @@ independent of the coverage seam: an agent is refused even when coverage is `ok`
 because coverage is exactly what this transport bypasses. A cookie session passes
 through untouched, so the editor's Global Classes / Variables UI keeps working.
 
+**And at execution, whatever the route (2.23.2).** `close_transport()` can close only the
+routes it names, but any MCP server built on the adapter runs the same registered callback
+from its own route (Atarim 5.1.8's `/atarim/mcp`, the adapter's default server, Respira's
+adapter server, WP-CLI). `guard_execution()` listens on core's `wp_before_execute_ability`
+at `PHP_INT_MIN` and throws `Aura_Worker_Door_Ungoverned_Exception` for an `elementor/*`
+write that `wrapper_is_installed()` (Ruling P42) does not vouch for — an `unavailable` seam,
+or a stored callback that is not our closure. The action cannot return a refusal; the
+adapter catches the throw and answers a tool error. Reads are left to the two routes, and
+the cookie proxy never reaches `WP_Ability::execute()`. The test stub's `WP_Ability::execute()`
+fires the action as core does.
+
 A refused proxy call is **counted, not logged** (2.19.1): it has no ability, actor or
 touches to write a log row from, so `close_transport()` bumps the `proxy_refused`
 counter — the same hourly `aura_worker_door_c_<name>_h<hour>` buckets, prune and

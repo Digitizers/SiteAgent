@@ -4,7 +4,7 @@ Tags: ai, automation, maintenance, updates, wordpress management
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.23.1
+Stable tag: 2.23.2
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -252,6 +252,9 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 7. Connections: provider connections (Cloudways, Cloudflare, Bunny, Hostinger, Vultr, xCloud) with resource counts, status, and credential-rotation reminders.
 
 == Changelog ==
+
+= 2.23.2 =
+* Security: when SiteAgent cannot confirm it governs Elementor's AI writes on a site, those writes are now refused on every connection, not only on Elementor's own two. Other plugins' MCP servers (Atarim 5.1.8, for one, which serves every installed plugin's abilities) run the same Elementor code, and could reach it while those two were closed. Reads, the Elementor editor and sites where coverage is confirmed are unaffected.
 
 = 2.23.1 =
 * Fix: updating a plugin through Aura no longer leaves it deactivated. WordPress switches a plugin off while it updates it, and only its own admin screen switches it back on; SiteAgent now turns an active plugin back on after the update, whether the update worked or failed. An inactive plugin stays inactive.

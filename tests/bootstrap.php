@@ -4521,6 +4521,7 @@ require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-door-blocked-exception
 // asks which pages a class deletion would rewrite (Ruling P32).
 require_once __DIR__ . '/elementor-class-stubs.php';
 require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-door-witness-exception.php';
+require_once SA_PLUGIN_DIR . '/includes/class-aura-worker-door-ungoverned-exception.php';
 require_once SA_PLUGIN_DIR . '/includes/class-elementor-door-governor.php';
 // The plugin's admin/settings class: registers settings and owns the token
 // regeneration handler (#67).
@@ -4868,6 +4869,9 @@ if ( ! class_exists( 'WP_Ability' ) ) {
 			if ( ! is_callable( $this->execute_callback ) ) {
 				return new WP_Error( 'ability_invalid_execute_callback', 'no callback' );
 			}
+			// Core fires this after the permission check (class-wp-ability.php,
+			// 6.9); the door's execution guard listens to it (2.23.2).
+			do_action( 'wp_before_execute_ability', $this->name, $input );
 			return call_user_func( $this->execute_callback, $input );
 		}
 		/** Core's public permission check (class-wp-ability.php:623), reduced. */

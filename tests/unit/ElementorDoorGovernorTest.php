@@ -811,6 +811,87 @@ final class ElementorDoorGovernorTest extends TestCase {
 	}
 
 	/* --------------------------------------------------------------- */
+	/* The execution guard — every transport (2.23.2)                  */
+	/* --------------------------------------------------------------- */
+
+	/**
+	 * Coverage failed: an Elementor write is refused at execution, whatever
+	 * route asked for it — the MCP adapter serves the same registered
+	 * callback from any server's route (Atarim 5.1.8's `/atarim/mcp`), which
+	 * `close_transport()` cannot name. An ability whose own wrapper is intact
+	 * is refused too: the seam is down, and the door is closed as a whole.
+	 */
+	public function test_coverage_failure_refuses_every_write_at_execution_whatever_the_route(): void {
+		$this->registerAll();
+		$this->breakCoverage();
+		$this->assertSame( 'unavailable', Aura_Worker_Elementor_Door::seam() );
+
+		foreach ( array( 'elementor/publish-document', 'elementor/manage-elements' ) as $slug ) {
+			try {
+				wp_get_ability( $slug )->execute( array( 'post_id' => 7 ) );
+				$this->fail( "$slug ran ungoverned" );
+			} catch ( Aura_Worker_Door_Ungoverned_Exception $e ) {
+				$this->assertStringContainsString( 'cannot verify its coverage', $e->getMessage() );
+			}
+			$this->assertArrayNotHasKey( $slug, $this->ran, "$slug: nothing ran" );
+		}
+	}
+
+	/** A read is not this guard's business: the two routes still close reads. */
+	public function test_the_execution_guard_lets_reads_through(): void {
+		$this->registerAll();
+		$this->breakCoverage();
+
+		$out = wp_get_ability( 'elementor/list-posts' )->execute( array() );
+
+		$this->assertSame( array( 'ok' => true, 'input' => array() ), $out );
+		$this->assertSame( 1, $this->ran['elementor/list-posts'] );
+	}
+
+	/**
+	 * A replaced callback is refused even before anything re-verified the
+	 * seam — the guard compares what is STORED, the way the replay does
+	 * (Ruling P42), not a cached verdict.
+	 */
+	public function test_a_replaced_callback_is_refused_without_a_reverification(): void {
+		$this->registerAll();
+		$this->assertSame( 'ok', Aura_Worker_Elementor_Door::seam() );
+		$obj  = wp_get_ability( 'elementor/manage-classes' );
+		$prop = new ReflectionProperty( WP_Ability::class, 'execute_callback' );
+		if ( PHP_VERSION_ID < 80100 ) {
+			$prop->setAccessible( true ); // a no-op since 8.1, deprecated in 8.5
+		}
+		$ran = false;
+		$prop->setValue(
+			$obj,
+			static function () use ( &$ran ) {
+				$ran = true;
+				return array( 'ok' => true );
+			}
+		);
+
+		$this->expectException( Aura_Worker_Door_Ungoverned_Exception::class );
+		try {
+			$obj->execute( array() );
+		} finally {
+			$this->assertFalse( $ran, 'the replacement never ran' );
+		}
+	}
+
+	/** Not Elementor's, or no door on this site: nothing to guard. */
+	public function test_the_execution_guard_ignores_other_abilities_and_doorless_sites(): void {
+		Aura_Worker_Elementor_Door::guard_execution( 'atarim/update-post' );
+		Aura_Worker_Elementor_Door::guard_execution( 'respira/update-page' );
+
+		$GLOBALS['_sa_force_door'] = false;
+		Aura_Worker_Elementor_Door::reset_for_tests();
+		$this->assertFalse( Aura_Worker_Elementor_Door::active() );
+		Aura_Worker_Elementor_Door::guard_execution( 'elementor/publish-document' );
+
+		$this->addToAssertionCount( 1 ); // none of the four threw
+	}
+
+	/* --------------------------------------------------------------- */
 	/* The cookie proxy — Elementor's own transport (2.19.0)           */
 	/* --------------------------------------------------------------- */
 
@@ -1312,6 +1393,7 @@ final class ElementorDoorGovernorTest extends TestCase {
 		$this->assertSame( PHP_INT_MAX, has_filter( 'wp_register_ability_args', array( 'Aura_Worker_Elementor_Door', 'wrap_args' ) ) );
 		$this->assertSame( PHP_INT_MAX, has_filter( 'wp_abilities_api_init', array( 'Aura_Worker_Elementor_Door', 'verify_coverage' ) ) );
 		$this->assertSame( 2, has_filter( 'rest_request_before_callbacks', array( 'Aura_Worker_Elementor_Door', 'close_transport' ) ), 'after open_frame at 1, before guard_core_any at 5' );
+		$this->assertSame( PHP_INT_MIN, has_filter( 'wp_before_execute_ability', array( 'Aura_Worker_Elementor_Door', 'guard_execution' ) ), 'first, before any other listener acts on the call' );
 		$this->assertSame( 1, has_filter( 'wp_insert_post', array( 'Aura_Worker_Elementor_Door', 'observe_insert' ) ) );
 		$this->assertSame( 1, has_filter( 'elementor/global_classes/cleanup', array( 'Aura_Worker_Elementor_Door', 'capture_class_cleanup' ) ) );
 	}
