@@ -683,4 +683,4 @@ statement reports it wrote the row.
 
 ---
 
-Built with ❤️ by [Digitizer](https://www.digitizer.co.il) for the [Aura](https://my-aura.app) ecosystem
+Built with ❤️ by [Digitizer](https://www.digitizer.studio) for the [Aura](https://my-aura.app) ecosystem

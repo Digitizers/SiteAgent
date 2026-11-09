@@ -141,7 +141,7 @@ Learn more at [my-aura.app/siteagent](https://my-aura.app/siteagent).
 
 = About Aura =
 
-Aura is a full-stack operations dashboard by [Digitizer](https://www.digitizer.co.il) that brings servers, applications, DNS zones, and CDN pull zones from Cloudways, Hostinger VPS, Cloudflare, and Bunny.net into a single unified interface.
+Aura is a full-stack operations dashboard by [Digitizer](https://digitizer.studio) that brings servers, applications, DNS zones, and CDN pull zones from Cloudways, Hostinger VPS, Cloudflare, and Bunny.net into a single unified interface.
 
 SiteAgent extends that reach into every WordPress installation — so you can manage your entire infrastructure, including WordPress sites, from one place.
 
@@ -154,7 +154,7 @@ The plugin is completely free and open source (GPLv2+). You need a free or paid 
 * [Aura Dashboard](https://my-aura.app)
 * [Documentation](https://my-aura.app/siteagent)
 * [GitHub Repository](https://github.com/Digitizers/SiteAgent)
-* [Digitizer](https://www.digitizer.co.il)
+* [Digitizer](https://digitizer.studio)
 
 == Installation ==
 
