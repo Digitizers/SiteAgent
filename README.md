@@ -17,7 +17,7 @@
   </a>
   <img src="https://img.shields.io/badge/WordPress-6.2%E2%80%937.1-21759b?logo=wordpress" alt="WordPress" />
   <img src="https://img.shields.io/badge/PHP-7.4%2B-777bb4?logo=php" alt="PHP" />
-  <img src="https://img.shields.io/badge/Stable-2.23.4-green" alt="Stable" />
+  <img src="https://img.shields.io/badge/Stable-2.23.5-green" alt="Stable" />
 </p>
 
 ---
@@ -238,6 +238,11 @@ These plug straight into **Aura's Fleet MCP Gateway**: read tools run on demand,
 ---
 
 ## Changelog
+
+### 2.23.5
+
+- **The Crocoblock bridge tests the plugin manager INSTANCE, not its class** (Aura#766). Live on dev.holylandmint with 2.23.4, JetSmartFilters registered with the dashboard and `Jet_Dashboard\\Plugin_Manager` was a loaded class — loaded with the dashboard's other files — while `Dashboard::$plugin_manager` was null and nothing was hooked on the update check. 2.23.3's `class_exists()` guard therefore skipped `init_managers()` and reported success. The bridge now reads `plugin_manager` (through `get_object_vars()`, so a non-public property reads as absent) and builds the managers only when it is missing, which also keeps them from being built twice.
+- **`update_plugin_safely` reports `vendor_updater`** (`crocoblock` or `null`) on a refusal, carried through the batch entry with `current_version`.
 
 ### 2.23.4
 

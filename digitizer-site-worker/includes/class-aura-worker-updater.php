@@ -1503,7 +1503,9 @@ class Aura_Worker_Updater {
 		} );
 		// 2.23.1: whether the plugin had to be turned back on, on success and
 		// failure alike.
-		foreach ( array( 'reactivated', 'reactivation_error' ) as $key ) {
+		// 2.23.5: and, on a missing offer, what was installed and which vendor
+		// updater was registered — so the tool's answer can say why.
+		foreach ( array( 'reactivated', 'reactivation_error', 'current_version', 'vendor_updater' ) as $key ) {
 			if ( array_key_exists( $key, $update_result ) ) {
 				$entry[ $key ] = $update_result[ $key ];
 			}

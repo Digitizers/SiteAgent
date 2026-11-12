@@ -4,7 +4,7 @@ Tags: ai, automation, maintenance, updates, wordpress management
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.23.4
+Stable tag: 2.23.5
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -252,6 +252,10 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 7. Connections: provider connections (Cloudways, Cloudflare, Bunny, Hostinger, Vultr, xCloud) with resource counts, status, and credential-rotation reminders.
 
 == Changelog ==
+
+= 2.23.5 =
+* Fix: updating Crocoblock plugins through Aura now works on real sites. 2.23.3 registered the plugin with Crocoblock's dashboard but could skip building its update checker, so still no update was offered.
+* A refused plugin update now says whether SiteAgent registered the plugin's own updater.
 
 = 2.23.4 =
 * When SiteAgent refuses to update plugins because the host seems to block PHP file writes, it now records which step failed (writing or deleting, a test file or a PHP file), so a mistaken refusal can be diagnosed from Aura without shell access.

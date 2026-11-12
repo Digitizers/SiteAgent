@@ -165,7 +165,7 @@ class Aura_Tool_Update_Plugin_Safely extends Aura_Tool_Base {
 				: null;
 		}
 
-		return array(
+		$out = array(
 			'success'              => $success,
 			'plugin_file'         => $plugin_file,
 			'previous_version'    => $previous_version,
@@ -175,6 +175,13 @@ class Aura_Tool_Update_Plugin_Safely extends Aura_Tool_Base {
 			'error'               => $error,
 			'code'                => $code,
 		);
+		// 2.23.5: a missing offer says which vendor updater was registered
+		// (`crocoblock`, or null for none), so a refusal shows whether the
+		// bridge ran (Aura#766).
+		if ( array_key_exists( 'vendor_updater', $plugin_result ) ) {
+			$out['vendor_updater'] = $plugin_result['vendor_updater'];
+		}
+		return $out;
 	}
 
 	/**

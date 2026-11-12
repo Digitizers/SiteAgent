@@ -25,9 +25,10 @@ final class VendorUpdaterBridgeTest extends TestCase {
 		$GLOBALS['_fs_method'] = 'ftpext';
 		$GLOBALS['_jet_calls'] = array();
 		require_once dirname( __DIR__ ) . '/fixtures/crocoblock-stubs.php';
-		// The offer appears only if the refresh can ask Crocoblock.
+		// The offer appears only if the refresh can ask Crocoblock: a BUILT
+		// plugin manager, not merely its loaded class.
 		$GLOBALS['_wp_update_plugins_effect'] = function () {
-			if ( class_exists( 'Jet_Dashboard\Plugin_Manager', false ) ) {
+			if ( is_object( \Jet_Dashboard\Dashboard::get_instance()->plugin_manager ) ) {
 				$GLOBALS['_site_transients']['update_plugins'] = (object) array(
 					'response' => array( self::JET => (object) array( 'new_version' => '3.9.1.1' ) ),
 				);
@@ -42,6 +43,50 @@ final class VendorUpdaterBridgeTest extends TestCase {
 		$this->assertSame( array( 'wp_update_plugins', 'Plugin_Upgrader::upgrade:' . self::JET ), $GLOBALS['_updater_calls'] );
 		$this->assertTrue( $res['success'] );
 		$this->assertSame( '3.9.1.1', $res['offered_version'] );
+	}
+
+	public function test_a_loaded_class_without_an_instance_still_builds_the_managers(): void {
+		// Live on dev.holylandmint (2.23.4): the class was loaded, no instance
+		// existed, and the class test skipped init_managers().
+		$GLOBALS['_jet_class_preloaded'] = true;
+		require dirname( __DIR__ ) . '/fixtures/crocoblock-plugin-manager.php';
+
+		$res = ( new Aura_Worker_Updater() )->update_plugin( self::JET );
+
+		$this->assertContains( 'init_managers', $GLOBALS['_jet_calls'] );
+		$this->assertTrue( $res['success'] );
+		$this->assertSame( '3.9.1.1', $res['offered_version'] );
+	}
+
+	public function test_a_built_plugin_manager_is_not_rebuilt(): void {
+		\Jet_Dashboard\Dashboard::get_instance()->registered[] = 'jet-engine/jet-engine.php';
+		\Jet_Dashboard\Dashboard::get_instance()->init_managers();
+		$GLOBALS['_jet_calls'] = array();
+
+		( new Aura_Worker_Updater() )->update_plugin( self::JET );
+
+		$this->assertNotContains( 'init_managers', $GLOBALS['_jet_calls'], 'init_managers() twice would double every hook' );
+	}
+
+	public function test_update_plugin_safely_says_which_vendor_updater_ran_when_nothing_is_offered(): void {
+		$GLOBALS['_installed_plugins'] = array( self::JET => array( 'Name' => 'JetEngine', 'Version' => '3.7.3' ) );
+		$GLOBALS['_upgrade_result']    = false;
+
+		$res = ( new Aura_Tool_Update_Plugin_Safely() )->execute( array( 'plugin_slug' => 'jet-engine', 'create_backup' => false ) );
+
+		$this->assertFalse( $res['success'] );
+		$this->assertSame( 'aura_no_update_offered', $res['code'] );
+		$this->assertSame( 'crocoblock', $res['vendor_updater'] );
+	}
+
+	public function test_update_plugin_safely_reports_no_vendor_updater_for_an_ordinary_plugin(): void {
+		$GLOBALS['_upgrade_result'] = false;
+
+		$res = ( new Aura_Tool_Update_Plugin_Safely() )->execute( array( 'plugin_slug' => 'akismet', 'create_backup' => false ) );
+
+		$this->assertSame( 'aura_no_update_offered', $res['code'] );
+		$this->assertArrayHasKey( 'vendor_updater', $res );
+		$this->assertNull( $res['vendor_updater'] );
 	}
 
 	public function test_an_offer_already_listed_needs_no_bridge(): void {

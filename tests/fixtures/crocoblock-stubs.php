@@ -3,7 +3,9 @@
  * A Crocoblock JetDashboard stand-in, shaped from JetEngine 3.9.1.1 (Aura#766):
  * a Jet plugin registers with the dashboard only from its jet_dashboard_init(),
  * which (unforced) does so only in wp-admin; `init_managers()` loads the plugin
- * manager only once something is registered. Loaded by
+ * manager only once something is registered. With `_jet_class_preloaded`
+ * the manager's CLASS is loaded up front and only the instance is missing — the
+ * state found live on dev.holylandmint (2.23.4). Loaded by
  * VendorUpdaterBridgeTest, in a separate process per test, because the plugin
  * manager's class cannot be unloaded.
  *
@@ -13,7 +15,8 @@
 namespace Jet_Dashboard {
 	class Dashboard {
 		private static $instance;
-		public $registered = array();
+		public $registered     = array();
+		public $plugin_manager = null;
 
 		public static function get_instance() {
 			if ( null === self::$instance ) {
@@ -29,14 +32,21 @@ namespace Jet_Dashboard {
 
 		public function init_managers() {
 			$GLOBALS['_jet_calls'][] = 'init_managers';
-			if ( $this->registered && ! class_exists( __NAMESPACE__ . '\Plugin_Manager', false ) ) {
+			if ( ! class_exists( __NAMESPACE__ . '\Plugin_Manager', false ) ) {
 				require __DIR__ . '/crocoblock-plugin-manager.php';
+			}
+			if ( $this->registered ) {
+				$this->plugin_manager = new Plugin_Manager();
 			}
 		}
 	}
 }
 
 namespace {
+	if ( ! empty( $GLOBALS['_jet_class_preloaded'] ) ) {
+		require_once __DIR__ . '/crocoblock-plugin-manager.php';
+	}
+
 	class SA_Test_Jet_Engine {
 		public function jet_dashboard_init( $force = false ) {
 			$GLOBALS['_jet_calls'][] = 'jet_dashboard_init:' . ( $force ? 'force' : 'plain' );

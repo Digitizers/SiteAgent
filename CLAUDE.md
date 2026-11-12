@@ -239,7 +239,10 @@ update of SiteAgent itself removed every `aura/*` route.
   `Jet_Dashboard\Dashboard` loaded, the folder-named accessor (`jet_engine()`)
   answering an object with `jet_dashboard_init()` — called with `true` (JetEngine
   honours `$force`; a method with no parameter ignores it) — then
-  `init_managers()` if `Jet_Dashboard\Plugin_Manager` was never loaded. A throw or
+  `init_managers()` when the dashboard holds no built `plugin_manager` — the
+  INSTANCE, never `class_exists()`: live (2.23.4) the class was loaded with the
+  dashboard's files while the instance was null, and a class test skipped the
+  build (fixed 2.23.5; the stub's `_jet_class_preloaded` models it). A throw or
   anything missing leaves the path unchanged. Never force an admin context
   instead: elementor-pro fatals there. WP Rocket's updater has no admin gate and
   needs nothing. `aura_no_update_offered` carries `current_version` (the installed
