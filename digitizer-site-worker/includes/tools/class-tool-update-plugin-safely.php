@@ -198,8 +198,12 @@ class Aura_Tool_Update_Plugin_Safely extends Aura_Tool_Base {
 	/**
 	 * Resolve a plugin slug to its plugin file path (folder/file.php).
 	 *
-	 * Tries exact match on folder name, then falls back to matching the slug
-	 * as a substring of the plugin file path.
+	 * Exact matches only (2.23.6): the folder name, the plugin file itself
+	 * (`akismet/akismet.php`), or a single-file plugin's basename (`hello` for
+	 * `hello.php`). The old fallback took the first plugin whose path merely
+	 * CONTAINED the slug, so a slug could resolve to a different plugin — and
+	 * on goldbuy.co.il, read mid-replace during a concurrent update, it
+	 * produced "imagifysimple-sitemap/simple-sitemap.php".
 	 *
 	 * @param string $slug Plugin slug.
 	 * @return string|null
@@ -207,16 +211,16 @@ class Aura_Tool_Update_Plugin_Safely extends Aura_Tool_Base {
 	private function resolve_plugin_file( $slug ) {
 		$all_plugins = get_plugins();
 
-		// Exact folder match: slug/slug.php or slug/anything.php.
+		if ( isset( $all_plugins[ $slug ] ) ) {
+			return $slug;
+		}
 		foreach ( $all_plugins as $file => $data ) {
 			if ( dirname( $file ) === $slug ) {
 				return $file;
 			}
 		}
-
-		// Partial match — slug appears in the file path.
 		foreach ( $all_plugins as $file => $data ) {
-			if ( false !== strpos( $file, $slug ) ) {
+			if ( false === strpos( $file, '/' ) && basename( $file, '.php' ) === $slug ) {
 				return $file;
 			}
 		}

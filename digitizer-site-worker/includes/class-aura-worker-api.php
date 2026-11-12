@@ -755,7 +755,7 @@ class Aura_Worker_API {
 		$status = 200;
 		if ( ! $result['success'] ) {
 			$code   = isset( $result['code'] ) ? (string) $result['code'] : '';
-			$status = in_array( $code, array( 'aura_no_update_offered', 'aura_use_self_update' ), true ) ? 409 : 500;
+			$status = in_array( $code, array( 'aura_no_update_offered', 'aura_use_self_update', 'aura_update_in_progress' ), true ) ? 409 : 500;
 		}
 		return new WP_REST_Response( Aura_Worker_Rules::with_warnings( $result ), $status );
 	}

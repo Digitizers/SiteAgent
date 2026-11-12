@@ -71,15 +71,36 @@ final class ToolTouchesTest extends TestCase {
 		);
 	}
 
-	/** A substring resolve_plugin_file() maps to akismet must declare plugin:akismet too. */
-	public function test_update_plugin_safely_normalises_a_resolved_substring(): void {
+	/**
+	 * A substring no longer resolves (2.23.6, Aura#766): it declares what was
+	 * asked, and the run refuses it rather than updating a different plugin.
+	 */
+	public function test_update_plugin_safely_does_not_resolve_a_substring(): void {
 		$GLOBALS['_installed_plugins'] = array( 'akismet/akismet.php' => array( 'Name' => 'Akismet' ) );
 		$tools = new Aura_Worker_Tools();
 		$tool  = $tools->get_tool( 'update_plugin_safely' );
 		$this->assertSame(
-			array( array( 'type' => 'plugin', 'id' => 'akismet' ) ),
+			array( array( 'type' => 'plugin', 'id' => 'akis' ) ),
 			$tool->touches( array( 'plugin_slug' => 'akis' ) ) // substring of akismet/akismet.php
 		);
+		$res = $tool->execute( array( 'plugin_slug' => 'akis', 'create_backup' => false ) );
+		$this->assertFalse( $res['success'] );
+		$this->assertNull( $res['plugin_file'] );
+		$this->assertNotContains( 'Plugin_Upgrader::upgrade', $GLOBALS['_mutations'] ?? array() );
+	}
+
+	/** The plugin file itself, and a single-file plugin's basename, resolve exactly. */
+	public function test_update_plugin_safely_resolves_a_file_path_and_a_single_file_plugin(): void {
+		$GLOBALS['_installed_plugins'] = array(
+			'akismet/akismet.php' => array( 'Name' => 'Akismet' ),
+			'hello.php'           => array( 'Name' => 'Hello Dolly' ),
+			'imagify/imagify.php' => array( 'Name' => 'Imagify' ),
+			'simple-sitemap/simple-sitemap.php' => array( 'Name' => 'Simple Sitemap' ),
+		);
+		$tool = ( new Aura_Worker_Tools() )->get_tool( 'update_plugin_safely' );
+		$this->assertSame( array( array( 'type' => 'plugin', 'id' => 'akismet' ) ), $tool->touches( array( 'plugin_slug' => 'akismet/akismet.php' ) ) );
+		$this->assertSame( array( array( 'type' => 'plugin', 'id' => 'hello' ) ), $tool->touches( array( 'plugin_slug' => 'hello' ) ) );
+		$this->assertSame( array( array( 'type' => 'plugin', 'id' => 'simple-sitemap' ) ), $tool->touches( array( 'plugin_slug' => 'simple-sitemap' ) ) );
 	}
 
 	/** A bare slug that resolves exactly still declares the normalised form. */

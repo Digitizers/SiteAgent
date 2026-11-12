@@ -1301,8 +1301,13 @@ final class SelfUpdateRecoveryTest extends TestCase {
 		$this->assertTrue( $self['in_progress'] );
 		$this->assertNotContains( 'Plugin_Upgrader::upgrade', $GLOBALS['_mutations'], 'SiteAgent must not have been upgraded while the claim is held' );
 
+		// 2.23.6 (Aura#766): another plugin waits too — every upgrader run
+		// shares wp-content/upgrade, which unpack_package() clears.
 		$other = $updater->update_plugin( 'akismet/akismet.php' );
-		$this->assertTrue( $other['success'], 'another plugin is not held up by the self-update claim' );
+		$this->assertFalse( $other['success'], 'another plugin waits on the same claim' );
+		$this->assertSame( 'aura_update_in_progress', $other['code'] );
+		$this->assertTrue( $other['in_progress'] );
+		$this->assertNotContains( 'Plugin_Upgrader::upgrade', $GLOBALS['_mutations'] );
 		$this->assertStringStartsWith( $holder . '|', (string) sa_read_option_uncached( Aura_Worker_Updater::SELF_UPDATE_LOCK ), 'the refused path must not release the claim' );
 	}
 
