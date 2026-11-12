@@ -13,6 +13,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 require_once __DIR__ . '/class-aura-worker-host-probe.php';
+require_once __DIR__ . '/class-aura-worker-vendor-updaters.php';
 
 class Aura_Worker_Updater {
 
@@ -1768,7 +1769,8 @@ class Aura_Worker_Updater {
 			return $this->self_target_refusal();
 		}
 
-		$offer = $this->offered_update( $plugin_file );
+		$offer  = $this->offered_update( $plugin_file );
+		$vendor = null;
 		if ( null === $offer ) {
 			// wp_update_plugins() returns early while last_checked is inside
 			// its timeout and no installed version changed (Codex r1 on #143),
@@ -1777,6 +1779,10 @@ class Aura_Worker_Updater {
 			// The key is WordPress core's, not this plugin's: named through a
 			// variable so UninstallCoverageTest counts it as an acknowledged
 			// foreign write, never as a key uninstall.php must sweep.
+			// A vendor updater that registers only in wp-admin (Crocoblock's
+			// JetDashboard) is registered first, or the refresh below never
+			// asks it (Aura#766).
+			$vendor   = Aura_Worker_Vendor_Updaters::prime( $plugin_file );
 			$core_key = 'update_plugins';
 			$stale    = get_site_transient( $core_key );
 			if ( is_object( $stale ) ) {
@@ -1819,10 +1825,16 @@ class Aura_Worker_Updater {
 				'error'   => $result->get_error_message(),
 			);
 		} elseif ( false === $result ) {
-			$out = array(
+			$current = $this->installed_version( $plugin_file );
+			$out     = array(
 				'success' => false,
 				'code'    => 'aura_no_update_offered',
-				'error'   => __( 'No update is offered for this plugin: WordPress\'s update list has no entry for it, even after a refresh. Nothing was changed.', 'digitizer-site-worker' ),
+				'error'   => null !== $current
+					/* translators: %s: the installed version */
+					? sprintf( __( 'No update is offered for this plugin (installed: %s): WordPress\'s update list has no entry for it, even after a refresh. Nothing was changed.', 'digitizer-site-worker' ), $current )
+					: __( 'No update is offered for this plugin: WordPress\'s update list has no entry for it, even after a refresh. Nothing was changed.', 'digitizer-site-worker' ),
+				'current_version' => $current,
+				'vendor_updater'  => $vendor,
 			);
 		} elseif ( null === $result ) {
 			$reason = $this->upgrade_failure_reason( $skin );

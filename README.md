@@ -17,7 +17,7 @@
   </a>
   <img src="https://img.shields.io/badge/WordPress-6.2%E2%80%937.1-21759b?logo=wordpress" alt="WordPress" />
   <img src="https://img.shields.io/badge/PHP-7.4%2B-777bb4?logo=php" alt="PHP" />
-  <img src="https://img.shields.io/badge/Stable-2.23.2-green" alt="Stable" />
+  <img src="https://img.shields.io/badge/Stable-2.23.3-green" alt="Stable" />
 </p>
 
 ---
@@ -238,6 +238,11 @@ These plug straight into **Aura's Fleet MCP Gateway**: read tools run on demand,
 ---
 
 ## Changelog
+
+### 2.23.3
+
+- **Crocoblock's updater is registered before the update check** (Aura#766). JetDashboard adds a Jet plugin's offer from `Jet_Dashboard\Plugin_Manager::check_update`, but the plugin registers with the dashboard only from its `jet_dashboard_init()`, which runs when `is_admin()` — so a REST update saw no offer, with an active licence, and answered `aura_no_update_offered`. `Aura_Worker_Vendor_Updaters::prime()` runs the plugin's own registration forced (its accessor function, named after the folder: `jet_engine()`), builds the dashboard's managers when the plugin manager was never loaded, and only then is the list forced stale and refreshed. Best-effort: a missing accessor, a missing method or a throw leaves the path as it was. Forcing an admin context is not an option — elementor-pro fatals there.
+- **`aura_no_update_offered` names the installed version** (`current_version`, and `installed: x.y` in the message), and reports `vendor_updater` (`crocoblock` or `null`).
 
 ### 2.23.2
 
