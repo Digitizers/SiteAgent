@@ -2,9 +2,9 @@
 /**
  * Vendor updaters that register only in wp-admin (Aura#766).
  *
- * Crocoblock's JetDashboard adds its plugins' offers to `update_plugins` from
- * `Jet_Dashboard\Plugin_Manager::check_update`, hooked on
- * `pre_set_site_transient_update_plugins` — but a Jet plugin registers itself
+ * Crocoblock's JetDashboard adds its plugins' offers to WordPress's update
+ * list from `Jet_Dashboard\Plugin_Manager::check_update`, run when core
+ * refreshes that list — but a Jet plugin registers itself
  * with the dashboard only from its `jet_dashboard_init()`, which runs on
  * `init` and only when `is_admin()`. SiteAgent's REST calls are not admin, so
  * the update list had no JetEngine entry even with an active licence, and the
@@ -13,7 +13,7 @@
  *
  * `prime()` registers the target plugin with the dashboard the way its own
  * admin boot would, and builds the dashboard's managers if the plugin manager
- * was never built, so the next `wp_update_plugins()` asks Crocoblock. It is
+ * was never built, so core's next refresh asks Crocoblock. It is
  * best-effort: anything missing or throwing leaves the update path exactly as
  * it was, and the outcome is reported, never raised.
  *
@@ -26,7 +26,7 @@ final class Aura_Worker_Vendor_Updaters {
 
 	/**
 	 * Register $plugin_file's vendor updater when it is one that only loads in
-	 * wp-admin. Call it before refreshing `update_plugins`.
+	 * wp-admin. Call it before core's update list is refreshed.
 	 *
 	 * @param string $plugin_file Plugin file, e.g. `jet-engine/jet-engine.php`.
 	 * @return string|null The vendor primed (`crocoblock`), or null when none
