@@ -69,6 +69,7 @@ To create an installable ZIP: `cd` to the repo root and run `zip -r digitizer-si
 | `Aura_Worker_Health` | `includes/class-aura-worker-health.php` | Builds site health report (PHP/DB/disk, recent error-log tail) |
 | `Aura_Worker_Rollback` | `includes/class-aura-worker-rollback.php` | Zip backup + restore of plugin directories |
 | `Aura_Worker_Host_Probe` | `includes/class-aura-worker-host-probe.php` | The SA#95 host write probe (`run()`), its recorded verdict (`recorded()`) and the refusal it maps to (`refusal()`) |
+| `Aura_Worker_Vendor_Updaters` | `includes/class-aura-worker-vendor-updaters.php` | 2.23.3 (Aura#766): `prime($plugin_file)` registers a vendor updater that loads only in wp-admin — Crocoblock's JetDashboard — before the missing-offer refresh; best-effort, returns the vendor primed or `null` |
 | `Aura_Worker_Magic_Link` | `includes/class-aura-worker-magic-link.php` | Short-lived one-time admin login links |
 | `Aura_Worker_MCP` | `includes/class-aura-worker-mcp.php` | MCP server endpoint + tool registration |
 | `Aura_Worker_Tools` | `includes/class-aura-worker-tools.php` | MCP tool base class (`Aura_Tool_Base`) + registry; individual tools live in `includes/tools/` |
@@ -232,6 +233,19 @@ update of SiteAgent itself removed every `aura/*` route.
   key, acknowledged as a foreign dynamic write in `UninstallCoverageTest` (the GitHub-hosted
   plugins' entries are injected at read time, by code that may not be loaded).
   `offered_version` (the entry's `new_version`) is reported when there is an entry.
+- **Admin-only vendor updaters (2.23.3, Aura#766).** Before forcing the list stale,
+  `Aura_Worker_Vendor_Updaters::prime()` registers the target with a vendor
+  updater that only loads in wp-admin. Today that is Crocoblock: a `jet-*` folder,
+  `Jet_Dashboard\Dashboard` loaded, the folder-named accessor (`jet_engine()`)
+  answering an object with `jet_dashboard_init()` — called with `true` (JetEngine
+  honours `$force`; a method with no parameter ignores it) — then
+  `init_managers()` if `Jet_Dashboard\Plugin_Manager` was never loaded. A throw or
+  anything missing leaves the path unchanged. Never force an admin context
+  instead: elementor-pro fatals there. WP Rocket's updater has no admin gate and
+  needs nothing. `aura_no_update_offered` carries `current_version` (the installed
+  header, `installed: x.y` in the message) and `vendor_updater`. Tests:
+  `VendorUpdaterBridgeTest` (separate processes — the plugin manager's class
+  cannot be unloaded).
 - **Tests.** `UpdatePluginPreservesActivationTest`, `UpdatePluginSelfRefusalTest`,
   `UpdatePluginResultMappingTest`, `RestUpdatePluginStatusTest`. Stubs:
   `_upgrade_result` (upgrade()'s return; `null` is a failed run), `_upgrade_effect`

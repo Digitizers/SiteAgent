@@ -4,7 +4,7 @@ Tags: ai, automation, maintenance, updates, wordpress management
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.23.2
+Stable tag: 2.23.3
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -252,6 +252,10 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 7. Connections: provider connections (Cloudways, Cloudflare, Bunny, Hostinger, Vultr, xCloud) with resource counts, status, and credential-rotation reminders.
 
 == Changelog ==
+
+= 2.23.3 =
+* Fix: Crocoblock plugins (JetEngine, JetSmartFilters and the other Jet plugins) can now be updated through Aura. Their updater registers only inside wp-admin, so an update requested by Aura found no update on offer even with an active licence. SiteAgent now registers it first, the way wp-admin does.
+* When no update is on offer, the answer now names the installed version.
 
 = 2.23.2 =
 * Security: when SiteAgent cannot confirm it governs Elementor's AI writes on a site, those writes are now refused on every connection, not only on Elementor's own two. Other plugins' MCP servers (Atarim 5.1.8, for one, which serves every installed plugin's abilities) run the same Elementor code, and could reach it while those two were closed. Reads, the Elementor editor and sites where coverage is confirmed are unaffected.
