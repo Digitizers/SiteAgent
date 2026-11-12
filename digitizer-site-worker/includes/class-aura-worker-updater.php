@@ -117,7 +117,10 @@ class Aura_Worker_Updater {
 		if ( false === $verdict ) {
 			$verdict = $this->host_php_writes_verdict();
 		}
-		return Aura_Worker_Host_Probe::refusal( $verdict );
+		// The verdict comes from the upgrade-directory probe, which records
+		// itself; its stage is that record's (SA#147).
+		$recorded = Aura_Worker_Host_Probe::recorded();
+		return Aura_Worker_Host_Probe::refusal( $verdict, $recorded['php_writes'] === $verdict ? $recorded['stage'] : null );
 	}
 
 	/**

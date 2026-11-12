@@ -17,7 +17,7 @@
   </a>
   <img src="https://img.shields.io/badge/WordPress-6.2%E2%80%937.1-21759b?logo=wordpress" alt="WordPress" />
   <img src="https://img.shields.io/badge/PHP-7.4%2B-777bb4?logo=php" alt="PHP" />
-  <img src="https://img.shields.io/badge/Stable-2.23.3-green" alt="Stable" />
+  <img src="https://img.shields.io/badge/Stable-2.23.4-green" alt="Stable" />
 </p>
 
 ---
@@ -238,6 +238,10 @@ These plug straight into **Aura's Fleet MCP Gateway**: read tools run on demand,
 ---
 
 ## Changelog
+
+### 2.23.4
+
+- **The host probe records the step it stopped at** (SA#147, Aura#766). `Aura_Worker_Host_Probe` keeps `stage` — `txt_write`, `txt_delete`, `php_write`, `php_delete` or `exception` — beside `php_writes` in `aura_worker_host_probe`; `/status`'s `host` block reports it (null for `ok` and for a record from before this version), and the updater's refusal carries it as `probe_stage`. On refineintelligence.com (WP Engine) every update was refused `aura_php_writes_blocked` while wp-admin updated the same plugins; which step failed is the first fact the fix needs. The plugins-directory probe a restore runs is unrecorded and unchanged.
 
 ### 2.23.3
 
