@@ -265,20 +265,112 @@ final class HostProbeTest extends TestCase {
 
 		$body = $this->statusBody();
 
-		$this->assertSame( array( 'php_writes' => 'blocked', 'checked_at' => 1760000000 ), $body['host'] );
-		$this->assertSame( '{"php_writes":"blocked","checked_at":1760000000}', wp_json_encode( $body['host'] ) );
+		$this->assertSame( array( 'php_writes' => 'blocked', 'checked_at' => 1760000000, 'stage' => null ), $body['host'], 'a pre-2.23.4 record has no stage' );
+		$this->assertSame( '{"php_writes":"blocked","checked_at":1760000000,"stage":null}', wp_json_encode( $body['host'] ) );
 	}
 
 	public function test_status_with_no_recorded_probe_reports_nulls(): void {
 		$body = $this->statusBody();
 
-		$this->assertSame( array( 'php_writes' => null, 'checked_at' => null ), $body['host'] );
+		$this->assertSame( array( 'php_writes' => null, 'checked_at' => null, 'stage' => null ), $body['host'] );
 	}
 
 	public function test_status_reads_a_malformed_record_as_not_recorded(): void {
 		update_option( 'aura_worker_host_probe', array( 'php_writes' => 'maybe', 'checked_at' => 'yesterday' ), false );
 
-		$this->assertSame( array( 'php_writes' => null, 'checked_at' => null ), $this->statusBody()['host'] );
+		$this->assertSame( array( 'php_writes' => null, 'checked_at' => null, 'stage' => null ), $this->statusBody()['host'] );
+	}
+
+	// SA#147: a failed probe says which step did not hold.
+
+	public function test_stage_php_write_when_the_php_file_cannot_be_created(): void {
+		$probe = $this->probeWith(
+			static function ( $path ) {
+				return self::isPhp( $path ) ? false : null;
+			}
+		);
+
+		$this->assertSame( 'blocked', $probe->run() );
+		$this->assertSame( 'php_write', $probe->stage() );
+		$this->assertSame( 'php_write', Aura_Worker_Host_Probe::recorded()['stage'] );
+	}
+
+	public function test_stage_php_delete_when_the_php_file_cannot_be_deleted(): void {
+		$probe = $this->probeWith(
+			null,
+			static function ( $path ) {
+				return self::isPhp( $path ) ? false : null;
+			}
+		);
+
+		$this->assertSame( 'blocked', $probe->run() );
+		$this->assertSame( 'php_delete', Aura_Worker_Host_Probe::recorded()['stage'] );
+	}
+
+	public function test_stage_txt_write_and_txt_delete(): void {
+		$probe = $this->probeWith(
+			static function () {
+				return false;
+			}
+		);
+		$this->assertSame( 'unwritable', $probe->run() );
+		$this->assertSame( 'txt_write', Aura_Worker_Host_Probe::recorded()['stage'] );
+
+		$probe = $this->probeWith(
+			null,
+			static function ( $path ) {
+				return self::isPhp( $path ) ? null : false;
+			}
+		);
+		$this->assertSame( 'unwritable', $probe->run() );
+		$this->assertSame( 'txt_delete', Aura_Worker_Host_Probe::recorded()['stage'] );
+	}
+
+	public function test_stage_exception_when_a_step_throws(): void {
+		$probe = $this->probeWith(
+			static function ( $path ) {
+				if ( self::isPhp( $path ) ) {
+					throw new RuntimeException( 'boom' );
+				}
+				return null;
+			}
+		);
+
+		$this->assertSame( 'blocked', $probe->run() );
+		$this->assertSame( 'exception', Aura_Worker_Host_Probe::recorded()['stage'] );
+	}
+
+	public function test_an_ok_probe_records_no_stage_even_after_a_failed_one(): void {
+		$failing = $this->probeWith(
+			static function ( $path ) {
+				return self::isPhp( $path ) ? false : null;
+			}
+		);
+		$failing->run();
+
+		$this->assertSame( 'ok', Aura_Worker_Updater::host_php_writes() );
+		$this->assertNull( Aura_Worker_Host_Probe::recorded()['stage'] );
+	}
+
+	public function test_status_reports_the_recorded_stage(): void {
+		update_option( 'aura_worker_host_probe', array( 'php_writes' => 'blocked', 'checked_at' => 1760000000, 'stage' => 'php_write' ), false );
+
+		$this->assertSame( 'php_write', $this->statusBody()['host']['stage'] );
+	}
+
+	public function test_an_unknown_stage_or_a_stage_on_ok_reads_as_null(): void {
+		update_option( 'aura_worker_host_probe', array( 'php_writes' => 'blocked', 'checked_at' => 1760000000, 'stage' => 'elsewhere' ), false );
+		$this->assertNull( Aura_Worker_Host_Probe::recorded()['stage'] );
+
+		update_option( 'aura_worker_host_probe', array( 'php_writes' => 'ok', 'checked_at' => 1760000000, 'stage' => 'php_write' ), false );
+		$this->assertNull( Aura_Worker_Host_Probe::recorded()['stage'] );
+	}
+
+	public function test_the_refusal_carries_the_stage_when_given_and_omits_it_otherwise(): void {
+		$this->assertSame( 'php_delete', Aura_Worker_Host_Probe::refusal( 'blocked', 'php_delete' )['probe_stage'] );
+		$this->assertArrayNotHasKey( 'probe_stage', Aura_Worker_Host_Probe::refusal( 'blocked' ) );
+		$this->assertArrayNotHasKey( 'probe_stage', Aura_Worker_Host_Probe::refusal( 'blocked', 'nonsense' ) );
+		$this->assertNull( Aura_Worker_Host_Probe::refusal( 'ok', 'php_write' ) );
 	}
 
 	public function test_status_never_runs_the_probe(): void {

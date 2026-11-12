@@ -32,6 +32,21 @@ class Aura_Worker_Host_Probe {
 	const UNWRITABLE = 'unwritable';
 
 	/**
+	 * The step a failed probe stopped at (Aura#766, SA#147): which of the
+	 * four operations did not hold, or `exception` when one threw. Recorded
+	 * beside the verdict and carried in the refusal, so a false positive can
+	 * be diagnosed from `/status` without shell access.
+	 */
+	const STAGES = array( 'txt_write', 'txt_delete', 'php_write', 'php_delete', 'exception' );
+
+	/**
+	 * The stage the last run() stopped at, or null for OK.
+	 *
+	 * @var string|null
+	 */
+	private $stage = null;
+
+	/**
 	 * Directory probed, with a trailing slash.
 	 *
 	 * @var string
@@ -90,13 +105,15 @@ class Aura_Worker_Host_Probe {
 	 * @return string One of OK, BLOCKED, UNWRITABLE.
 	 */
 	public function run() {
-		$created = array();
-		$verdict = self::UNWRITABLE;
+		$created     = array();
+		$verdict     = self::UNWRITABLE;
+		$this->stage = null;
 		try {
 			$verdict = $this->probe( $created );
 		} catch ( Throwable $e ) {
 			// $created says how far the probe got (see probe()).
-			$verdict = isset( $created['txt_proven'] ) ? self::BLOCKED : self::UNWRITABLE;
+			$verdict     = isset( $created['txt_proven'] ) ? self::BLOCKED : self::UNWRITABLE;
+			$this->stage = 'exception';
 		} finally {
 			unset( $created['txt_proven'] );
 			$this->cleanup( $created );
@@ -126,6 +143,7 @@ class Aura_Worker_Host_Probe {
 		$dir = $this->dir;
 		if ( ! is_dir( $dir ) ) {
 			if ( ! $this->record ) {
+				$this->stage = 'txt_write';
 				return self::UNWRITABLE; // only the upgrade directory is ours to create
 			}
 			wp_mkdir_p( $dir );
@@ -134,12 +152,14 @@ class Aura_Worker_Host_Probe {
 		$txt       = $dir . 'aura-php-probe-' . bin2hex( random_bytes( 8 ) ) . '.txt';
 		$created[] = $txt;
 		if ( ! $this->write_file( $txt, "Aura write probe\n" ) || ! $this->exists( $txt ) ) {
+			$this->stage = 'txt_write';
 			return self::UNWRITABLE;
 		}
 		// A delete is judged by looking again (round 1): a .txt file that
 		// stays is a directory PHP cannot clean up after itself in.
 		$this->delete_file( $txt );
 		if ( $this->exists( $txt ) ) {
+			$this->stage = 'txt_delete';
 			return self::UNWRITABLE;
 		}
 		$created['txt_proven'] = true;
@@ -147,10 +167,15 @@ class Aura_Worker_Host_Probe {
 		$php       = $dir . 'aura-php-probe-' . bin2hex( random_bytes( 8 ) ) . '.php';
 		$created[] = $php;
 		if ( ! $this->write_file( $php, "<?php // Aura write probe\n" ) || ! $this->exists( $php ) ) {
+			$this->stage = 'php_write';
 			return self::BLOCKED;
 		}
 		$this->delete_file( $php );
-		return $this->exists( $php ) ? self::BLOCKED : self::OK;
+		if ( $this->exists( $php ) ) {
+			$this->stage = 'php_delete';
+			return self::BLOCKED;
+		}
+		return self::OK;
 	}
 
 	/**
@@ -206,6 +231,7 @@ class Aura_Worker_Host_Probe {
 				array(
 					'php_writes' => $verdict,
 					'checked_at' => time(),
+					'stage'      => self::OK === $verdict ? null : $this->stage,
 				),
 				false
 			);
@@ -266,7 +292,10 @@ class Aura_Worker_Host_Probe {
 	 * The last recorded verdict, for `/status`. Reads the option only — never
 	 * probes. Anything malformed reads as not recorded.
 	 *
-	 * @return array{ php_writes: string|null, checked_at: int|null }
+	 * `stage` is the step a failed probe stopped at (STAGES), null for OK and
+	 * for a record written before 2.23.4.
+	 *
+	 * @return array{ php_writes: string|null, checked_at: int|null, stage: string|null }
 	 */
 	public static function recorded() {
 		$row     = get_option( self::OPTION, null );
@@ -274,10 +303,22 @@ class Aura_Worker_Host_Probe {
 			? $row['php_writes']
 			: null;
 		$at      = null !== $verdict && isset( $row['checked_at'] ) && is_int( $row['checked_at'] ) ? $row['checked_at'] : null;
+		$stage   = null !== $verdict && self::OK !== $verdict && isset( $row['stage'] ) && in_array( $row['stage'], self::STAGES, true ) ? $row['stage'] : null;
 		return array(
 			'php_writes' => $verdict,
 			'checked_at' => $at,
+			'stage'      => $stage,
 		);
+	}
+
+	/**
+	 * The stage the last run() of THIS probe stopped at, or null for OK or
+	 * before any run.
+	 *
+	 * @return string|null
+	 */
+	public function stage() {
+		return $this->stage;
 	}
 
 	/**
@@ -286,12 +327,28 @@ class Aura_Worker_Host_Probe {
 	 * Anything else that is not BLOCKED is treated as UNWRITABLE.
 	 *
 	 * @param string|null $verdict The probe's verdict.
-	 * @return array|null { success, code, error, in_progress, php_writes }
+	 * @param string|null $stage   The step the probe stopped at, when known;
+	 *                             carried as `probe_stage`.
+	 * @return array|null { success, code, error, in_progress, php_writes[, probe_stage] }
 	 */
-	public static function refusal( $verdict ) {
+	public static function refusal( $verdict, $stage = null ) {
 		if ( null === $verdict || self::OK === $verdict ) {
 			return null;
 		}
+		$out = self::refusal_body( $verdict );
+		if ( null !== $stage && in_array( $stage, self::STAGES, true ) ) {
+			$out['probe_stage'] = $stage;
+		}
+		return $out;
+	}
+
+	/**
+	 * The refusal body for a failed verdict, without the stage.
+	 *
+	 * @param string $verdict BLOCKED, or anything else (read as UNWRITABLE).
+	 * @return array
+	 */
+	private static function refusal_body( $verdict ) {
 		if ( self::BLOCKED === $verdict ) {
 			return array(
 				'success'     => false,

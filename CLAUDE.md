@@ -335,6 +335,8 @@ before stopping at the first `.php` one.
   updater, `new_updater()` on `update_plugin_safely`; the test stub's
   `get_filesystem_method()` reads `$GLOBALS['_fs_method']`.
 
+
+**The probe records where it stopped (2.23.4, SA#147).** `stage` — one of `STAGES` (`txt_write`, `txt_delete`, `php_write`, `php_delete`, `exception`) — is set by `probe()` at the step that did not hold, stored beside `php_writes` in `aura_worker_host_probe` (null for `ok`), read back by `recorded()` only when it is a known stage on a failed verdict, and reported in `/status`'s `host` block. `refusal( $verdict, $stage )` adds `probe_stage`; the updater passes the record's stage when the record's verdict is the one refusing. The restore's plugins-directory probe is unrecorded and passes none. Tests: `HostProbeTest` (stage cases).
 ### Agent read redaction (2.18.0, #419)
 
 Operator rules govern writes only, so a read used to hand an agent whatever the site
