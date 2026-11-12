@@ -68,15 +68,32 @@ final class Aura_Worker_Vendor_Updaters {
 		}
 		$plugin->jet_dashboard_init( true );
 
-		// The managers are built on `init` (priority -998). Outside admin the
-		// plugin manager's class was never loaded because nothing had
-		// registered; build them now that something has.
-		if ( ! class_exists( 'Jet_Dashboard\Plugin_Manager', false ) ) {
-			$dashboard = call_user_func( array( 'Jet_Dashboard\Dashboard', 'get_instance' ) );
-			if ( is_object( $dashboard ) && method_exists( $dashboard, 'init_managers' ) ) {
-				$dashboard->init_managers();
-			}
+		// The managers are built on `init` (priority -998); outside admin the
+		// plugin manager is not, though its CLASS is loaded with the
+		// dashboard's other files (live on dev.holylandmint, 2.23.4: class
+		// loaded, `plugin_manager` null, nothing hooked on the update check).
+		// So the INSTANCE is what is tested, never the class — which also
+		// keeps init_managers() from running twice and doubling every hook.
+		$dashboard = call_user_func( array( 'Jet_Dashboard\Dashboard', 'get_instance' ) );
+		if ( ! is_object( $dashboard ) ) {
+			return false;
 		}
-		return class_exists( 'Jet_Dashboard\Plugin_Manager', false );
+		if ( ! self::has_plugin_manager( $dashboard ) && method_exists( $dashboard, 'init_managers' ) ) {
+			$dashboard->init_managers();
+		}
+		return self::has_plugin_manager( $dashboard );
+	}
+
+	/**
+	 * Whether the dashboard holds a built plugin manager. Read through
+	 * get_object_vars(), so a property that is not public reads as absent
+	 * instead of throwing.
+	 *
+	 * @param object $dashboard The JetDashboard instance.
+	 * @return bool
+	 */
+	private static function has_plugin_manager( $dashboard ) {
+		$vars = get_object_vars( $dashboard );
+		return isset( $vars['plugin_manager'] ) && is_object( $vars['plugin_manager'] );
 	}
 }
