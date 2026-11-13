@@ -31,10 +31,18 @@ final class SiteContextPluginUpdatesTest extends TestCase {
 		$this->assertNotContains( 'wp_update_plugins', $GLOBALS['_updater_calls'] );
 	}
 
+	/** What core does around its request: stamp first, then ask. */
+	private static function wporg_answers( int $code ): void {
+		$GLOBALS['_site_transients']['update_plugins']->last_checked = self::NOW;
+		$response = 0 === $code ? new WP_Error( 'http', 'down' ) : array( 'response' => array( 'code' => $code ) );
+		do_action( 'http_api_debug', $response, 'response', 'Requests', array(), 'https://api.wordpress.org/plugins/update-check/1.1/' );
+	}
+
 	public function test_a_list_older_than_12_hours_is_refreshed_before_reporting(): void {
 		// The goldbuy case: the stored list says nothing is outdated, from days ago.
 		$GLOBALS['_site_transients']['update_plugins'] = self::list_checked( self::NOW - 5 * 86400 );
 		$GLOBALS['_wp_update_plugins_effect']          = function () {
+			self::wporg_answers( 200 );
 			$GLOBALS['_site_transients']['update_plugins'] = self::list_checked(
 				self::NOW,
 				array( 'a/a.php' => (object) array(), 'b/b.php' => (object) array() )
@@ -63,6 +71,26 @@ final class SiteContextPluginUpdatesTest extends TestCase {
 		$this->assertSame( self::NOW - 5 * 86400, $r['checked_at'] );
 	}
 
+	/** Codex r1 on #154: core stamps last_checked BEFORE asking; a failed ask is not a check. */
+	public function test_a_check_that_failed_reports_the_age_from_before_it_asked(): void {
+		foreach ( array( 0, 500, 429 ) as $code ) {
+			$GLOBALS['_site_transients']['update_plugins'] = self::list_checked( self::NOW - 5 * 86400 );
+			$GLOBALS['_wp_update_plugins_effect']          = function () use ( $code ) {
+				self::wporg_answers( $code );
+			};
+			$r = Aura_Tool_Site_Context::plugin_updates( self::NOW );
+			$this->assertFalse( $r['refreshed'], "code $code" );
+			$this->assertTrue( $r['refresh_failed'], "code $code" );
+			$this->assertSame( self::NOW - 5 * 86400, $r['checked_at'], "code $code" );
+		}
+	}
+
+	public function test_the_observer_is_removed_after_the_check(): void {
+		$GLOBALS['_site_transients']['update_plugins'] = self::list_checked( self::NOW - 5 * 86400 );
+		Aura_Tool_Site_Context::plugin_updates( self::NOW );
+		$this->assertEmpty( $GLOBALS['_filters']['http_api_debug'] ?? array() );
+	}
+
 	public function test_a_refresh_that_throws_keeps_the_old_list(): void {
 		$GLOBALS['_site_transients']['update_plugins'] = self::list_checked( self::NOW - 5 * 86400 );
 		$GLOBALS['_wp_update_plugins_effect']          = function () {
@@ -70,6 +98,7 @@ final class SiteContextPluginUpdatesTest extends TestCase {
 		};
 		$r = Aura_Tool_Site_Context::plugin_updates( self::NOW );
 		$this->assertFalse( $r['refreshed'] );
+		$this->assertTrue( $r['refresh_failed'] );
 		$this->assertSame( self::NOW - 5 * 86400, $r['checked_at'] );
 	}
 }

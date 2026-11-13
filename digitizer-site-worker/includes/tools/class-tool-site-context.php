@@ -301,6 +301,13 @@ class Aura_Tool_Site_Context extends Aura_Tool_Base {
 				'checked_at' => $report['checked_at'],
 			);
 		}
+		if ( $report['refresh_failed'] ) {
+			$issues[] = array(
+				'type'       => 'plugin_updates_unchecked',
+				'message'    => 'WordPress.org could not be reached to check for plugin updates; the plugin update list may be out of date.',
+				'checked_at' => $report['checked_at'],
+			);
+		}
 
 		return $issues;
 	}
@@ -313,11 +320,17 @@ class Aura_Tool_Site_Context extends Aura_Tool_Base {
 	 * returns early while the list is inside its timeout and no installed
 	 * version changed, so a fresh list costs no request. Only a stale or
 	 * missing one makes the outbound call to WordPress.org, bounded by core's
-	 * own timeout. A refresh that fails leaves the old list, and `checked_at`
-	 * says how old it is — never a list reported as current that is not.
+	 * own timeout.
+	 *
+	 * A refresh is judged by WordPress.org's ANSWER, never by the list's
+	 * `last_checked` (Codex r1 on #154): core stamps `last_checked = time()`
+	 * BEFORE it asks, so a failed request leaves an old `response` under a
+	 * new stamp. The answer is observed on `http_api_debug`; when the check
+	 * was asked and did not answer 200, the list is reported with the age it
+	 * had before, and `refresh_failed` says so.
 	 *
 	 * @param int|null $now Unix time; null for time().
-	 * @return array{ transient: object|false, checked_at: int|null, refreshed: bool }
+	 * @return array{ transient: object|false, checked_at: int|null, refreshed: bool, refresh_failed: bool }
 	 */
 	public static function plugin_updates( $now = null ) {
 		$now     = null === $now ? time() : (int) $now;
@@ -326,26 +339,43 @@ class Aura_Tool_Site_Context extends Aura_Tool_Base {
 		$checked = self::checked_at( $current );
 
 		$refreshed = false;
+		$failed    = false;
 		if ( null === $checked || $now - $checked > self::PLUGIN_UPDATES_MAX_AGE ) {
 			if ( ! function_exists( 'wp_update_plugins' ) && defined( 'ABSPATH' ) && defined( 'WPINC' ) ) {
 				require_once ABSPATH . WPINC . '/update.php';
 			}
 			if ( function_exists( 'wp_update_plugins' ) ) {
+				$answer   = null; // null: no update-check request was made.
+				$observer = function ( $response, $context, $class, $args, $url ) use ( &$answer ) {
+					if ( is_string( $url ) && false !== strpos( $url, 'api.wordpress.org/plugins/update-check' ) ) {
+						$answer = ! is_wp_error( $response ) && 200 === (int) wp_remote_retrieve_response_code( $response );
+					}
+				};
+				add_action( 'http_api_debug', $observer, 10, 5 );
 				try {
 					wp_update_plugins();
-					$refreshed = true;
-				} catch ( Throwable $e ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch
-					// The old list stands; checked_at says how old it is.
+				} catch ( Throwable $e ) {
+					$answer = false;
+				} finally {
+					remove_action( 'http_api_debug', $observer, 10 );
 				}
-				$current = get_site_transient( $key );
-				$checked = self::checked_at( $current );
+				if ( false === $answer ) {
+					// Asked, not answered: the stored response is still the old
+					// one, whatever stamp core wrote before asking.
+					$failed = true;
+				} else {
+					$refreshed = true;
+					$current   = get_site_transient( $key );
+					$checked   = self::checked_at( $current );
+				}
 			}
 		}
 
 		return array(
-			'transient'  => $current,
-			'checked_at' => $checked,
-			'refreshed'  => $refreshed,
+			'transient'      => $current,
+			'checked_at'     => $checked,
+			'refreshed'      => $refreshed,
+			'refresh_failed' => $failed,
 		);
 	}
 

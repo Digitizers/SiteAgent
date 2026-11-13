@@ -254,7 +254,7 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 == Changelog ==
 
 = 2.23.8 =
-* Fix: the site report no longer says plugins are up to date when WordPress's list of available updates is old. On a site where scheduled tasks do not run, that list could be days old, and the report showed 0 updates on sites many versions behind. The list is now checked again when it is more than 12 hours old, and the report says when it was last checked.
+* Fix: the site report no longer says plugins are up to date when WordPress's list of available updates is old. On a site where scheduled tasks do not run, that list could be days old, and the report showed 0 updates on sites many versions behind. The list is now checked again when it is more than 12 hours old, the report says when it was last checked, and it says so when WordPress.org could not be reached.
 
 = 2.23.7 =
 * New: after Aura updates Elementor, Elementor Pro, WooCommerce or JetEngine, SiteAgent says whether the plugin's database upgrade is still due, and Aura can run it. Before, the database was upgraded only the next time someone opened wp-admin.
