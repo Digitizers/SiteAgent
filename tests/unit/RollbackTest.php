@@ -240,6 +240,87 @@ final class RollbackTest extends TestCase {
 		$this->assertStringContainsString( "add_action( Aura_Worker_Rollback::MIGRATE_HOOK, array( 'Aura_Worker_Rollback', 'migrate_legacy_archives' ) )", $src );
 	}
 
+	/**
+	 * SA#160: make aura-backups/ unwritable to this process (left owned by
+	 * another user), or skip where permissions are not enforced (root).
+	 */
+	private function lockBase(): string {
+		$base = WP_CONTENT_DIR . '/aura-backups/';
+		if ( ! is_dir( $base ) ) {
+			mkdir( $base, 0777, true );
+		}
+		file_put_contents( $base . '.htaccess', 'Deny from all' );
+		file_put_contents( $base . 'index.php', '<?php' );
+		chmod( $base, 0555 );
+		clearstatcache();
+		if ( is_writable( $base ) ) {
+			chmod( $base, 0777 );
+			$this->markTestSkipped( 'permissions are not enforced for this user' );
+		}
+		return $base;
+	}
+
+	private function unlockBase(): void {
+		@chmod( WP_CONTENT_DIR . '/aura-backups/', 0777 );
+	}
+
+	/** SA#160: no private dir means no backup, never one in the guessable dir. */
+	public function test_an_unwritable_backup_dir_refuses_the_backup_instead_of_exposing_it(): void {
+		$base = $this->lockBase();
+		try {
+			$rollback = new Aura_Worker_Rollback();
+			$result   = $rollback->backup_plugin( $this->plugin_slug );
+
+			$this->assertFalse( $result['success'] );
+			$this->assertSame( 'aura_rollback_dir_unwritable', $result['code'] ?? null );
+			$this->assertSame( array(), glob( $base . '*.zip' ) ?: array() );
+		} finally {
+			$this->unlockBase();
+		}
+	}
+
+	/** SA#160: a legacy archive that could not be moved keeps a retry queued. */
+	public function test_an_unmoved_legacy_archive_keeps_a_retry_queued(): void {
+		$base = WP_CONTENT_DIR . '/aura-backups/';
+		mkdir( $base, 0777, true );
+		$name = $this->plugin_slug . '_2026-09-27_00-00-00-0a1b2c3d.zip';
+		file_put_contents( $base . $name, 'PK' );
+		touch( $base . $name, time() - DAY_IN_SECONDS );
+		$this->lockBase();
+		$GLOBALS['_scheduled'] = array();
+		try {
+			Aura_Worker_Rollback::migrate_legacy_archives();
+
+			$this->assertFileExists( $base . $name );
+			$this->assertContains( Aura_Worker_Rollback::MIGRATE_HOOK, array_column( (array) $GLOBALS['_scheduled'], 'hook' ) );
+		} finally {
+			$this->unlockBase();
+		}
+	}
+
+	/** SA#160: the exposure is reported, read-only. */
+	public function test_exposed_legacy_archives_are_reported_without_side_effects(): void {
+		$this->assertNull( Aura_Worker_Rollback::exposure_issue() );
+		$this->assertDirectoryDoesNotExist( WP_CONTENT_DIR . '/aura-backups', 'reading creates nothing' );
+
+		$base = WP_CONTENT_DIR . '/aura-backups/';
+		mkdir( $base, 0777, true );
+		file_put_contents( $base . $this->plugin_slug . '_2026-09-27_00-00-00-0a1b2c3d.zip', 'PK' );
+		file_put_contents( $base . 'unrelated.zip', 'PK' );
+
+		$issue = Aura_Worker_Rollback::exposure_issue();
+
+		$this->assertSame( 'rollback_backups_exposed', $issue['type'] ?? null );
+		$this->assertSame( 1, $issue['count'] );
+		$this->assertArrayHasKey( 'writable', $issue );
+		$this->assertSame( array(), glob( $base . 'rollback-*', GLOB_ONLYDIR ) ?: array(), 'reading creates nothing' );
+	}
+
+	public function test_site_context_reports_the_exposure(): void {
+		$src = file_get_contents( __DIR__ . '/../../digitizer-site-worker/includes/tools/class-tool-site-context.php' );
+		$this->assertStringContainsString( 'Aura_Worker_Rollback::exposure_issue()', $src );
+	}
+
 	public function test_backup_creates_zip_and_lists_it(): void {
 		$rollback = new Aura_Worker_Rollback();
 		$result   = $rollback->backup_plugin( $this->plugin_slug );

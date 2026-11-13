@@ -290,6 +290,15 @@ class Aura_Tool_Site_Context extends Aura_Tool_Base {
 			}
 		}
 
+		// SiteAgent's own rollback archives still where nginx serves them
+		// (SA#160): read-only, creates nothing.
+		if ( class_exists( 'Aura_Worker_Rollback' ) ) {
+			$exposed = Aura_Worker_Rollback::exposure_issue();
+			if ( null !== $exposed ) {
+				$issues[] = $exposed;
+			}
+		}
+
 		// Outdated plugins — from a list no older than PLUGIN_UPDATES_MAX_AGE.
 		$report                          = self::plugin_updates();
 		$plugin_updates                  = $report['transient'];

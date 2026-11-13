@@ -1521,7 +1521,9 @@ if ( ! function_exists( 'wp_mkdir_p' ) ) {
 		if ( ! empty( $GLOBALS['_wp_mkdir_p_throws'] ) ) {
 			throw new RuntimeException( 'wp_mkdir_p refused: ' . $dir );
 		}
-		return is_dir( $dir ) || mkdir( $dir, 0777, true );
+		// Core calls `@mkdir()`: a refusal is a `false` return, never a
+		// warning (PHPUnit 9 on PHP 7.4 turns a warning into an exception).
+		return is_dir( $dir ) || @mkdir( $dir, 0777, true );
 	}
 }
 
