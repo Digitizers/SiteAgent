@@ -77,7 +77,7 @@ final class SelfUpdateRecoveryTest extends TestCase {
 		delete_option( 'aura_worker_boot_nonce' );
 		delete_option( Aura_Worker_Updater::SELF_UPDATE_LOCK );
 		$this->rmdir( $this->dir );
-		foreach ( glob( WP_CONTENT_DIR . '/aura-backups/*.zip' ) ?: array() as $f ) {
+		foreach ( glob( WP_CONTENT_DIR . '/aura-backups/rollback-*/*.zip' ) ?: array() as $f ) {
 			unlink( $f );
 		}
 	}
@@ -301,7 +301,7 @@ final class SelfUpdateRecoveryTest extends TestCase {
 			$this->installNewBuild( false );
 			$this->diedInOurCode();
 			// Corrupt the only backup so extraction cannot succeed.
-			foreach ( glob( WP_CONTENT_DIR . '/aura-backups/*.zip' ) ?: array() as $f ) {
+			foreach ( glob( WP_CONTENT_DIR . '/aura-backups/rollback-*/*.zip' ) ?: array() as $f ) {
 				file_put_contents( $f, 'not a zip' );
 			}
 		};
@@ -321,7 +321,7 @@ final class SelfUpdateRecoveryTest extends TestCase {
 		$GLOBALS['_install_effect'] = function () {
 			$this->installNewBuild( false );
 			$this->diedInOurCode();
-			foreach ( glob( WP_CONTENT_DIR . '/aura-backups/*.zip' ) ?: array() as $f ) {
+			foreach ( glob( WP_CONTENT_DIR . '/aura-backups/rollback-*/*.zip' ) ?: array() as $f ) {
 				file_put_contents( $f, 'not a zip' );
 			}
 		};
@@ -343,7 +343,7 @@ final class SelfUpdateRecoveryTest extends TestCase {
 			$this->installNewBuild( false );
 			$this->diedInOurCode();
 			// Rewrite the backup so it restores a DIFFERENT version.
-			foreach ( glob( WP_CONTENT_DIR . '/aura-backups/*.zip' ) ?: array() as $f ) {
+			foreach ( glob( WP_CONTENT_DIR . '/aura-backups/rollback-*/*.zip' ) ?: array() as $f ) {
 				$zip = new ZipArchive();
 				$zip->open( $f, ZipArchive::OVERWRITE );
 				$zip->addFromString(
@@ -650,7 +650,7 @@ final class SelfUpdateRecoveryTest extends TestCase {
 		$GLOBALS['_install_result'] = false;
 		$GLOBALS['_install_effect'] = function () {
 			unlink( $this->dir . '/digitizer-site-worker.php' );
-			foreach ( glob( WP_CONTENT_DIR . '/aura-backups/*.zip' ) ?: array() as $f ) {
+			foreach ( glob( WP_CONTENT_DIR . '/aura-backups/rollback-*/*.zip' ) ?: array() as $f ) {
 				$zip = new ZipArchive();
 				$zip->open( $f, ZipArchive::OVERWRITE );
 				$zip->addFromString( 'digitizer-site-worker/digitizer-site-worker.php', $this->build( 'NEW BUILD', '7.7.7' ) );
@@ -918,7 +918,7 @@ final class SelfUpdateRecoveryTest extends TestCase {
 	}
 
 	private function backupsTaken(): array {
-		return glob( WP_CONTENT_DIR . '/aura-backups/*.zip' ) ?: array();
+		return glob( WP_CONTENT_DIR . '/aura-backups/rollback-*/*.zip' ) ?: array();
 	}
 
 	private function cleanupPackages(): void {

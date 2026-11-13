@@ -156,6 +156,24 @@ final class AuditPublicBackupsTest extends TestCase {
 		$this->assertSame( 'https://example.test/wordpress', $root['url'] );
 	}
 
+	/** SA#158: SiteAgent's own rollback archives live under wp-content/aura-backups/<private dir>/. */
+	public function test_walks_siteagents_own_backup_directory(): void {
+		$tool = new class() extends Aura_Tool_Audit_Public_Backups {
+			public function locs() {
+				return $this->locations();
+			}
+		};
+		$content = rtrim( (string) WP_CONTENT_DIR, '/\\' );
+		$found   = null;
+		foreach ( $tool->locs() as $loc ) {
+			if ( $content . '/aura-backups' === $loc['dir'] ) {
+				$found = $loc;
+			}
+		}
+		$this->assertNotNull( $found, 'aura-backups is walked' );
+		$this->assertGreaterThanOrEqual( 1, $found['depth'], 'deep enough to reach the private rollback directory' );
+	}
+
 	public function test_is_read_only(): void {
 		$a = ( new Aura_Tool_Audit_Public_Backups() )->get_annotations();
 		$this->assertTrue( $a['read_only'] );

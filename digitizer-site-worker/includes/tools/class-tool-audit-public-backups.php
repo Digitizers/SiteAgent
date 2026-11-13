@@ -40,7 +40,7 @@ class Aura_Tool_Audit_Public_Backups extends Aura_Tool_Base {
 	const BACKUP_SUFFIXES = array( '.wpress', '.sql', '.sql.gz', '.sql.zip', '.sql.bz2', '.tar', '.tar.gz', '.tgz', '.zip', '.gz', '.bak', '.daf', '.jpa' );
 
 	/** Directories plugins keep backups in, relative to WP_CONTENT_DIR. */
-	const BACKUP_DIRS = array( 'ai1wm-backups', 'updraft', 'backups-dup-lite', 'backups-dup-pro', 'backup-db', 'backups', 'backupwordpress', 'wpvividbackups', 'backup', 'uploads/backwpup' );
+	const BACKUP_DIRS = array( 'aura-backups', 'ai1wm-backups', 'updraft', 'backups-dup-lite', 'backups-dup-pro', 'backup-db', 'backups', 'backupwordpress', 'wpvividbackups', 'backup', 'uploads/backwpup' );
 
 	public function get_name() {
 		return 'audit_public_backups';

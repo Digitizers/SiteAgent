@@ -30,7 +30,7 @@ final class RollbackPrimitivesTest extends TestCase {
 	}
 
 	protected function tearDown(): void {
-		foreach ( glob( WP_CONTENT_DIR . '/aura-backups/' . $this->slug . '_*.zip' ) ?: array() as $f ) {
+		foreach ( array_merge( glob( WP_CONTENT_DIR . '/aura-backups/' . $this->slug . '_*.zip' ) ?: array(), glob( WP_CONTENT_DIR . '/aura-backups/rollback-*/' . $this->slug . '_*.zip' ) ?: array() ) as $f ) {
 			unlink( $f );
 		}
 		@chmod( WP_PLUGIN_DIR, 0777 );
@@ -259,7 +259,7 @@ final class RollbackPrimitivesTest extends TestCase {
 			$this->assertFalse( $res['success'] );
 			$this->assertSame(
 				array(),
-				glob( WP_CONTENT_DIR . '/aura-backups/' . $this->slug . '_*.zip' ) ?: array(),
+				array_merge( glob( WP_CONTENT_DIR . '/aura-backups/' . $this->slug . '_*.zip' ) ?: array(), glob( WP_CONTENT_DIR . '/aura-backups/rollback-*/' . $this->slug . '_*.zip' ) ?: array() ),
 				'an incomplete archive must not be left behind'
 			);
 		} finally {
@@ -285,7 +285,7 @@ final class RollbackPrimitivesTest extends TestCase {
 		try {
 			$res = ( new Aura_Worker_Rollback() )->backup_plugin( $this->slug );
 			$this->assertFalse( $res['success'] );
-			$this->assertSame( array(), glob( WP_CONTENT_DIR . '/aura-backups/' . $this->slug . '_*.zip' ) ?: array() );
+			$this->assertSame( array(), array_merge( glob( WP_CONTENT_DIR . '/aura-backups/' . $this->slug . '_*.zip' ) ?: array(), glob( WP_CONTENT_DIR . '/aura-backups/rollback-*/' . $this->slug . '_*.zip' ) ?: array() ) );
 		} finally {
 			chmod( $sub, 0777 );
 			unlink( $sub . '/inner.php' );
@@ -409,13 +409,13 @@ final class RollbackPrimitivesTest extends TestCase {
 		try {
 			$res = ( new Aura_Worker_Rollback() )->backup_plugin( $this->slug );
 			$this->assertFalse( $res['success'] );
-			$this->assertSame( array(), glob( WP_CONTENT_DIR . '/aura-backups/' . $this->slug . '_*.zip' ) ?: array(), 'no archive may hold the outside contents' );
+			$this->assertSame( array(), array_merge( glob( WP_CONTENT_DIR . '/aura-backups/' . $this->slug . '_*.zip' ) ?: array(), glob( WP_CONTENT_DIR . '/aura-backups/rollback-*/' . $this->slug . '_*.zip' ) ?: array() ), 'no archive may hold the outside contents' );
 
 			unlink( $this->dir . '/linked-dir' );
 			symlink( $outside . '/secret.txt', $this->dir . '/linked-file.php' );
 			$res = ( new Aura_Worker_Rollback() )->backup_plugin( $this->slug );
 			$this->assertFalse( $res['success'], 'a FILE link out of the tree copies the target bytes just the same' );
-			$this->assertSame( array(), glob( WP_CONTENT_DIR . '/aura-backups/' . $this->slug . '_*.zip' ) ?: array() );
+			$this->assertSame( array(), array_merge( glob( WP_CONTENT_DIR . '/aura-backups/' . $this->slug . '_*.zip' ) ?: array(), glob( WP_CONTENT_DIR . '/aura-backups/rollback-*/' . $this->slug . '_*.zip' ) ?: array() ) );
 		} finally {
 			foreach ( array( $this->dir . '/linked-dir', $this->dir . '/linked-file.php' ) as $l ) {
 				if ( is_link( $l ) ) {
@@ -435,7 +435,7 @@ final class RollbackPrimitivesTest extends TestCase {
 		try {
 			$res = ( new Aura_Worker_Rollback() )->backup_plugin( $this->slug );
 			$this->assertFalse( $res['success'] );
-			$this->assertSame( array(), glob( WP_CONTENT_DIR . '/aura-backups/' . $this->slug . '_*.zip' ) ?: array() );
+			$this->assertSame( array(), array_merge( glob( WP_CONTENT_DIR . '/aura-backups/' . $this->slug . '_*.zip' ) ?: array(), glob( WP_CONTENT_DIR . '/aura-backups/rollback-*/' . $this->slug . '_*.zip' ) ?: array() ) );
 		} finally {
 			unlink( $this->dir . '/loop' );
 		}

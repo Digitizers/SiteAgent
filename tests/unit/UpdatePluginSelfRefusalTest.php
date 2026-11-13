@@ -90,7 +90,7 @@ final class UpdatePluginSelfRefusalTest extends TestCase {
 						$this->rec[] = $plugin_slug;
 						return $this->ans;
 					}
-					public function cleanup_old_backups( $keep_per_plugin = 3 ) {}
+					public function cleanup_old_backups( $keep_per_plugin = 3, $keep_path = null ) {}
 				};
 			}
 		};

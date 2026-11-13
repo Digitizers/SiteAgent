@@ -35,7 +35,7 @@ SiteAgent is the official remote management agent for the [Aura Infrastructure H
 | **Site Health** | Real-time monitoring of WordPress & PHP versions, plugins, themes, and server health. |
 | **One-Click Updates** | Update WordPress core, plugins, and themes remotely from the Aura dashboard. |
 | **Safe Update Engine** | Chunked batch updates with health checks and automatic rollback on failure. |
-| **Per-Plugin Rollback** | Zip backups in `wp-content/aura-backups/` with one-shot restore. |
+| **Per-Plugin Rollback** | Zip backups in a private `wp-content/aura-backups/rollback-<random>/` directory (unguessable on nginx, which ignores `.htaccess`), the newest three per plugin, with one-shot restore. |
 | **MCP Tools Layer** | `/aura/mcp/` REST namespace exposing AI-agent-friendly tools with JSON schemas. |
 | **Magic Link Onboarding** | One-click connection from wp-admin to the Aura dashboard — HMAC-signed, no token copy/paste. |
 | **Maintenance** | Run database upgrades and translation updates across all sites. |
