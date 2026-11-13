@@ -2164,6 +2164,13 @@ class Aura_Worker_Updater {
 						'detail' => $refused['error'],
 						'code'   => $refused['code'],
 					);
+					// SA#147: a host refusal says what the probe found and
+					// where it stopped, so a reader needs no shell access.
+					foreach ( array( 'php_writes', 'probe_stage' ) as $field ) {
+						if ( isset( $refused[ $field ] ) ) {
+							$entry[ $field ] = $refused[ $field ];
+						}
+					}
 				} elseif ( $busy ) {
 					$entry = array(
 						'plugin' => $plugin_file,
