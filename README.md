@@ -17,7 +17,7 @@
   </a>
   <img src="https://img.shields.io/badge/WordPress-6.2%E2%80%937.1-21759b?logo=wordpress" alt="WordPress" />
   <img src="https://img.shields.io/badge/PHP-7.4%2B-777bb4?logo=php" alt="PHP" />
-  <img src="https://img.shields.io/badge/Stable-2.23.6-green" alt="Stable" />
+  <img src="https://img.shields.io/badge/Stable-2.23.7-green" alt="Stable" />
 </p>
 
 ---
@@ -238,6 +238,10 @@ These plug straight into **Aura's Fleet MCP Gateway**: read tools run on demand,
 ---
 
 ## Changelog
+
+### 2.23.7
+
+- **A plugin's own database upgrade, over MCP** (Aura#766). On goldbuy.co.il `update_plugin_safely` left Elementor 4.4.0 / Pro 4.4.0 files over a 4.2.3 / 4.2.2 database; the migration runs on the next wp-admin load, which an agent never makes. After a successful update the tool now reports `db_upgrade: { key, status: pending|not_needed|unknown, from, to }` (null when the plugin has no registered upgrade), judged by `Aura_Worker_Updater::db_upgrade_status()` from the NEW file header against the registry's new `db_option` — the request still runs the old build, so the version constants the registry's `pending` reads are stale. The new `run_plugin_db_upgrade` tool (`plugin_slug`, approval required) runs `update_database( $key )` — the dashboard's database action — and refuses any key that is not a registered migration, never falling through to core's `wp_upgrade`. The registry entries gain `file` and `db_option`.
 
 ### 2.23.6
 

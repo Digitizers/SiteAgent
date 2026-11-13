@@ -4,7 +4,7 @@ Tags: ai, automation, maintenance, updates, wordpress management
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.23.6
+Stable tag: 2.23.7
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -252,6 +252,9 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 7. Connections: provider connections (Cloudways, Cloudflare, Bunny, Hostinger, Vultr, xCloud) with resource counts, status, and credential-rotation reminders.
 
 == Changelog ==
+
+= 2.23.7 =
+* New: after Aura updates Elementor, Elementor Pro, WooCommerce or JetEngine, SiteAgent says whether the plugin's database upgrade is still due, and Aura can run it. Before, the database was upgraded only the next time someone opened wp-admin.
 
 = 2.23.6 =
 * Fix: plugin updates requested at the same time no longer run side by side. WordPress clears its shared upgrade folder before each update, so updates that overlapped broke each other ("Could not copy file"). SiteAgent now runs one plugin update at a time; another one requested meanwhile is refused as busy, changes nothing, and can be retried.

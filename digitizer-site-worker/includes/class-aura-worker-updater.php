@@ -2222,7 +2222,9 @@ class Aura_Worker_Updater {
 
 		$registry = array(
 			'elementor'     => array(
-				'label'   => 'Elementor',
+				'label'     => 'Elementor',
+				'file'      => 'elementor/elementor.php',
+				'db_option' => 'elementor_version',
 				'detect'  => function () {
 					return defined( 'ELEMENTOR_VERSION' ) && is_plugin_active( 'elementor/elementor.php' );
 				},
@@ -2259,7 +2261,9 @@ class Aura_Worker_Updater {
 				},
 			),
 			'elementor-pro' => array(
-				'label'   => 'Elementor Pro',
+				'label'     => 'Elementor Pro',
+				'file'      => 'elementor-pro/elementor-pro.php',
+				'db_option' => 'elementor_pro_version',
 				'detect'  => function () {
 					return defined( 'ELEMENTOR_PRO_VERSION' ) && is_plugin_active( 'elementor-pro/elementor-pro.php' );
 				},
@@ -2291,7 +2295,9 @@ class Aura_Worker_Updater {
 				},
 			),
 			'woocommerce'   => array(
-				'label'   => 'WooCommerce',
+				'label'     => 'WooCommerce',
+				'file'      => 'woocommerce/woocommerce.php',
+				'db_option' => 'woocommerce_db_version',
 				'detect'  => function () {
 					return defined( 'WC_VERSION' ) && is_plugin_active( 'woocommerce/woocommerce.php' );
 				},
@@ -2309,7 +2315,9 @@ class Aura_Worker_Updater {
 				},
 			),
 			'jet-engine'    => array(
-				'label'   => 'JetEngine (Crocoblock)',
+				'label'     => 'JetEngine (Crocoblock)',
+				'file'      => 'jet-engine/jet-engine.php',
+				'db_option' => 'jet_engine_db_version',
 				'detect'  => function () {
 					return defined( 'JET_ENGINE_VERSION' ) && is_plugin_active( 'jet-engine/jet-engine.php' );
 				},
@@ -2337,6 +2345,61 @@ class Aura_Worker_Updater {
 		 * @param array $registry Keyed array of migration entries.
 		 */
 		return apply_filters( 'aura_worker_migration_registry', $registry );
+	}
+
+	/**
+	 * Whether $plugin_file's own database upgrade is due, judged WITHOUT its
+	 * new code (2.23.7, Aura#766): right after an update the request still runs
+	 * the old build, so the version constants the registry's `pending` reads
+	 * are stale. The installed file's header is the new version; the
+	 * registry's `db_option` is what the plugin last migrated to.
+	 *
+	 * @param string $plugin_file Plugin file, e.g. `elementor/elementor.php`.
+	 * @return array|null { key, status: pending|not_needed|unknown, from, to },
+	 *                    or null when the plugin has no registered upgrade.
+	 */
+	public function db_upgrade_status( $plugin_file ) {
+		foreach ( $this->get_migration_registry() as $key => $entry ) {
+			if ( empty( $entry['file'] ) || empty( $entry['db_option'] ) || $entry['file'] !== $plugin_file ) {
+				continue;
+			}
+			$to   = $this->installed_version( $plugin_file );
+			$raw  = get_option( $entry['db_option'], null );
+			$from = is_scalar( $raw ) && '' !== (string) $raw ? (string) $raw : null;
+			if ( null === $to ) {
+				$status = 'unknown';
+			} else {
+				$status = ( null === $from || version_compare( $from, $to, '<' ) ) ? 'pending' : 'not_needed';
+			}
+			return array(
+				'key'    => (string) $key,
+				'status' => $status,
+				'from'   => $from,
+				'to'     => $to,
+			);
+		}
+		return null;
+	}
+
+	/**
+	 * Whether $key names a registered plugin migration.
+	 *
+	 * @param string $key Registry key.
+	 * @return bool
+	 */
+	public function has_migration( $key ) {
+		return is_string( $key ) && '' !== $key && array_key_exists( $key, $this->get_migration_registry() );
+	}
+
+	/**
+	 * The plugin file a registry key names, or null.
+	 *
+	 * @param string $key Registry key.
+	 * @return string|null
+	 */
+	public function migration_file( $key ) {
+		$registry = $this->get_migration_registry();
+		return isset( $registry[ $key ]['file'] ) && is_string( $registry[ $key ]['file'] ) ? $registry[ $key ]['file'] : null;
 	}
 
 	/**
