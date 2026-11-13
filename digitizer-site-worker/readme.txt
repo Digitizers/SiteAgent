@@ -4,7 +4,7 @@ Tags: ai, automation, maintenance, updates, wordpress management
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.23.9
+Stable tag: 2.24.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -94,6 +94,7 @@ Read tools:
 * `scan_executable_files` — Uploads-directory observations: PHP/executable files, .htaccess overrides, and symlinks (reported, never followed)
 * `audit_admin_accounts` — Privileged-account facts: administrators with recency, admin capabilities outside the role, application-password counts, multisite super admins
 * `audit_cron` — Bounded WP-Cron inventory with sub-60-second-schedule and unresolved-callback fact-flags
+* `audit_public_backups` — Full-site backups and database dumps left inside the webroot, and whether the site serves them
 * `audit_mcp_exposure` — Which other MCP servers are registered on this site, and how many abilities pass the discovery rule such a server applies (abilities are registered site-wide, not per-plugin, so a server resolving targets from that registry picks up mutating ones outside SiteAgent's approval path). The counts describe the abilities, not what any server currently serves. Reports only; changes nothing
 * `audit_agent_code` — Executable code an AI agent authored or can author on this site: Angie code snippets (recorded, agent-authored, live per environment), the SiteAgent Power Pack's execute-php / file-write / wp-cli flags, and third-party exec stores. Counts and presence only; never file contents, never a verdict. Reports only; changes nothing
 * `audit_rules` — Whether a signed operator ruleset is present and how old it is, 24h block/warn counts, expired-but-listed rules, and the enforcement points in this build. Reports only; changes nothing
@@ -252,6 +253,9 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 7. Connections: provider connections (Cloudways, Cloudflare, Bunny, Hostinger, Vultr, xCloud) with resource counts, status, and credential-rotation reminders.
 
 == Changelog ==
+
+= 2.24.0 =
+* New: a security check for full-site backups and database dumps left where the web server can serve them (All-in-One WP Migration, UpdraftPlus, Duplicator, .sql files and archives). It reports each file's name, size and date, and whether the site actually serves it, without reading any contents. Found on three sites during a fleet update round.
 
 = 2.23.9 =
 * Fix: when a host does not let SiteAgent write plugin files, the refusal now says which step of the check failed. Before, the step was recorded on the site but left out of the answer, so finding it took shell access.
