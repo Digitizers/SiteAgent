@@ -13,6 +13,32 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 class Aura_Tool_Site_Context extends Aura_Tool_Base {
 
+	/**
+	 * How old WordPress's stored plugin-update list may be before this report
+	 * asks WordPress.org again (SA#151): the same 12 hours wp_update_plugins()
+	 * itself waits between checks. A site whose wp-cron does not run keeps an
+	 * old list for ever, and the report then said "0 updates" on sites that were
+	 * 17 versions behind.
+	 */
+	const PLUGIN_UPDATES_MAX_AGE = 43200;
+
+	/**
+	 * A failed check's record, so LATER reports stay honest too (Codex r1 on
+	 * #154): `{ stamped, before }` — the `last_checked` core wrote before the
+	 * request that failed, and the age the list really had. While the list
+	 * still carries that stamp, it is reported with `before` and as unchecked.
+	 * Autoload off.
+	 */
+	const FAILED_CHECK_OPTION = 'aura_worker_plugin_updates_failed_check';
+
+	/**
+	 * When the plugin-update list this run reported from was built (its
+	 * `last_checked`), or null when WordPress has none. Set by detect_issues().
+	 *
+	 * @var int|null
+	 */
+	private $plugin_updates_checked_at = null;
+
 	public function get_name() {
 		return 'get_site_context';
 	}
@@ -52,6 +78,7 @@ class Aura_Tool_Site_Context extends Aura_Tool_Base {
 			'plugins'           => 'array|null — plugin list (when include_plugins=true)',
 			'performance'       => 'array|null — memory, opcache, max_execution (when include_performance=true)',
 			'issues'            => 'array — detected issues (outdated PHP, pending WP update, outdated plugins)',
+			'plugin_updates_checked_at' => 'int|null — when the plugin-update list was last checked against WordPress.org (Unix time); refreshed first when older than 12 hours',
 		);
 	}
 
@@ -156,6 +183,7 @@ class Aura_Tool_Site_Context extends Aura_Tool_Base {
 			'plugins'        => $plugins,
 			'performance'    => $performance,
 			'issues'         => $issues,
+			'plugin_updates_checked_at' => $this->plugin_updates_checked_at,
 			'generated_at'   => gmdate( 'c' ),
 		);
 	}
@@ -262,9 +290,11 @@ class Aura_Tool_Site_Context extends Aura_Tool_Base {
 			}
 		}
 
-		// Outdated plugins.
-		$plugin_updates = get_site_transient( 'update_plugins' );
-		if ( ! empty( $plugin_updates->response ) ) {
+		// Outdated plugins — from a list no older than PLUGIN_UPDATES_MAX_AGE.
+		$report                          = self::plugin_updates();
+		$plugin_updates                  = $report['transient'];
+		$this->plugin_updates_checked_at = $report['checked_at'];
+		if ( is_object( $plugin_updates ) && ! empty( $plugin_updates->response ) ) {
 			$outdated_count = count( $plugin_updates->response );
 			$outdated_names = array();
 			foreach ( $plugin_updates->response as $file => $data ) {
@@ -275,11 +305,124 @@ class Aura_Tool_Site_Context extends Aura_Tool_Base {
 			$issues[] = array(
 				'type'    => 'outdated_plugins',
 				'message' => "$outdated_count plugin(s) have available updates.",
-				'count'   => $outdated_count,
-				'plugins' => $outdated_names,
+				'count'      => $outdated_count,
+				'plugins'    => $outdated_names,
+				'checked_at' => $report['checked_at'],
+			);
+		}
+		if ( $report['refresh_failed'] ) {
+			$issues[] = array(
+				'type'       => 'plugin_updates_unchecked',
+				'message'    => 'WordPress.org could not be reached to check for plugin updates; the plugin update list may be out of date.',
+				'checked_at' => $report['checked_at'],
 			);
 		}
 
 		return $issues;
+	}
+
+	/**
+	 * WordPress's plugin-update list, refreshed first when it is older than
+	 * PLUGIN_UPDATES_MAX_AGE or missing (SA#151).
+	 *
+	 * The refresh is wp_update_plugins() itself, which keeps its own rules: it
+	 * returns early while the list is inside its timeout and no installed
+	 * version changed, so a fresh list costs no request. Only a stale or
+	 * missing one makes the outbound call to WordPress.org, bounded by core's
+	 * own timeout.
+	 *
+	 * A refresh is judged by WordPress.org's ANSWER, never by the list's
+	 * `last_checked` (Codex r1 on #154): core stamps `last_checked = time()`
+	 * BEFORE it asks, so a failed request leaves an old `response` under a
+	 * new stamp. The answer is observed on `http_api_debug`; when the check
+	 * was asked and did not answer 200, the list is reported with the age it
+	 * had before, and `refresh_failed` says so.
+	 *
+	 * @param int|null $now Unix time; null for time().
+	 * @return array{ transient: object|false, checked_at: int|null, refreshed: bool, refresh_failed: bool }
+	 */
+	public static function plugin_updates( $now = null ) {
+		$now     = null === $now ? time() : (int) $now;
+		$key     = 'update_plugins';
+		$current = get_site_transient( $key );
+		$checked = self::checked_at( $current );
+
+		$refreshed    = false;
+		$failed       = false;
+		$prior_failed = false;
+
+		// A stamp left by a check that failed earlier is not a check: report
+		// the age the list really has, and judge freshness by it.
+		$record = get_option( self::FAILED_CHECK_OPTION, null );
+		if ( is_array( $record ) && isset( $record['stamped'] ) && null !== $checked ) {
+			if ( (int) $record['stamped'] === $checked ) {
+				$checked      = isset( $record['before'] ) && is_numeric( $record['before'] ) ? (int) $record['before'] : null;
+				$failed       = true;
+				$prior_failed = true;
+			} else {
+				delete_option( self::FAILED_CHECK_OPTION ); // a real check has happened since
+			}
+		}
+		if ( null === $checked || $now - $checked > self::PLUGIN_UPDATES_MAX_AGE ) {
+			if ( ! function_exists( 'wp_update_plugins' ) && defined( 'ABSPATH' ) && defined( 'WPINC' ) ) {
+				require_once ABSPATH . WPINC . '/update.php';
+			}
+			if ( function_exists( 'wp_update_plugins' ) ) {
+				$answer   = null; // null: no update-check request was made.
+				$observer = function ( $response, $context, $class, $args, $url ) use ( &$answer ) {
+					if ( is_string( $url ) && false !== strpos( $url, 'api.wordpress.org/plugins/update-check' ) ) {
+						$answer = ! is_wp_error( $response ) && 200 === (int) wp_remote_retrieve_response_code( $response );
+					}
+				};
+				add_action( 'http_api_debug', $observer, 10, 5 );
+				try {
+					wp_update_plugins();
+				} catch ( Throwable $e ) {
+					$answer = false;
+				} finally {
+					remove_action( 'http_api_debug', $observer, 10 );
+				}
+				if ( false === $answer ) {
+					// Asked, not answered: the stored response is still the old
+					// one, whatever stamp core wrote before asking. Remember that
+					// stamp, so the next report inside core's timeout — which
+					// will not ask again — does not read it as a real check.
+					$failed  = true;
+					$stamped = self::checked_at( get_site_transient( $key ) );
+					if ( null !== $stamped && $stamped !== $checked ) {
+						update_option( self::FAILED_CHECK_OPTION, array( 'stamped' => $stamped, 'before' => $checked ), false );
+					}
+				} elseif ( null === $answer && $prior_failed ) {
+					// Core is still inside the timeout its failed attempt
+					// stamped, so it did not ask: the earlier failure stands.
+					$failed = true;
+				} else {
+					$refreshed = true;
+					$failed    = false;
+					$current   = get_site_transient( $key );
+					$checked   = self::checked_at( $current );
+					delete_option( self::FAILED_CHECK_OPTION );
+				}
+			}
+		}
+
+		return array(
+			'transient'      => $current,
+			'checked_at'     => $checked,
+			'refreshed'      => $refreshed,
+			'refresh_failed' => $failed,
+		);
+	}
+
+	/**
+	 * The list's own `last_checked`, or null when it has none.
+	 *
+	 * @param mixed $transient The `update_plugins` site transient.
+	 * @return int|null
+	 */
+	private static function checked_at( $transient ) {
+		return is_object( $transient ) && isset( $transient->last_checked ) && is_numeric( $transient->last_checked ) && (int) $transient->last_checked > 0
+			? (int) $transient->last_checked
+			: null;
 	}
 }
