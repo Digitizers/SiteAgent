@@ -92,6 +92,7 @@ final class RollbackTest extends TestCase {
 		$dir      = $rollback->get_backup_dir();
 		foreach ( array( '01', '02', '03', '04' ) as $d ) {
 			file_put_contents( $dir . $this->plugin_slug . '_2026-11-' . $d . '_00-00-00-0a1b2c3d.zip', 'PK' );
+			touch( $dir . $this->plugin_slug . '_2026-11-' . $d . '_00-00-00-0a1b2c3d.zip', time() - HOUR_IN_SECONDS );
 		}
 		file_put_contents( $dir . 'other_2026-11-01_00-00-00-0a1b2c3d.zip', 'PK' );
 
@@ -110,6 +111,7 @@ final class RollbackTest extends TestCase {
 		// alone would prune the new one (a same-second tie behaves the same).
 		foreach ( array( '01', '02', '03' ) as $d ) {
 			file_put_contents( $dir . $this->plugin_slug . '_2099-01-' . $d . '_00-00-00-0a1b2c3d.zip', 'PK' );
+			touch( $dir . $this->plugin_slug . '_2099-01-' . $d . '_00-00-00-0a1b2c3d.zip', time() - HOUR_IN_SECONDS );
 		}
 
 		$result = $rollback->backup_plugin( $this->plugin_slug );
@@ -218,6 +220,19 @@ final class RollbackTest extends TestCase {
 		$rollback->backup_plugin( $this->plugin_slug );
 
 		$this->assertFileExists( $legacy . $fresh, 'an in-flight updater may still need it' );
+	}
+
+	/** Codex P2 round 4 on #159: retention never deletes an archive an in-flight update may hold. */
+	public function test_retention_never_deletes_a_recent_archive(): void {
+		$rollback = new Aura_Worker_Rollback();
+		$taken    = $rollback->backup_plugin( $this->plugin_slug ); // e.g. a self-update's recovery archive
+		// Sorts oldest by name (taken a while ago in the same update), still fresh on disk.
+		$held = $rollback->get_backup_dir() . $this->plugin_slug . '_2026-01-01_00-00-00-0a1b2c3d.zip';
+		rename( $taken['backup_path'], $held );
+		for ( $i = 0; $i < 3; $i++ ) {
+			$rollback->backup_plugin( $this->plugin_slug ); // backup-only calls meanwhile
+		}
+		$this->assertFileExists( $held );
 	}
 
 	public function test_the_retry_hook_is_wired(): void {

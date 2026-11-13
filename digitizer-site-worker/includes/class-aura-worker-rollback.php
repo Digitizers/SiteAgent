@@ -156,17 +156,17 @@ class Aura_Worker_Rollback {
 	}
 
 	/**
-	 * Whether $path is a legacy archive still inside its grace window: an
-	 * in-flight self-update may need it, so retention never deletes it.
+	 * Whether $path is younger than the grace window (Codex rounds 3 and 4 on
+	 * #159). Retention never deletes such an archive, wherever it lives: an
+	 * in-flight update or self-update — this build's or an older class
+	 * already loaded in another request — may still hold its path for
+	 * recovery, and its claim lasts ten minutes against a thirty-minute
+	 * window.
 	 *
 	 * @param string $path Archive path.
 	 * @return bool
 	 */
-	private function is_deferred_legacy( $path ) {
-		$base = WP_CONTENT_DIR . '/aura-backups/';
-		if ( $this->backup_dir === $base || dirname( (string) $path ) . '/' !== $base ) {
-			return false;
-		}
+	private function is_recent( $path ) {
 		$mtime = @filemtime( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
 		return false === $mtime || time() - (int) $mtime < self::LEGACY_GRACE_SECONDS;
 	}
@@ -589,8 +589,8 @@ class Aura_Worker_Rollback {
 				$kept[ $backup['plugin_slug'] ] = true;
 				continue;
 			}
-			if ( $this->is_deferred_legacy( $backup['path'] ) ) {
-				continue; // never pruned while an old updater may need it
+			if ( $this->is_recent( $backup['path'] ) ) {
+				continue; // never pruned while an in-flight update may hold it
 			}
 			$by_plugin[ $backup['plugin_slug'] ][] = $backup;
 		}

@@ -256,7 +256,7 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 
 = 2.24.1 =
 * Security: plugin backups taken before an update are now stored in a folder with an unguessable name. They used to sit in wp-content/aura-backups/, protected only by an .htaccess rule that nginx ignores, so on nginx hosts anyone who knew a file's name could download it. Existing backups move to the new folder on upgrade.
-* Only the three newest backups per plugin are kept; older ones are deleted after each backup.
+* Only the three newest backups per plugin are kept; older ones are deleted after each backup, never one less than 30 minutes old, which an update in progress may still need.
 * The public-backup check now looks in SiteAgent's own backup folder too.
 
 = 2.24.0 =
