@@ -124,6 +124,10 @@ function aura_worker_maybe_upgrade() {
 	if ( class_exists( 'Aura_Worker_Install_Ledger' ) ) {
 		Aura_Worker_Install_Ledger::ensure_started();
 	}
+	// Archives from before 2.24.1 sat where nginx serves them (SA#158).
+	if ( class_exists( 'Aura_Worker_Rollback' ) ) {
+		Aura_Worker_Rollback::migrate_legacy_archives();
+	}
 	if ( class_exists( 'Aura_Worker_Rules' ) && ! Aura_Worker_Rules::backfill_from_stored_envelope() ) {
 		return; // the NEXT request retries; the marker stays behind on purpose
 	}

@@ -48,6 +48,27 @@ class Aura_Worker_Rollback {
 	}
 
 	/**
+	 * Move archives written before 2.24.1 out of the guessable aura-backups/
+	 * (Codex P1 on #159). Called once per version change from
+	 * aura_worker_maybe_upgrade(), so installing the release protects the
+	 * existing archives without waiting for the next backup. A site with no
+	 * such archives gets no directory created. Never throws.
+	 */
+	public static function migrate_legacy_archives() {
+		try {
+			$base = WP_CONTENT_DIR . '/aura-backups/';
+			foreach ( (array) glob( $base . '*.zip' ) as $file ) {
+				if ( preg_match( self::ARCHIVE_PATTERN, basename( (string) $file ) ) ) {
+					new self(); // the constructor moves them
+					return;
+				}
+			}
+		} catch ( \Throwable $e ) {
+			// An upgrade must never fail on this; the next backup retries.
+		}
+	}
+
+	/**
 	 * The directory the archives are written to, with a trailing slash.
 	 *
 	 * @return string
@@ -101,6 +122,51 @@ class Aura_Worker_Rollback {
 		}
 		sort( $names, SORT_STRING );
 		return $names;
+	}
+
+	/**
+	 * Every directory archives are read from: the selected one first, then
+	 * any other private directory under aura-backups/.
+	 *
+	 * @return string[] With trailing slashes.
+	 */
+	private function archive_dirs() {
+		$base = WP_CONTENT_DIR . '/aura-backups/';
+		$dirs = array( $this->backup_dir );
+		if ( $this->backup_dir !== $base ) {
+			foreach ( $this->private_dirs( $base ) as $name ) {
+				$dirs[] = $base . $name . '/';
+			}
+		}
+		return array_values( array_unique( $dirs ) );
+	}
+
+	/**
+	 * The archive a pre-2.24.1 path now lives at (Codex P2 on #159). A caller
+	 * holding a path under aura-backups/ from before the move still restores
+	 * the same archive: same file name, now in a private directory. Any other
+	 * path is returned unchanged.
+	 *
+	 * @param string $path Requested backup path.
+	 * @return string
+	 */
+	private function resolve_backup_path( $path ) {
+		$path = (string) $path;
+		if ( file_exists( $path ) ) {
+			return $path;
+		}
+		$name   = basename( $path );
+		$legacy = realpath( WP_CONTENT_DIR . '/aura-backups' );
+		$parent = realpath( dirname( $path ) );
+		if ( false === $legacy || $parent !== $legacy || ! preg_match( self::ARCHIVE_PATTERN, $name ) ) {
+			return $path;
+		}
+		foreach ( $this->archive_dirs() as $dir ) {
+			if ( is_file( $dir . $name ) && ! is_link( $dir . $name ) ) {
+				return $dir . $name;
+			}
+		}
+		return $path;
 	}
 
 	/**
@@ -248,6 +314,7 @@ class Aura_Worker_Rollback {
 		if ( ! class_exists( 'ZipArchive' ) ) {
 			return array( 'success' => false, 'error' => 'ZipArchive is not available on this site' );
 		}
+		$backup_path = $this->resolve_backup_path( $backup_path );
 		if ( ! file_exists( $backup_path ) ) {
 			return array( 'success' => false, 'error' => 'Backup file not found' );
 		}
@@ -429,7 +496,12 @@ class Aura_Worker_Rollback {
 	 */
 	public function list_backups( $plugin_slug = null ) {
 		$backups = array();
-		$files   = glob( $this->backup_dir . '*.zip' );
+		$files   = array();
+		// Every private directory, not only the selected one (Codex P2 on
+		// #159): a raced first request may have written into a larger name.
+		foreach ( $this->archive_dirs() as $dir ) {
+			$files = array_merge( $files, (array) glob( $dir . '*.zip' ) );
+		}
 		if ( ! $files ) {
 			return $backups;
 		}

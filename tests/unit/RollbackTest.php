@@ -117,6 +117,64 @@ final class RollbackTest extends TestCase {
 		$this->assertCount( 3, $rollback->list_backups( $this->plugin_slug ) );
 	}
 
+	/** Codex P2 on #159: a raced first request may have written into a larger private dir. */
+	public function test_archives_in_every_private_dir_are_listed(): void {
+		$small = WP_CONTENT_DIR . '/aura-backups/rollback-' . str_repeat( '0', 32 ) . '/';
+		$large = WP_CONTENT_DIR . '/aura-backups/rollback-' . str_repeat( 'f', 32 ) . '/';
+		mkdir( $small, 0777, true );
+		mkdir( $large, 0777, true );
+		file_put_contents( $large . $this->plugin_slug . '_2026-11-12_00-00-00-0a1b2c3d.zip', 'PK' );
+
+		$rollback = new Aura_Worker_Rollback();
+
+		$this->assertSame( $small, $rollback->get_backup_dir() );
+		$this->assertCount( 1, $rollback->list_backups( $this->plugin_slug ) );
+	}
+
+	/** Codex P1 on #159: the version upgrade moves the archives, not the next backup. */
+	public function test_the_upgrade_migration_moves_legacy_archives(): void {
+		$legacy = WP_CONTENT_DIR . '/aura-backups/';
+		mkdir( $legacy, 0777, true );
+		$name = $this->plugin_slug . '_2026-11-12_23-43-31-0a1b2c3d.zip';
+		file_put_contents( $legacy . $name, 'PK' );
+
+		Aura_Worker_Rollback::migrate_legacy_archives();
+
+		$this->assertFileDoesNotExist( $legacy . $name );
+		$this->assertCount( 1, glob( $legacy . 'rollback-*/' . $name ) );
+	}
+
+	public function test_the_upgrade_migration_creates_nothing_on_a_site_without_backups(): void {
+		Aura_Worker_Rollback::migrate_legacy_archives();
+		$this->assertDirectoryDoesNotExist( WP_CONTENT_DIR . '/aura-backups' );
+	}
+
+	public function test_the_upgrade_routine_runs_the_migration(): void {
+		$main = file_get_contents( __DIR__ . '/../../digitizer-site-worker/digitizer-site-worker.php' );
+		$fn   = substr( $main, strpos( $main, 'function aura_worker_maybe_upgrade()' ) );
+		$fn   = substr( $fn, 0, strpos( $fn, "\n}\n" ) );
+		$this->assertStringContainsString( 'Aura_Worker_Rollback::migrate_legacy_archives()', $fn );
+	}
+
+	/** Codex P2 on #159: a restore naming an archive by its pre-2.24.1 path still finds it. */
+	public function test_a_restore_by_legacy_path_finds_the_moved_archive(): void {
+		$file  = WP_PLUGIN_DIR . '/' . $this->plugin_slug . '/main.php';
+		$first = new Aura_Worker_Rollback();
+		$taken = $first->backup_plugin( $this->plugin_slug );
+		$this->assertTrue( $taken['success'] );
+		// Put it where 2.24.0 wrote it, as an upgrade would find it.
+		$legacy = WP_CONTENT_DIR . '/aura-backups/' . basename( $taken['backup_path'] );
+		rename( $taken['backup_path'], $legacy );
+		file_put_contents( $file, "<?php // v2\n" );
+
+		$rollback = new Aura_Worker_Rollback(); // moves it
+		$this->assertFileDoesNotExist( $legacy );
+		$restore = $rollback->restore_plugin( $this->plugin_slug, $legacy );
+
+		$this->assertTrue( $restore['success'], (string) ( $restore['error'] ?? '' ) );
+		$this->assertSame( "<?php // v1\n", file_get_contents( $file ) );
+	}
+
 	public function test_backup_creates_zip_and_lists_it(): void {
 		$rollback = new Aura_Worker_Rollback();
 		$result   = $rollback->backup_plugin( $this->plugin_slug );
