@@ -13,6 +13,23 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 class Aura_Tool_Site_Context extends Aura_Tool_Base {
 
+	/**
+	 * How old WordPress's stored plugin-update list may be before this report
+	 * asks WordPress.org again (SA#151): the same 12 hours wp_update_plugins()
+	 * itself waits between checks. A site whose wp-cron does not run keeps an
+	 * old list for ever, and the report then said "0 updates" on sites that were
+	 * 17 versions behind.
+	 */
+	const PLUGIN_UPDATES_MAX_AGE = 43200;
+
+	/**
+	 * When the plugin-update list this run reported from was built (its
+	 * `last_checked`), or null when WordPress has none. Set by detect_issues().
+	 *
+	 * @var int|null
+	 */
+	private $plugin_updates_checked_at = null;
+
 	public function get_name() {
 		return 'get_site_context';
 	}
@@ -52,6 +69,7 @@ class Aura_Tool_Site_Context extends Aura_Tool_Base {
 			'plugins'           => 'array|null — plugin list (when include_plugins=true)',
 			'performance'       => 'array|null — memory, opcache, max_execution (when include_performance=true)',
 			'issues'            => 'array — detected issues (outdated PHP, pending WP update, outdated plugins)',
+			'plugin_updates_checked_at' => 'int|null — when the plugin-update list was last checked against WordPress.org (Unix time); refreshed first when older than 12 hours',
 		);
 	}
 
@@ -156,6 +174,7 @@ class Aura_Tool_Site_Context extends Aura_Tool_Base {
 			'plugins'        => $plugins,
 			'performance'    => $performance,
 			'issues'         => $issues,
+			'plugin_updates_checked_at' => $this->plugin_updates_checked_at,
 			'generated_at'   => gmdate( 'c' ),
 		);
 	}
@@ -262,9 +281,11 @@ class Aura_Tool_Site_Context extends Aura_Tool_Base {
 			}
 		}
 
-		// Outdated plugins.
-		$plugin_updates = get_site_transient( 'update_plugins' );
-		if ( ! empty( $plugin_updates->response ) ) {
+		// Outdated plugins — from a list no older than PLUGIN_UPDATES_MAX_AGE.
+		$report                          = self::plugin_updates();
+		$plugin_updates                  = $report['transient'];
+		$this->plugin_updates_checked_at = $report['checked_at'];
+		if ( is_object( $plugin_updates ) && ! empty( $plugin_updates->response ) ) {
 			$outdated_count = count( $plugin_updates->response );
 			$outdated_names = array();
 			foreach ( $plugin_updates->response as $file => $data ) {
@@ -275,11 +296,68 @@ class Aura_Tool_Site_Context extends Aura_Tool_Base {
 			$issues[] = array(
 				'type'    => 'outdated_plugins',
 				'message' => "$outdated_count plugin(s) have available updates.",
-				'count'   => $outdated_count,
-				'plugins' => $outdated_names,
+				'count'      => $outdated_count,
+				'plugins'    => $outdated_names,
+				'checked_at' => $report['checked_at'],
 			);
 		}
 
 		return $issues;
+	}
+
+	/**
+	 * WordPress's plugin-update list, refreshed first when it is older than
+	 * PLUGIN_UPDATES_MAX_AGE or missing (SA#151).
+	 *
+	 * The refresh is wp_update_plugins() itself, which keeps its own rules: it
+	 * returns early while the list is inside its timeout and no installed
+	 * version changed, so a fresh list costs no request. Only a stale or
+	 * missing one makes the outbound call to WordPress.org, bounded by core's
+	 * own timeout. A refresh that fails leaves the old list, and `checked_at`
+	 * says how old it is — never a list reported as current that is not.
+	 *
+	 * @param int|null $now Unix time; null for time().
+	 * @return array{ transient: object|false, checked_at: int|null, refreshed: bool }
+	 */
+	public static function plugin_updates( $now = null ) {
+		$now     = null === $now ? time() : (int) $now;
+		$key     = 'update_plugins';
+		$current = get_site_transient( $key );
+		$checked = self::checked_at( $current );
+
+		$refreshed = false;
+		if ( null === $checked || $now - $checked > self::PLUGIN_UPDATES_MAX_AGE ) {
+			if ( ! function_exists( 'wp_update_plugins' ) && defined( 'ABSPATH' ) && defined( 'WPINC' ) ) {
+				require_once ABSPATH . WPINC . '/update.php';
+			}
+			if ( function_exists( 'wp_update_plugins' ) ) {
+				try {
+					wp_update_plugins();
+					$refreshed = true;
+				} catch ( Throwable $e ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch
+					// The old list stands; checked_at says how old it is.
+				}
+				$current = get_site_transient( $key );
+				$checked = self::checked_at( $current );
+			}
+		}
+
+		return array(
+			'transient'  => $current,
+			'checked_at' => $checked,
+			'refreshed'  => $refreshed,
+		);
+	}
+
+	/**
+	 * The list's own `last_checked`, or null when it has none.
+	 *
+	 * @param mixed $transient The `update_plugins` site transient.
+	 * @return int|null
+	 */
+	private static function checked_at( $transient ) {
+		return is_object( $transient ) && isset( $transient->last_checked ) && is_numeric( $transient->last_checked ) && (int) $transient->last_checked > 0
+			? (int) $transient->last_checked
+			: null;
 	}
 }
