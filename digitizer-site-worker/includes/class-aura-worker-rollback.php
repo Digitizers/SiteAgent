@@ -137,7 +137,9 @@ class Aura_Worker_Rollback {
 
 	/**
 	 * Every directory archives are read from: the selected one first, then
-	 * any other private directory under aura-backups/.
+	 * any other private directory under aura-backups/, then aura-backups/
+	 * itself, where a legacy archive waits out its grace window (Codex
+	 * round 3 on #159) and stays restorable meanwhile.
 	 *
 	 * @return string[] With trailing slashes.
 	 */
@@ -149,7 +151,24 @@ class Aura_Worker_Rollback {
 				$dirs[] = $base . $name . '/';
 			}
 		}
+		$dirs[] = $base;
 		return array_values( array_unique( $dirs ) );
+	}
+
+	/**
+	 * Whether $path is a legacy archive still inside its grace window: an
+	 * in-flight self-update may need it, so retention never deletes it.
+	 *
+	 * @param string $path Archive path.
+	 * @return bool
+	 */
+	private function is_deferred_legacy( $path ) {
+		$base = WP_CONTENT_DIR . '/aura-backups/';
+		if ( $this->backup_dir === $base || dirname( (string) $path ) . '/' !== $base ) {
+			return false;
+		}
+		$mtime = @filemtime( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+		return false === $mtime || time() - (int) $mtime < self::LEGACY_GRACE_SECONDS;
 	}
 
 	/**
@@ -569,6 +588,9 @@ class Aura_Worker_Rollback {
 			if ( null !== $keep_path && $backup['path'] === $keep_path ) {
 				$kept[ $backup['plugin_slug'] ] = true;
 				continue;
+			}
+			if ( $this->is_deferred_legacy( $backup['path'] ) ) {
+				continue; // never pruned while an old updater may need it
 			}
 			$by_plugin[ $backup['plugin_slug'] ][] = $backup;
 		}

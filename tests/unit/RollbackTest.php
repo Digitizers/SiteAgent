@@ -201,6 +201,25 @@ final class RollbackTest extends TestCase {
 		$this->assertGreaterThan( time() + Aura_Worker_Rollback::LEGACY_GRACE_SECONDS - 5, $ts );
 	}
 
+	/** Codex P2 round 3 on #159: the deferred archive stays discoverable and is never pruned. */
+	public function test_a_deferred_legacy_archive_is_listed_and_never_pruned(): void {
+		$legacy = WP_CONTENT_DIR . '/aura-backups/';
+		mkdir( $legacy, 0777, true );
+		$fresh = $this->plugin_slug . '_2020-01-01_00-00-00-0a1b2c3d.zip'; // oldest by name, newest on disk
+		file_put_contents( $legacy . $fresh, 'PK' );
+
+		$rollback = new Aura_Worker_Rollback();
+		$this->assertCount( 1, $rollback->list_backups( $this->plugin_slug ), 'listed while it waits' );
+
+		$dir = $rollback->get_backup_dir();
+		foreach ( array( '01', '02', '03' ) as $d ) {
+			file_put_contents( $dir . $this->plugin_slug . '_2026-11-' . $d . '_00-00-00-0a1b2c3d.zip', 'PK' );
+		}
+		$rollback->backup_plugin( $this->plugin_slug );
+
+		$this->assertFileExists( $legacy . $fresh, 'an in-flight updater may still need it' );
+	}
+
 	public function test_the_retry_hook_is_wired(): void {
 		$src = file_get_contents( __DIR__ . '/../../digitizer-site-worker/includes/class-aura-worker.php' );
 		$this->assertStringContainsString( "add_action( Aura_Worker_Rollback::MIGRATE_HOOK, array( 'Aura_Worker_Rollback', 'migrate_legacy_archives' ) )", $src );
