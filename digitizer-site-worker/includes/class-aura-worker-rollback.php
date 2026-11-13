@@ -20,32 +20,143 @@ class Aura_Worker_Rollback {
 	 */
 	private $backup_dir;
 
+	/** Archives kept per plugin; older ones are deleted after every backup (SA#158). */
+	const KEEP_PER_PLUGIN = 3;
+
+	/** A SiteAgent rollback archive's file name. */
+	const ARCHIVE_PATTERN = '/^(.+)_(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})(?:-[0-9a-f]{8})?\.zip$/';
+
+	/** The private directory's name under aura-backups/. */
+	const PRIVATE_DIR_PATTERN = '/^rollback-[0-9a-f]{32}$/';
+
 	/**
 	 * Constructor — ensures the backup directory exists and is protected.
+	 *
+	 * The archives live in aura-backups/rollback-<128 random bits>/ (SA#158).
+	 * aura-backups/ itself was protected only by an .htaccess deny, which
+	 * nginx never reads: on Cloudways every pre-update zip — premium plugins
+	 * included — was downloadable by anyone who could guess its name. A
+	 * directory name nobody can guess is the protection that holds on every
+	 * web server; the .htaccess and index.php stay as defence in depth.
 	 */
 	public function __construct() {
-		$this->backup_dir = WP_CONTENT_DIR . '/aura-backups/';
-		if ( ! file_exists( $this->backup_dir ) ) {
-			wp_mkdir_p( $this->backup_dir );
+		$base = WP_CONTENT_DIR . '/aura-backups/';
+		$this->protect( $base );
+		$this->backup_dir = $this->private_dir( $base );
+		$this->protect( $this->backup_dir );
+		$this->move_legacy_archives( $base );
+	}
 
-			// Protecting the directory is best-effort and must never end the
-			// request (#78, Codex round-13). `WP_Filesystem()` returns false — and
-			// leaves `$wp_filesystem` null — when no transport initialises, which
-			// is exactly the FTP/SSH-managed site a caller written to continue
-			// with `backed_up: false` was written for. Dereferencing null here
-			// fatalled the self-update before its backup could even fail.
-			global $wp_filesystem;
-			if ( ! function_exists( 'WP_Filesystem' ) ) {
-				require_once ABSPATH . 'wp-admin/includes/file.php';
+	/**
+	 * The directory the archives are written to, with a trailing slash.
+	 *
+	 * @return string
+	 */
+	public function get_backup_dir() {
+		return $this->backup_dir;
+	}
+
+	/**
+	 * The private directory under $base: an existing one, or a new one.
+	 *
+	 * Two first requests can each create one. Every request settles on the
+	 * smallest name present, so both write to the same place; the other stays
+	 * empty and harmless.
+	 *
+	 * @param string $base aura-backups/, with a trailing slash.
+	 * @return string
+	 */
+	private function private_dir( $base ) {
+		$existing = $this->private_dirs( $base );
+		if ( empty( $existing ) ) {
+			try {
+				$name = 'rollback-' . bin2hex( random_bytes( 16 ) );
+			} catch ( \Exception $e ) {
+				$name = 'rollback-' . md5( uniqid( '', true ) . wp_rand() );
 			}
-			$ready = WP_Filesystem() && is_object( $wp_filesystem ) && method_exists( $wp_filesystem, 'put_contents' );
-			$chmod = defined( 'FS_CHMOD_FILE' ) ? FS_CHMOD_FILE : 0644;
-			foreach ( array( '.htaccess' => 'Deny from all', 'index.php' => '<?php // Silence is golden.' ) as $name => $body ) {
-				if ( $ready ) {
-					$wp_filesystem->put_contents( $this->backup_dir . $name, $body, $chmod );
-				} else {
-					@file_put_contents( $this->backup_dir . $name, $body ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
-				}
+			wp_mkdir_p( $base . $name );
+			$existing = $this->private_dirs( $base );
+			if ( empty( $existing ) ) {
+				// Could not create it: write beside it as before rather than
+				// fail the backup outright, and the audit reports what it finds.
+				return $base;
+			}
+		}
+		return $base . $existing[0] . '/';
+	}
+
+	/**
+	 * Private directory names under $base, sorted.
+	 *
+	 * @param string $base aura-backups/, with a trailing slash.
+	 * @return string[]
+	 */
+	private function private_dirs( $base ) {
+		$names = array();
+		foreach ( (array) glob( $base . 'rollback-*', GLOB_ONLYDIR ) as $path ) {
+			$name = basename( (string) $path );
+			if ( preg_match( self::PRIVATE_DIR_PATTERN, $name ) && ! is_link( rtrim( (string) $path, '/' ) ) ) {
+				$names[] = $name;
+			}
+		}
+		sort( $names, SORT_STRING );
+		return $names;
+	}
+
+	/**
+	 * Move archives written by earlier versions out of the guessable
+	 * aura-backups/ into the private directory (SA#158). Only SiteAgent's own
+	 * archive names; a move that fails leaves the file where it was.
+	 *
+	 * @param string $base aura-backups/, with a trailing slash.
+	 */
+	private function move_legacy_archives( $base ) {
+		if ( $this->backup_dir === $base ) {
+			return;
+		}
+		foreach ( (array) glob( $base . '*.zip' ) as $file ) {
+			$name = basename( (string) $file );
+			if ( is_file( $file ) && ! is_link( $file ) && preg_match( self::ARCHIVE_PATTERN, $name ) ) {
+				@rename( $file, $this->backup_dir . $name ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.rename_rename
+			}
+		}
+	}
+
+	/**
+	 * Create $dir and write its .htaccess deny and index.php when missing.
+	 *
+	 * Protecting the directory is best-effort and must never end the request
+	 * (#78, Codex round-13). `WP_Filesystem()` returns false — and leaves
+	 * `$wp_filesystem` null — when no transport initialises, which is exactly
+	 * the FTP/SSH-managed site a caller written to continue with
+	 * `backed_up: false` was written for.
+	 *
+	 * @param string $dir Directory, with a trailing slash.
+	 */
+	private function protect( $dir ) {
+		if ( ! file_exists( $dir ) ) {
+			wp_mkdir_p( $dir );
+		}
+		$missing = array();
+		foreach ( array( '.htaccess' => 'Deny from all', 'index.php' => '<?php // Silence is golden.' ) as $name => $body ) {
+			if ( ! file_exists( $dir . $name ) ) {
+				$missing[ $name ] = $body;
+			}
+		}
+		if ( empty( $missing ) ) {
+			return;
+		}
+		global $wp_filesystem;
+		if ( ! function_exists( 'WP_Filesystem' ) ) {
+			require_once ABSPATH . 'wp-admin/includes/file.php';
+		}
+		$ready = WP_Filesystem() && is_object( $wp_filesystem ) && method_exists( $wp_filesystem, 'put_contents' );
+		$chmod = defined( 'FS_CHMOD_FILE' ) ? FS_CHMOD_FILE : 0644;
+		foreach ( $missing as $name => $body ) {
+			if ( $ready ) {
+				$wp_filesystem->put_contents( $dir . $name, $body, $chmod );
+			} else {
+				@file_put_contents( $dir . $name, $body ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
 			}
 		}
 	}
@@ -116,6 +227,12 @@ class Aura_Worker_Rollback {
 				'error'   => 'Backup archive is incomplete — not every file could be added',
 			);
 		}
+
+		// Keep the newest few per plugin (SA#158): only the self-update pruned,
+		// so plugin updates left 15-20 archives each on busy sites. The archive
+		// just written is kept by path: two backups in the same second share a
+		// timestamp, so their order says nothing about which is newer.
+		$this->cleanup_old_backups( self::KEEP_PER_PLUGIN, $backup_path );
 
 		return array( 'success' => true, 'backup_path' => $backup_path );
 	}
@@ -319,7 +436,7 @@ class Aura_Worker_Rollback {
 
 		foreach ( $files as $file ) {
 			$filename = basename( $file );
-			if ( preg_match( '/^(.+)_(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})(?:-[0-9a-f]{8})?\.zip$/', $filename, $matches ) ) {
+			if ( preg_match( self::ARCHIVE_PATTERN, $filename, $matches ) ) {
 				$slug = $matches[1];
 				if ( $plugin_slug && $slug !== $plugin_slug ) {
 					continue;
@@ -342,16 +459,24 @@ class Aura_Worker_Rollback {
 	/**
 	 * Delete old backups, keeping only the most recent N per plugin.
 	 *
-	 * @param int $keep_per_plugin Number of backups to keep per plugin slug.
+	 * @param int         $keep_per_plugin Number of backups to keep per plugin slug.
+	 * @param string|null $keep_path       An archive that is always kept and counts
+	 *                                     toward its plugin's number (SA#158).
 	 */
-	public function cleanup_old_backups( $keep_per_plugin = 3 ) {
+	public function cleanup_old_backups( $keep_per_plugin = 3, $keep_path = null ) {
 		$backups   = $this->list_backups();
 		$by_plugin = array();
+		$kept      = array();
 		foreach ( $backups as $backup ) {
+			if ( null !== $keep_path && $backup['path'] === $keep_path ) {
+				$kept[ $backup['plugin_slug'] ] = true;
+				continue;
+			}
 			$by_plugin[ $backup['plugin_slug'] ][] = $backup;
 		}
-		foreach ( $by_plugin as $plugin_backups ) {
-			foreach ( array_slice( $plugin_backups, $keep_per_plugin ) as $old ) {
+		foreach ( $by_plugin as $slug => $plugin_backups ) {
+			$room = max( 0, (int) $keep_per_plugin - ( isset( $kept[ $slug ] ) ? 1 : 0 ) );
+			foreach ( array_slice( $plugin_backups, $room ) as $old ) {
 				wp_delete_file( $old['path'] );
 			}
 		}

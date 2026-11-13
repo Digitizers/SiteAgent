@@ -43,14 +43,78 @@ final class RollbackTest extends TestCase {
 	}
 
 	public function test_constructor_protects_backup_dir(): void {
-		new Aura_Worker_Rollback();
+		$rollback = new Aura_Worker_Rollback();
+		$dir      = $rollback->get_backup_dir();
 
-		$this->assertDirectoryExists( WP_CONTENT_DIR . '/aura-backups/' );
-		$this->assertFileExists( WP_CONTENT_DIR . '/aura-backups/.htaccess' );
-		$this->assertStringContainsString(
-			'Deny from all',
-			file_get_contents( WP_CONTENT_DIR . '/aura-backups/.htaccess' )
-		);
+		// SA#158: nginx never reads .htaccess, so the archives live in a
+		// directory whose name a visitor cannot guess.
+		$this->assertMatchesRegularExpression( '#/aura-backups/rollback-[0-9a-f]{32}/$#', $dir );
+		$this->assertDirectoryExists( $dir );
+		foreach ( array( WP_CONTENT_DIR . '/aura-backups/', $dir ) as $d ) {
+			$this->assertFileExists( $d . '.htaccess' );
+			$this->assertStringContainsString( 'Deny from all', file_get_contents( $d . '.htaccess' ) );
+			$this->assertFileExists( $d . 'index.php' );
+		}
+	}
+
+	public function test_every_instance_uses_the_same_private_dir(): void {
+		$a = ( new Aura_Worker_Rollback() )->get_backup_dir();
+		$b = ( new Aura_Worker_Rollback() )->get_backup_dir();
+		$this->assertSame( $a, $b );
+		$this->assertCount( 1, glob( WP_CONTENT_DIR . '/aura-backups/rollback-*', GLOB_ONLYDIR ) );
+	}
+
+	public function test_a_raced_second_private_dir_converges_on_the_smallest_name(): void {
+		mkdir( WP_CONTENT_DIR . '/aura-backups/rollback-' . str_repeat( 'f', 32 ), 0777, true );
+		mkdir( WP_CONTENT_DIR . '/aura-backups/rollback-' . str_repeat( '0', 32 ), 0777, true );
+		$dir = ( new Aura_Worker_Rollback() )->get_backup_dir();
+		$this->assertSame( WP_CONTENT_DIR . '/aura-backups/rollback-' . str_repeat( '0', 32 ) . '/', $dir );
+	}
+
+	public function test_legacy_archives_move_out_of_the_guessable_dir(): void {
+		$legacy = WP_CONTENT_DIR . '/aura-backups/';
+		mkdir( $legacy, 0777, true );
+		$name = $this->plugin_slug . '_2026-11-12_23-43-31-0a1b2c3d.zip';
+		file_put_contents( $legacy . $name, 'PK' );
+		file_put_contents( $legacy . 'unrelated.txt', 'x' );
+
+		$rollback = new Aura_Worker_Rollback();
+
+		$this->assertFileDoesNotExist( $legacy . $name );
+		$this->assertFileExists( $rollback->get_backup_dir() . $name );
+		$this->assertFileExists( $legacy . 'unrelated.txt', 'only SiteAgent archives are moved' );
+		$this->assertCount( 1, $rollback->list_backups( $this->plugin_slug ) );
+	}
+
+	public function test_backup_keeps_only_the_newest_three_per_plugin(): void {
+		$rollback = new Aura_Worker_Rollback();
+		$dir      = $rollback->get_backup_dir();
+		foreach ( array( '01', '02', '03', '04' ) as $d ) {
+			file_put_contents( $dir . $this->plugin_slug . '_2026-11-' . $d . '_00-00-00-0a1b2c3d.zip', 'PK' );
+		}
+		file_put_contents( $dir . 'other_2026-11-01_00-00-00-0a1b2c3d.zip', 'PK' );
+
+		$result = $rollback->backup_plugin( $this->plugin_slug );
+
+		$this->assertTrue( $result['success'] );
+		$this->assertFileExists( $result['backup_path'], 'the archive just taken survives the prune' );
+		$this->assertCount( 3, $rollback->list_backups( $this->plugin_slug ) );
+		$this->assertCount( 1, $rollback->list_backups( 'other' ), 'other plugins are pruned by their own count' );
+	}
+
+	public function test_the_prune_never_removes_the_archive_it_just_wrote(): void {
+		$rollback = new Aura_Worker_Rollback();
+		$dir      = $rollback->get_backup_dir();
+		// Archives that sort NEWER than the one about to be written: the order
+		// alone would prune the new one (a same-second tie behaves the same).
+		foreach ( array( '01', '02', '03' ) as $d ) {
+			file_put_contents( $dir . $this->plugin_slug . '_2099-01-' . $d . '_00-00-00-0a1b2c3d.zip', 'PK' );
+		}
+
+		$result = $rollback->backup_plugin( $this->plugin_slug );
+
+		$this->assertFileExists( $result['backup_path'] );
+		$this->assertCount( 3, $rollback->list_backups( $this->plugin_slug ) );
 	}
 
 	public function test_backup_creates_zip_and_lists_it(): void {

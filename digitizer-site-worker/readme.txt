@@ -4,7 +4,7 @@ Tags: ai, automation, maintenance, updates, wordpress management
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.24.0
+Stable tag: 2.24.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -253,6 +253,11 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 7. Connections: provider connections (Cloudways, Cloudflare, Bunny, Hostinger, Vultr, xCloud) with resource counts, status, and credential-rotation reminders.
 
 == Changelog ==
+
+= 2.24.1 =
+* Security: plugin backups taken before an update are now stored in a folder with an unguessable name. They used to sit in wp-content/aura-backups/, protected only by an .htaccess rule that nginx ignores, so on nginx hosts anyone who knew a file's name could download it. Existing backups move to the new folder on upgrade.
+* Only the three newest backups per plugin are kept; older ones are deleted after each backup.
+* The public-backup check now looks in SiteAgent's own backup folder too.
 
 = 2.24.0 =
 * New: a security check for full-site backups and database dumps left where the web server can serve them (All-in-One WP Migration, UpdraftPlus, Duplicator, .sql files and archives). It reports each file's name, size and date, and whether the site actually serves it, without reading any contents. Found on three sites during a fleet update round.
