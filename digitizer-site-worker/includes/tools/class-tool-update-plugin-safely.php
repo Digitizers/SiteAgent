@@ -47,6 +47,8 @@ class Aura_Tool_Update_Plugin_Safely extends Aura_Tool_Base {
 			'health_check_passed' => 'bool — result of post-update health check',
 			'error'               => 'string|null — error message if failed',
 			'code'                => 'string|null — machine-readable refusal code (e.g. aura_php_writes_blocked), when the updater gave one',
+			'php_writes'          => 'string — on a host refusal only: the probe verdict (blocked|unwritable)',
+			'probe_stage'         => 'string — on a host refusal only, when recorded: the probe step that failed (txt_write|txt_delete|php_write|php_delete|exception)',
 			'db_upgrade'          => 'object|null — on success, the plugin\'s own database upgrade: { key, status: pending|not_needed|unknown, from, to }; null when it has none. Run run_plugin_db_upgrade with `key` when pending.',
 		);
 	}
@@ -185,6 +187,12 @@ class Aura_Tool_Update_Plugin_Safely extends Aura_Tool_Base {
 		// 2.23.5: a missing offer says which vendor updater was registered
 		// (`crocoblock`, or null for none), so a refusal shows whether the
 		// bridge ran (Aura#766).
+		// SA#147: a host refusal's verdict and the probe step it stopped at.
+		foreach ( array( 'php_writes', 'probe_stage' ) as $field ) {
+			if ( isset( $plugin_result[ $field ] ) ) {
+				$out[ $field ] = $plugin_result[ $field ];
+			}
+		}
 		if ( array_key_exists( 'vendor_updater', $plugin_result ) ) {
 			$out['vendor_updater'] = $plugin_result['vendor_updater'];
 		}

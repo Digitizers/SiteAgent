@@ -4,7 +4,7 @@ Tags: ai, automation, maintenance, updates, wordpress management
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.23.8
+Stable tag: 2.23.9
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -252,6 +252,9 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 7. Connections: provider connections (Cloudways, Cloudflare, Bunny, Hostinger, Vultr, xCloud) with resource counts, status, and credential-rotation reminders.
 
 == Changelog ==
+
+= 2.23.9 =
+* Fix: when a host does not let SiteAgent write plugin files, the refusal now says which step of the check failed. Before, the step was recorded on the site but left out of the answer, so finding it took shell access.
 
 = 2.23.8 =
 * Fix: the site report no longer says plugins are up to date when WordPress's list of available updates is old. On a site where scheduled tasks do not run, that list could be days old, and the report showed 0 updates on sites many versions behind. The list is now checked again when it is more than 12 hours old, the report says when it was last checked, and it says so when WordPress.org could not be reached.

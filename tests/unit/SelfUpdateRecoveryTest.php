@@ -2336,6 +2336,28 @@ final class SelfUpdateRecoveryTest extends TestCase {
 		$this->assertNotContains( 'Plugin_Upgrader::upgrade', $GLOBALS['_mutations'] );
 	}
 
+	public function test_update_plugin_safely_carries_the_probe_stage_of_a_blocked_host(): void {
+		// SA#147: on refineintelligence (WP Engine) the stage was recorded on
+		// the site but missing from the tool's answer, so it took SSH to read.
+		update_option( 'aura_worker_host_probe', array( 'php_writes' => 'blocked', 'checked_at' => time(), 'stage' => 'php_write' ), false );
+		$blocked = $this->onHost( 'blocked' );
+		$tool    = new class( $blocked ) extends Aura_Tool_Update_Plugin_Safely {
+			private $u;
+			public function __construct( $u = null ) {
+				$this->u = $u;
+			}
+			protected function new_updater() {
+				return $this->u ? $this->u : parent::new_updater();
+			}
+		};
+
+		$res = $tool->execute( array( 'plugin_slug' => 'akismet' ) );
+
+		$this->assertSame( 'aura_php_writes_blocked', $res['code'] ?? null );
+		$this->assertSame( 'php_write', $res['probe_stage'] ?? null );
+		$this->assertSame( 'blocked', $res['php_writes'] ?? null );
+	}
+
 	public function test_r1_update_plugin_safely_reports_a_successful_update(): void {
 		$tool = new Aura_Tool_Update_Plugin_Safely();
 
