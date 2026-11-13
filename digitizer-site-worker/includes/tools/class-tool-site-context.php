@@ -23,6 +23,15 @@ class Aura_Tool_Site_Context extends Aura_Tool_Base {
 	const PLUGIN_UPDATES_MAX_AGE = 43200;
 
 	/**
+	 * A failed check's record, so LATER reports stay honest too (Codex r1 on
+	 * #154): `{ stamped, before }` — the `last_checked` core wrote before the
+	 * request that failed, and the age the list really had. While the list
+	 * still carries that stamp, it is reported with `before` and as unchecked.
+	 * Autoload off.
+	 */
+	const FAILED_CHECK_OPTION = 'aura_worker_plugin_updates_failed_check';
+
+	/**
 	 * When the plugin-update list this run reported from was built (its
 	 * `last_checked`), or null when WordPress has none. Set by detect_issues().
 	 *
@@ -338,8 +347,22 @@ class Aura_Tool_Site_Context extends Aura_Tool_Base {
 		$current = get_site_transient( $key );
 		$checked = self::checked_at( $current );
 
-		$refreshed = false;
-		$failed    = false;
+		$refreshed    = false;
+		$failed       = false;
+		$prior_failed = false;
+
+		// A stamp left by a check that failed earlier is not a check: report
+		// the age the list really has, and judge freshness by it.
+		$record = get_option( self::FAILED_CHECK_OPTION, null );
+		if ( is_array( $record ) && isset( $record['stamped'] ) && null !== $checked ) {
+			if ( (int) $record['stamped'] === $checked ) {
+				$checked      = isset( $record['before'] ) && is_numeric( $record['before'] ) ? (int) $record['before'] : null;
+				$failed       = true;
+				$prior_failed = true;
+			} else {
+				delete_option( self::FAILED_CHECK_OPTION ); // a real check has happened since
+			}
+		}
 		if ( null === $checked || $now - $checked > self::PLUGIN_UPDATES_MAX_AGE ) {
 			if ( ! function_exists( 'wp_update_plugins' ) && defined( 'ABSPATH' ) && defined( 'WPINC' ) ) {
 				require_once ABSPATH . WPINC . '/update.php';
@@ -361,12 +384,24 @@ class Aura_Tool_Site_Context extends Aura_Tool_Base {
 				}
 				if ( false === $answer ) {
 					// Asked, not answered: the stored response is still the old
-					// one, whatever stamp core wrote before asking.
+					// one, whatever stamp core wrote before asking. Remember that
+					// stamp, so the next report inside core's timeout — which
+					// will not ask again — does not read it as a real check.
+					$failed  = true;
+					$stamped = self::checked_at( get_site_transient( $key ) );
+					if ( null !== $stamped && $stamped !== $checked ) {
+						update_option( self::FAILED_CHECK_OPTION, array( 'stamped' => $stamped, 'before' => $checked ), false );
+					}
+				} elseif ( null === $answer && $prior_failed ) {
+					// Core is still inside the timeout its failed attempt
+					// stamped, so it did not ask: the earlier failure stands.
 					$failed = true;
 				} else {
 					$refreshed = true;
+					$failed    = false;
 					$current   = get_site_transient( $key );
 					$checked   = self::checked_at( $current );
+					delete_option( self::FAILED_CHECK_OPTION );
 				}
 			}
 		}

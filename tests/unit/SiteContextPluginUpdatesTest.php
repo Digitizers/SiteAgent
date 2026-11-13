@@ -85,6 +85,41 @@ final class SiteContextPluginUpdatesTest extends TestCase {
 		}
 	}
 
+	/** Codex r1 on #154: the NEXT report, inside core's timeout, must not read the failed stamp as a check. */
+	public function test_a_later_report_still_says_the_list_is_unchecked(): void {
+		$GLOBALS['_site_transients']['update_plugins'] = self::list_checked( self::NOW - 5 * 86400 );
+		$GLOBALS['_wp_update_plugins_effect']          = function () {
+			self::wporg_answers( 500 );
+		};
+		Aura_Tool_Site_Context::plugin_updates( self::NOW );
+
+		// An hour later core is inside the timeout it stamped: it does not ask.
+		$GLOBALS['_wp_update_plugins_effect'] = null;
+		$r = Aura_Tool_Site_Context::plugin_updates( self::NOW + 3600 );
+		$this->assertTrue( $r['refresh_failed'] );
+		$this->assertFalse( $r['refreshed'] );
+		$this->assertSame( self::NOW - 5 * 86400, $r['checked_at'] );
+	}
+
+	public function test_a_real_check_after_a_failed_one_clears_the_record(): void {
+		$GLOBALS['_site_transients']['update_plugins'] = self::list_checked( self::NOW - 5 * 86400 );
+		$GLOBALS['_wp_update_plugins_effect']          = function () {
+			self::wporg_answers( 500 );
+		};
+		Aura_Tool_Site_Context::plugin_updates( self::NOW );
+
+		$later                                = self::NOW + 13 * 3600;
+		$GLOBALS['_wp_update_plugins_effect'] = function () use ( $later ) {
+			$GLOBALS['_site_transients']['update_plugins'] = self::list_checked( $later, array( 'a/a.php' => (object) array() ) );
+			do_action( 'http_api_debug', array( 'response' => array( 'code' => 200 ) ), 'response', 'Requests', array(), 'https://api.wordpress.org/plugins/update-check/1.1/' );
+		};
+		$r = Aura_Tool_Site_Context::plugin_updates( $later );
+		$this->assertTrue( $r['refreshed'] );
+		$this->assertFalse( $r['refresh_failed'] );
+		$this->assertSame( $later, $r['checked_at'] );
+		$this->assertNull( get_option( Aura_Tool_Site_Context::FAILED_CHECK_OPTION, null ) );
+	}
+
 	public function test_the_observer_is_removed_after_the_check(): void {
 		$GLOBALS['_site_transients']['update_plugins'] = self::list_checked( self::NOW - 5 * 86400 );
 		Aura_Tool_Site_Context::plugin_updates( self::NOW );
