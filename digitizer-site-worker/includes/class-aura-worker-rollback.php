@@ -54,8 +54,49 @@ class Aura_Worker_Rollback {
 		$base = WP_CONTENT_DIR . '/aura-backups/';
 		$this->protect( $base );
 		$this->backup_dir = $this->private_dir( $base );
-		$this->protect( $this->backup_dir );
+		if ( null !== $this->backup_dir ) {
+			$this->protect( $this->backup_dir );
+		}
 		$this->move_legacy_archives( $base );
+	}
+
+	/**
+	 * Read-only report of SiteAgent archives still in the guessable
+	 * aura-backups/ (SA#160), for get_site_context's issues. Creates nothing.
+	 *
+	 * @return array|null Issue { type, message, count, writable }, or null.
+	 */
+	public static function exposure_issue() {
+		$base  = WP_CONTENT_DIR . '/aura-backups/';
+		$count = self::legacy_archive_count( $base );
+		if ( 0 === $count ) {
+			return null;
+		}
+		$writable = function_exists( 'wp_is_writable' ) ? wp_is_writable( $base ) : is_writable( $base ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_is_writable
+		return array(
+			'type'     => 'rollback_backups_exposed',
+			'message'  => $writable
+				? "$count SiteAgent backup archive(s) are still in wp-content/aura-backups/, which nginx can serve; they move to a private directory shortly."
+				: "$count SiteAgent backup archive(s) are in wp-content/aura-backups/, which nginx can serve, and PHP cannot write there to move them. Fix the directory's ownership.",
+			'count'    => $count,
+			'writable' => (bool) $writable,
+		);
+	}
+
+	/**
+	 * SiteAgent archives at the top level of $base.
+	 *
+	 * @param string $base aura-backups/, with a trailing slash.
+	 * @return int
+	 */
+	private static function legacy_archive_count( $base ) {
+		$count = 0;
+		foreach ( (array) glob( $base . '*.zip' ) as $file ) {
+			if ( is_file( (string) $file ) && ! is_link( (string) $file ) && preg_match( self::ARCHIVE_PATTERN, basename( (string) $file ) ) ) {
+				++$count;
+			}
+		}
+		return $count;
 	}
 
 	/**
@@ -80,9 +121,10 @@ class Aura_Worker_Rollback {
 	}
 
 	/**
-	 * The directory the archives are written to, with a trailing slash.
+	 * The directory the archives are written to, with a trailing slash, or
+	 * null when the private directory could not be created (SA#160).
 	 *
-	 * @return string
+	 * @return string|null
 	 */
 	public function get_backup_dir() {
 		return $this->backup_dir;
@@ -96,7 +138,7 @@ class Aura_Worker_Rollback {
 	 * empty and harmless.
 	 *
 	 * @param string $base aura-backups/, with a trailing slash.
-	 * @return string
+	 * @return string|null Null when none exists and none could be created.
 	 */
 	private function private_dir( $base ) {
 		$existing = $this->private_dirs( $base );
@@ -109,9 +151,11 @@ class Aura_Worker_Rollback {
 			wp_mkdir_p( $base . $name );
 			$existing = $this->private_dirs( $base );
 			if ( empty( $existing ) ) {
-				// Could not create it: write beside it as before rather than
-				// fail the backup outright, and the audit reports what it finds.
-				return $base;
+				// Never fall back to the guessable directory (SA#160): a site
+				// whose aura-backups/ PHP cannot write to (left owned by another
+				// user) used to keep every archive where nginx serves it, and
+				// say nothing. backup_plugin() refuses instead.
+				return null;
 			}
 		}
 		return $base . $existing[0] . '/';
@@ -145,11 +189,12 @@ class Aura_Worker_Rollback {
 	 */
 	private function archive_dirs() {
 		$base = WP_CONTENT_DIR . '/aura-backups/';
-		$dirs = array( $this->backup_dir );
-		if ( $this->backup_dir !== $base ) {
-			foreach ( $this->private_dirs( $base ) as $name ) {
-				$dirs[] = $base . $name . '/';
-			}
+		$dirs = array();
+		if ( null !== $this->backup_dir ) {
+			$dirs[] = $this->backup_dir;
+		}
+		foreach ( $this->private_dirs( $base ) as $name ) {
+			$dirs[] = $base . $name . '/';
 		}
 		$dirs[] = $base;
 		return array_values( array_unique( $dirs ) );
@@ -207,29 +252,38 @@ class Aura_Worker_Rollback {
 	 * @param string $base aura-backups/, with a trailing slash.
 	 */
 	private function move_legacy_archives( $base ) {
-		if ( $this->backup_dir === $base ) {
-			return;
+		if ( null !== $this->backup_dir ) {
+			$this->move_into_private( $base );
 		}
-		$deferred = false;
+		// Anything still here — deferred, a failed rename, or no private
+		// directory at all (SA#160) — keeps one retry queued. Before, only the
+		// grace-window deferral did, so a move that failed on the upgrade
+		// request was never tried again once the version was stamped.
+		if ( self::legacy_archive_count( $base ) > 0 && function_exists( 'wp_schedule_single_event' ) ) {
+			$queued = function_exists( 'wp_next_scheduled' ) ? wp_next_scheduled( self::MIGRATE_HOOK ) : false;
+			if ( ! $queued ) {
+				wp_schedule_single_event( time() + self::LEGACY_GRACE_SECONDS + 60, self::MIGRATE_HOOK );
+			}
+		}
+	}
+
+	/**
+	 * Move every legacy archive past its grace window into the private
+	 * directory. A fresh one may be an in-flight self-update's recovery
+	 * archive: the old updater would look for it here and not find it.
+	 *
+	 * @param string $base aura-backups/, with a trailing slash.
+	 */
+	private function move_into_private( $base ) {
 		foreach ( (array) glob( $base . '*.zip' ) as $file ) {
 			$name = basename( (string) $file );
 			if ( ! is_file( $file ) || is_link( $file ) || ! preg_match( self::ARCHIVE_PATTERN, $name ) ) {
 				continue;
 			}
-			$mtime = @filemtime( $file ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
-			if ( false === $mtime || time() - (int) $mtime < self::LEGACY_GRACE_SECONDS ) {
-				// Possibly an in-flight self-update's recovery archive: the old
-				// updater would look for it here and not find it.
-				$deferred = true;
+			if ( $this->is_recent( $file ) ) {
 				continue;
 			}
 			@rename( $file, $this->backup_dir . $name ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.rename_rename
-		}
-		if ( $deferred && function_exists( 'wp_schedule_single_event' ) ) {
-			$queued = function_exists( 'wp_next_scheduled' ) ? wp_next_scheduled( self::MIGRATE_HOOK ) : false;
-			if ( ! $queued ) {
-				wp_schedule_single_event( time() + self::LEGACY_GRACE_SECONDS + 60, self::MIGRATE_HOOK );
-			}
 		}
 	}
 
@@ -291,6 +345,17 @@ class Aura_Worker_Rollback {
 		// shape every other failure here answers.
 		if ( ! class_exists( 'ZipArchive' ) ) {
 			return array( 'success' => false, 'error' => 'ZipArchive is not available on this site' );
+		}
+
+		// No private directory, no backup (SA#160): the guessable aura-backups/
+		// is served by nginx, so an archive there is a disclosure. The caller
+		// carries on with `backed_up: false` (the #472 rule).
+		if ( null === $this->backup_dir ) {
+			return array(
+				'success' => false,
+				'code'    => 'aura_rollback_dir_unwritable',
+				'error'   => 'Backup refused: PHP cannot create a private directory under wp-content/aura-backups/ (check its ownership), and a backup outside it could be downloaded by anyone.',
+			);
 		}
 
 		// The name carries a per-operation suffix beside the timestamp: two
