@@ -140,6 +140,22 @@ final class AuditPublicBackupsTest extends TestCase {
 		}
 	}
 
+	/** Codex r1 on #157: ABSPATH is the install directory; its URL is site_url(), not home_url(). */
+	public function test_the_site_root_is_asked_at_the_install_url_not_the_home_url(): void {
+		$GLOBALS['_home_url'] = 'https://example.test';
+		$tool = new class() extends Aura_Tool_Audit_Public_Backups {
+			public function locs() {
+				return $this->locations();
+			}
+			protected function install_url() {
+				return 'https://example.test/wordpress';
+			}
+		};
+		$root = $tool->locs()[0];
+		$this->assertSame( rtrim( (string) ABSPATH, '/\\' ), $root['dir'] );
+		$this->assertSame( 'https://example.test/wordpress', $root['url'] );
+	}
+
 	public function test_is_read_only(): void {
 		$a = ( new Aura_Tool_Audit_Public_Backups() )->get_annotations();
 		$this->assertTrue( $a['read_only'] );

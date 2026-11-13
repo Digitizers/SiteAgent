@@ -165,11 +165,15 @@ class Aura_Tool_Audit_Public_Backups extends Aura_Tool_Base {
 	protected function locations() {
 		$root    = rtrim( (string) ABSPATH, '/\\' );
 		$content = rtrim( (string) WP_CONTENT_DIR, '/\\' );
-		$home    = rtrim( (string) home_url( '/' ), '/' );
-		$c_url   = function_exists( 'content_url' ) ? rtrim( (string) content_url(), '/' ) : $home . '/wp-content';
+		// ABSPATH is the INSTALL directory, so its URL is site_url(), not
+		// home_url(): a WordPress in a subdirectory serving the homepage from
+		// the domain root would otherwise ask the wrong URL, read a 404 and
+		// report a downloadable dump as private (Codex r1 on #157).
+		$install = $this->install_url();
+		$c_url   = function_exists( 'content_url' ) ? rtrim( (string) content_url(), '/' ) : $install . '/wp-content';
 
 		$out = array(
-			array( 'dir' => $root, 'url' => $home, 'depth' => 0 ),
+			array( 'dir' => $root, 'url' => $install, 'depth' => 0 ),
 			array( 'dir' => $content, 'url' => $c_url, 'depth' => 0 ),
 		);
 		foreach ( static::BACKUP_DIRS as $rel ) {
@@ -182,6 +186,17 @@ class Aura_Tool_Audit_Public_Backups extends Aura_Tool_Base {
 		 * @param array $out Locations: { dir, url, depth }.
 		 */
 		return (array) apply_filters( 'aura_worker_public_backup_locations', $out );
+	}
+
+	/**
+	 * The URL of the WordPress install directory (ABSPATH), no trailing
+	 * slash. A seam, so a test can make it differ from the home URL.
+	 *
+	 * @return string
+	 */
+	protected function install_url() {
+		$url = function_exists( 'site_url' ) ? site_url( '/' ) : home_url( '/' );
+		return rtrim( (string) $url, '/' );
 	}
 
 	/**
