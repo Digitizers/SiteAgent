@@ -17,7 +17,7 @@
   </a>
   <img src="https://img.shields.io/badge/WordPress-6.2%E2%80%937.1-21759b?logo=wordpress" alt="WordPress" />
   <img src="https://img.shields.io/badge/PHP-7.4%2B-777bb4?logo=php" alt="PHP" />
-  <img src="https://img.shields.io/badge/Stable-2.23.5-green" alt="Stable" />
+  <img src="https://img.shields.io/badge/Stable-2.23.6-green" alt="Stable" />
 </p>
 
 ---
@@ -238,6 +238,11 @@ These plug straight into **Aura's Fleet MCP Gateway**: read tools run on demand,
 ---
 
 ## Changelog
+
+### 2.23.6
+
+- **One plugin mutation at a time per site** (Aura#766). On goldbuy.co.il eight `update_plugin_safely` calls approved seconds apart ran concurrently; `WP_Upgrader::unpack_package()` clears all of `wp-content/upgrade` before it unpacks, so they wiped each other's working files ("Could not copy file") and one read the plugin list mid-replace ("imagifysimple-sitemap/simple-sitemap.php"). `guarding_self()` now takes the self-update claim (`SELF_UPDATE_LOCK`, the same conditional INSERT, fence and takeover window) for EVERY plugin, not only SiteAgent's own file; a mutation that finds it held answers `aura_update_in_progress` (`in_progress: true`, REST `409`) and runs nothing. That covers the generic single update, every batch entry (so `update_plugin_safely`) and the guarded restore. A self-update now holds other plugins' updates too, which share the directory.
+- **`update_plugin_safely` resolves a slug exactly**: the folder, the plugin file itself, or a single-file plugin's basename. The substring fallback — which could pick a different plugin — is gone.
 
 ### 2.23.5
 

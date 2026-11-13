@@ -205,6 +205,15 @@ update of SiteAgent itself removed every `aura/*` route.
   with that code and `update_plugin_safely` reports the failure. When the upgrade
   itself failed too, the upgrade's code and error stay primary and
   `reactivation_error` is attached beside them.
+- **One plugin mutation at a time (2.23.6, Aura#766).** `guarding_self()` takes
+  `SELF_UPDATE_LOCK` for EVERY plugin, not only SiteAgent's own file — every
+  upgrader run shares `wp-content/upgrade`, which `unpack_package()` clears
+  (eight concurrent updates on goldbuy.co.il wiped each other's files). Held: for
+  SiteAgent's own file the old `$busy` (`self_update_busy()`); for any other
+  plugin `$refused = plugin_update_busy()` — `aura_update_in_progress`,
+  `in_progress: true`, REST `409`. Tests: `PluginUpdateLockTest`,
+  `RestUpdatePluginStatusTest`. `update_plugin_safely` resolves a slug exactly
+  (folder, file, or single-file basename); no substring fallback.
 - **SiteAgent is refused.** `SELF_PLUGIN_FILE` answers
   `{ success: false, code: aura_use_self_update }` (REST `409`, message pointing at
   `POST /aura/v1/self-update`) and never reaches the upgrader or the refresh. The

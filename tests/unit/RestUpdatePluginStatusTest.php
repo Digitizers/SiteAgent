@@ -38,6 +38,17 @@ final class RestUpdatePluginStatusTest extends TestCase {
 		return $res;
 	}
 
+	public function test_another_update_running_is_409_in_progress(): void {
+		// 2.23.6 (Aura#766): one plugin mutation at a time per site.
+		Aura_Worker_Magic_Link::take_claim( Aura_Worker_Updater::SELF_UPDATE_LOCK, 10 * MINUTE_IN_SECONDS );
+
+		$res = $this->call( 'akismet/akismet.php' );
+
+		$this->assertSame( 409, $res->get_status() );
+		$this->assertSame( 'aura_update_in_progress', $res->get_data()['code'] );
+		$this->assertTrue( $res->get_data()['in_progress'] );
+	}
+
 	public function test_not_offered_is_409(): void {
 		$GLOBALS['_upgrade_result'] = false;
 

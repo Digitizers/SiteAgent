@@ -1640,15 +1640,24 @@ class Aura_Worker_Updater {
 		if ( null !== $refused ) {
 			return null;
 		}
-		if ( self::SELF_PLUGIN_FILE !== $plugin_file ) {
-			return $work( '' ); // no claim: another plugin's files are not ours to serialise
-		}
+		// ONE plugin mutation at a time per site (2.23.6, Aura#766), under the
+		// self-update's own claim. Every upgrader run shares wp-content/upgrade,
+		// and WP_Upgrader::unpack_package() clears that whole directory before
+		// it unpacks: eight updates approved seconds apart on goldbuy.co.il
+		// ran side by side, wiped each other's working files ("Could not copy
+		// file") and read a plugin list mid-replace ("imagifysimple-sitemap").
+		// Another plugin's files were never ours to serialise; the directory
+		// they pass through is.
 		if ( ! class_exists( 'Aura_Worker_Magic_Link' ) ) {
 			require_once plugin_dir_path( __FILE__ ) . 'class-aura-worker-magic-link.php';
 		}
 		$fence = Aura_Worker_Magic_Link::take_claim( self::SELF_UPDATE_LOCK, 10 * MINUTE_IN_SECONDS );
 		if ( '' === $fence ) {
-			$busy = true;
+			if ( self::SELF_PLUGIN_FILE === $plugin_file ) {
+				$busy = true;
+			} else {
+				$refused = $this->plugin_update_busy();
+			}
 			return null;
 		}
 		try {
@@ -1681,6 +1690,22 @@ class Aura_Worker_Updater {
 			'code'        => 'aura_self_update_multisite_unsupported',
 			'error'       => __( 'Updating SiteAgent through Aura is not supported on a multisite network: the update lock is per site while the plugin directory is shared. Update the plugin from the network admin.', 'digitizer-site-worker' ),
 			'in_progress' => false,
+		);
+	}
+
+	/**
+	 * The refusal another plugin's update answers while the site's one plugin
+	 * mutation claim is held — by a self-update or by another plugin's update
+	 * (2.23.6). Nothing ran; retrying after the running one ends is safe.
+	 *
+	 * @return array
+	 */
+	private function plugin_update_busy() {
+		return array(
+			'success'     => false,
+			'code'        => 'aura_update_in_progress',
+			'error'       => __( 'Another plugin update is running on this site. Nothing was changed; try again when it finishes.', 'digitizer-site-worker' ),
+			'in_progress' => true,
 		);
 	}
 
