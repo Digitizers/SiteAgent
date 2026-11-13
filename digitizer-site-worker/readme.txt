@@ -1,5 +1,5 @@
 === SiteAgent for Aura ===
-Contributors: benkalsky
+Contributors: digitizers, benkalsky
 Tags: ai, automation, maintenance, updates, wordpress management
 Requires at least: 6.2
 Tested up to: 7.1
