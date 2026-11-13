@@ -26,6 +26,17 @@ class Aura_Worker_Rollback {
 	/** A SiteAgent rollback archive's file name. */
 	const ARCHIVE_PATTERN = '/^(.+)_(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})(?:-[0-9a-f]{8})?\.zip$/';
 
+	/**
+	 * A legacy archive younger than this is not moved yet (Codex round 2 on
+	 * #159). A self-update from 2.24.0 still runs the old class, which holds
+	 * the archive's legacy path for its recovery; its claim lasts ten
+	 * minutes, so thirty leaves a wide margin.
+	 */
+	const LEGACY_GRACE_SECONDS = 1800;
+
+	/** Cron hook that retries the move once the grace window has passed. */
+	const MIGRATE_HOOK = 'aura_worker_migrate_rollback_archives';
+
 	/** The private directory's name under aura-backups/. */
 	const PRIVATE_DIR_PATTERN = '/^rollback-[0-9a-f]{32}$/';
 
@@ -180,10 +191,25 @@ class Aura_Worker_Rollback {
 		if ( $this->backup_dir === $base ) {
 			return;
 		}
+		$deferred = false;
 		foreach ( (array) glob( $base . '*.zip' ) as $file ) {
 			$name = basename( (string) $file );
-			if ( is_file( $file ) && ! is_link( $file ) && preg_match( self::ARCHIVE_PATTERN, $name ) ) {
-				@rename( $file, $this->backup_dir . $name ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.rename_rename
+			if ( ! is_file( $file ) || is_link( $file ) || ! preg_match( self::ARCHIVE_PATTERN, $name ) ) {
+				continue;
+			}
+			$mtime = @filemtime( $file ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+			if ( false === $mtime || time() - (int) $mtime < self::LEGACY_GRACE_SECONDS ) {
+				// Possibly an in-flight self-update's recovery archive: the old
+				// updater would look for it here and not find it.
+				$deferred = true;
+				continue;
+			}
+			@rename( $file, $this->backup_dir . $name ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged,WordPress.WP.AlternativeFunctions.rename_rename
+		}
+		if ( $deferred && function_exists( 'wp_schedule_single_event' ) ) {
+			$queued = function_exists( 'wp_next_scheduled' ) ? wp_next_scheduled( self::MIGRATE_HOOK ) : false;
+			if ( ! $queued ) {
+				wp_schedule_single_event( time() + self::LEGACY_GRACE_SECONDS + 60, self::MIGRATE_HOOK );
 			}
 		}
 	}

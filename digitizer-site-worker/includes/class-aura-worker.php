@@ -130,6 +130,10 @@ class Aura_Worker {
 		require_once plugin_dir_path( __FILE__ ) . 'class-aura-worker-grant.php';
 		add_action( Aura_Worker_Grant::NONCE_GC_HOOK, array( 'Aura_Worker_Grant', 'delete_spent_nonce' ), 10, 1 );
 
+		// SA#158: legacy rollback archives too fresh to move at upgrade time
+		// (an in-flight self-update may still need them) are moved later.
+		add_action( Aura_Worker_Rollback::MIGRATE_HOOK, array( 'Aura_Worker_Rollback', 'migrate_legacy_archives' ) );
+
 		// Add settings page and privacy policy.
 		if ( is_admin() ) {
 			add_action( 'admin_menu', array( $this, 'add_settings_page' ) );

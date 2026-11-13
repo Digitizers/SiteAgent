@@ -76,6 +76,7 @@ final class RollbackTest extends TestCase {
 		mkdir( $legacy, 0777, true );
 		$name = $this->plugin_slug . '_2026-11-12_23-43-31-0a1b2c3d.zip';
 		file_put_contents( $legacy . $name, 'PK' );
+		touch( $legacy . $name, time() - HOUR_IN_SECONDS );
 		file_put_contents( $legacy . 'unrelated.txt', 'x' );
 
 		$rollback = new Aura_Worker_Rollback();
@@ -137,6 +138,7 @@ final class RollbackTest extends TestCase {
 		mkdir( $legacy, 0777, true );
 		$name = $this->plugin_slug . '_2026-11-12_23-43-31-0a1b2c3d.zip';
 		file_put_contents( $legacy . $name, 'PK' );
+		touch( $legacy . $name, time() - HOUR_IN_SECONDS );
 
 		Aura_Worker_Rollback::migrate_legacy_archives();
 
@@ -165,6 +167,7 @@ final class RollbackTest extends TestCase {
 		// Put it where 2.24.0 wrote it, as an upgrade would find it.
 		$legacy = WP_CONTENT_DIR . '/aura-backups/' . basename( $taken['backup_path'] );
 		rename( $taken['backup_path'], $legacy );
+		touch( $legacy, time() - HOUR_IN_SECONDS );
 		file_put_contents( $file, "<?php // v2\n" );
 
 		$rollback = new Aura_Worker_Rollback(); // moves it
@@ -173,6 +176,34 @@ final class RollbackTest extends TestCase {
 
 		$this->assertTrue( $restore['success'], (string) ( $restore['error'] ?? '' ) );
 		$this->assertSame( "<?php // v1\n", file_get_contents( $file ) );
+	}
+
+	/**
+	 * Codex P1 round 2 on #159: an in-flight self-update from 2.24.0 still
+	 * runs the old rollback class, which holds the archive's legacy path. A
+	 * fresh archive is left in place until that window has passed, and the
+	 * migration schedules itself to come back for it.
+	 */
+	public function test_a_fresh_legacy_archive_is_left_for_an_in_flight_update(): void {
+		$legacy = WP_CONTENT_DIR . '/aura-backups/';
+		mkdir( $legacy, 0777, true );
+		$name = 'digitizer-site-worker_2026-11-13_13-00-00-0a1b2c3d.zip';
+		file_put_contents( $legacy . $name, 'PK' );
+		$GLOBALS['_scheduled'] = array();
+
+		new Aura_Worker_Rollback();
+		Aura_Worker_Rollback::migrate_legacy_archives();
+
+		$this->assertFileExists( $legacy . $name, 'the old updater can still find its recovery archive' );
+		$hooks = array_column( (array) $GLOBALS['_scheduled'], 'hook' );
+		$this->assertContains( Aura_Worker_Rollback::MIGRATE_HOOK, $hooks, 'the move is retried once the window has passed' );
+		$ts = max( array_column( (array) $GLOBALS['_scheduled'], 'ts' ) );
+		$this->assertGreaterThan( time() + Aura_Worker_Rollback::LEGACY_GRACE_SECONDS - 5, $ts );
+	}
+
+	public function test_the_retry_hook_is_wired(): void {
+		$src = file_get_contents( __DIR__ . '/../../digitizer-site-worker/includes/class-aura-worker.php' );
+		$this->assertStringContainsString( "add_action( Aura_Worker_Rollback::MIGRATE_HOOK, array( 'Aura_Worker_Rollback', 'migrate_legacy_archives' ) )", $src );
 	}
 
 	public function test_backup_creates_zip_and_lists_it(): void {
