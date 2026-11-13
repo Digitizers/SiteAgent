@@ -205,6 +205,13 @@ update of SiteAgent itself removed every `aura/*` route.
   with that code and `update_plugin_safely` reports the failure. When the upgrade
   itself failed too, the upgrade's code and error stay primary and
   `reactivation_error` is attached beside them.
+- **A plugin's database upgrade after an update (2.23.7, Aura#766).** It cannot
+  run in the request that replaced the files — the old build is loaded, so the
+  registry's `pending` closures read stale constants. `update_plugin_safely`
+  reports `db_upgrade` from `db_upgrade_status()` (new file header vs the
+  registry's `db_option`); `run_plugin_db_upgrade` (`plugin_slug`, approval
+  required) runs `update_database( $key )` in a later request and refuses a key
+  that is not a registered migration. Tests: `PluginDbUpgradeTest`.
 - **One plugin mutation at a time (2.23.6, Aura#766).** `guarding_self()` takes
   `SELF_UPDATE_LOCK` for EVERY plugin, not only SiteAgent's own file — every
   upgrader run shares `wp-content/upgrade`, which `unpack_package()` clears

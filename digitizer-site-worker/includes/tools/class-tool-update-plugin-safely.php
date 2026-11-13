@@ -47,6 +47,7 @@ class Aura_Tool_Update_Plugin_Safely extends Aura_Tool_Base {
 			'health_check_passed' => 'bool — result of post-update health check',
 			'error'               => 'string|null — error message if failed',
 			'code'                => 'string|null — machine-readable refusal code (e.g. aura_php_writes_blocked), when the updater gave one',
+			'db_upgrade'          => 'object|null — on success, the plugin\'s own database upgrade: { key, status: pending|not_needed|unknown, from, to }; null when it has none. Run run_plugin_db_upgrade with `key` when pending.',
 		);
 	}
 
@@ -175,6 +176,12 @@ class Aura_Tool_Update_Plugin_Safely extends Aura_Tool_Base {
 			'error'               => $error,
 			'code'                => $code,
 		);
+		// 2.23.7: after an update, whether the plugin's own database upgrade
+		// is due. It cannot run in this request — the old build is loaded —
+		// so the caller runs run_plugin_db_upgrade next (Aura#766).
+		if ( $success ) {
+			$out['db_upgrade'] = $this->new_updater()->db_upgrade_status( $plugin_file );
+		}
 		// 2.23.5: a missing offer says which vendor updater was registered
 		// (`crocoblock`, or null for none), so a refusal shows whether the
 		// bridge ran (Aura#766).
