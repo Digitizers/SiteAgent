@@ -266,10 +266,7 @@ class Aura_Tool_Audit_Mcp_Exposure extends Aura_Tool_Base {
 					$route = '/' . trim( (string) $server->get_server_route_namespace(), '/' )
 						. '/' . trim( (string) $server->get_server_route(), '/' );
 				}
-				if ( method_exists( $server, 'get_tools' ) ) {
-					$tools = $server->get_tools();
-					$count = is_array( $tools ) ? count( $tools ) : null;
-				}
+				$count = self::server_tool_count( $server );
 			}
 			$servers[] = array(
 				'id'         => is_string( $id ) ? $id : '',
@@ -284,6 +281,42 @@ class Aura_Tool_Audit_Mcp_Exposure extends Aura_Tool_Base {
 		}
 
 		return $servers;
+	}
+
+	/**
+	 * A server's own tool count, or null when it cannot be read.
+	 *
+	 * MCP adapter 0.7.x (bundled with Elementor 4.4.0) changed
+	 * `McpServer::get_tools()` to require the exact protocol schema; calling
+	 * it bare threw ArgumentCountError and blanked every section that reads
+	 * the server list. A 0.7 server is asked under the newest schema its
+	 * library supports. Anything that still fails is "unknown" (null), never a
+	 * fatal for the whole audit.
+	 *
+	 * @param mixed $server An adapter server.
+	 * @return int|null
+	 */
+	public static function server_tool_count( $server ) {
+		if ( ! is_object( $server ) || ! method_exists( $server, 'get_tools' ) ) {
+			return null;
+		}
+		try {
+			$method = new ReflectionMethod( $server, 'get_tools' );
+			if ( 0 === $method->getNumberOfRequiredParameters() ) {
+				$tools = $server->get_tools();
+			} elseif ( 1 === $method->getNumberOfRequiredParameters() && class_exists( '\\WP\\McpSchema\\Schemas' ) ) {
+				$versions = (array) \WP\McpSchema\Schemas::supportedVersions();
+				if ( empty( $versions ) ) {
+					return null;
+				}
+				$tools = $server->get_tools( \WP\McpSchema\Schemas::create()->forVersion( (string) end( $versions ) ) );
+			} else {
+				return null;
+			}
+		} catch ( \Throwable $e ) {
+			return null;
+		}
+		return is_array( $tools ) ? count( $tools ) : null;
 	}
 
 	/**
