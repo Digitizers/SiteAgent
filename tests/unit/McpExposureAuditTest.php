@@ -194,6 +194,47 @@ final class McpExposureAuditTest extends TestCase {
 		);
 	}
 
+	// --- tool counts across adapter versions ---------------------------------
+
+	/** MCP adapter <= 0.6: get_tools() takes nothing. */
+	public function test_tool_count_reads_an_argumentless_get_tools(): void {
+		$server = new class() {
+			public function get_tools(): array {
+				return array( 'a' => 1, 'b' => 2 );
+			}
+		};
+		$this->assertSame( 2, Aura_Tool_Audit_Mcp_Exposure::server_tool_count( $server ) );
+	}
+
+	/**
+	 * MCP adapter 0.7.x (Elementor 4.4.0 ships 0.7.1): get_tools() requires the
+	 * exact schema. Calling it bare threw "Too few arguments" and blanked the
+	 * angie, servers and mcp_module sections on every 4.4.0 site.
+	 */
+	public function test_tool_count_passes_the_newest_schema_to_a_0_7_server(): void {
+		require_once dirname( __DIR__ ) . '/fixtures/mcp-schema-stub.php';
+		$server = new class() {
+			public $asked = null;
+			public function get_tools( $schema ): array {
+				$this->asked = $schema->version;
+				return array( 'x' => 1, 'y' => 2, 'z' => 3 );
+			}
+		};
+		$this->assertSame( 3, Aura_Tool_Audit_Mcp_Exposure::server_tool_count( $server ) );
+		$this->assertSame( '2026-07-28', $server->asked );
+	}
+
+	/** A server that cannot be counted is "unknown", never a fatal for the whole audit. */
+	public function test_tool_count_is_null_when_the_server_throws(): void {
+		$server = new class() {
+			public function get_tools(): array {
+				throw new RuntimeException( 'boom' );
+			}
+		};
+		$this->assertNull( Aura_Tool_Audit_Mcp_Exposure::server_tool_count( $server ) );
+		$this->assertNull( Aura_Tool_Audit_Mcp_Exposure::server_tool_count( new stdClass() ) );
+	}
+
 	// --- servers -------------------------------------------------------------
 
 	public function test_no_mcp_adapter_means_no_servers_and_no_claim(): void {

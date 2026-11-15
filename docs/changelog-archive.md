@@ -16,6 +16,60 @@ the judgement call this file exists to avoid.
 
 Newest first, continuing exactly where `readme.txt`'s Changelog stops.
 
+= 2.17.5 =
+* Plugin updates: on a host where PHP may not write or delete `.php` files (WP Engine is the proven case), every Aura-driven plugin change — the self-update, a single or batch plugin update, `update_plugin_safely` — is refused before anything is touched, with `code: aura_php_writes_blocked` (or `aura_upgrade_dir_unwritable` when `wp-content/upgrade` cannot be written at all). Such a host failed every update at unpack, and the restore that followed deleted the plugin's non-PHP files: SiteAgent's own `readme.txt`, and a plugin's CSS, JS and images. The check creates and removes a temporary file, and runs only when WordPress writes files directly.
+* Restore: a restore checks that it can finish — PHP can write `.php` files in the plugins directory, and every directory of the plugin is writable — before it deletes anything; otherwise it answers `stage: preflight` and leaves the directory untouched. A failed install that changed no file is no longer restored at all (`restore_skipped: unchanged`).
+* `/status` reports the host's last recorded answer as `host: { php_writes, checked_at }`, so Aura can stop sending updates to such a site.
+* `update_plugin_safely` returns the refusal's code and message (it lost both before).
+
+= 2.17.4 =
+* Self-update: a package that carries the version already running is refused before anything changes. The verified download is inspected in place, the plugin is not backed up, and no install runs. Before this, a same-version request backed the plugin up, reinstalled over the live directory, refused and restored — and on one host lost `readme.txt` on every run. The refusal answers `code: aura_self_update_same_version`. An archive that cannot be read falls through to the previous path.
+* Self-update: when the post-install version check fails, the message now says what the evidence supports. A verified package with a different version means the upgrader did not replace the plugin directory (`aura_self_update_not_replaced`); without that proof both causes are named (`aura_self_update_version_unchanged`).
+* Self-update: a restore that cannot finish reports which stage failed (`clear` or `extract`), and the message says what is on disk. A failed clear can remove some files before it stops, so the directory is no longer described as untouched.
+
+= 2.17.3 =
+* Snapshots: an `overwrite_file()` record now stores the sha256 of the content it wrote (`replaced_with_sha256`), and restoring that record puts the old bytes back ONLY while the file still holds exactly what the write left there. A file edited since is refused untouched (`aura_file_changed_since`); a file already holding the old bytes answers `already` and is not rewritten; a record taken without that hash — a direct `POST /aura/v2/snapshot`, or a Power Pack older than 0.2.5 — is refused as unfenced (`aura_snapshot_unfenced`), because nothing proves what it would be writing over.
+* Snapshots: every engine write to a path records a `write_seq`, taken under that path's lock and strictly increasing per target, so two writes to one file can be ordered after the fact — Aura rolls a run back in that order.
+* Snapshots: a file restore that cannot act says why with a code instead of a bare failure — `aura_file_changed_since`, `aura_snapshot_unfenced`, `aura_snapshot_voided` (the create's rollback record is gone) and `aura_path_locked` (another write to the path is in progress) — each answered as an HTTP 409 refusal rather than a 500. Restoring a created file that is already gone answers `already`.
+
+= 2.17.2 =
+* Snapshots: every engine write to a path — `create_file()`, the new `overwrite_file()`, and the restore of a created file — runs under a per-path lock, so two agent writes racing one new file can no longer interleave in the same inode (a concurrent in-place overwrite passed the inode check). After a publish the target must hash to the recorded content, else the record is voided as `interrupted` and the staged bytes kept.
+* Snapshots: `overwrite_file()` replaces an existing file the way the engine creates one — old bytes snapshotted, new content staged beside the target with its own mode, then renamed over it: a reader sees the old file or the new, never a truncated one, and a short write touches nothing. The Power Pack's `write_file` adopts it in 0.2.5.
+* Snapshots: on a host without `flock()` the record and path locks are `mkdir()` directories (atomic everywhere; a lock older than five minutes is a crashed holder and is broken) instead of running unlocked, which let a stage sweep retire the record of a publish that then completed.
+* Snapshots: without `link()`, an executable created file that was edited since is verified in place and left where it is on `file_changed_since` — the claim by rename came first and the put-back refused exec bits, stranding the edited file under its `.aura-restore-*` name.
+* Snapshots: `delete()` removes the record's lock file with the record.
+
+= 2.17.1 =
+* Snapshots: `create_file()` publishes without `link()`. Most managed hosts put `link()` in `disable_functions` for web PHP (Cloudways does), and 2.17.0 refused every new-file create there (`unsupported_filesystem`). Without `link()` the target is now claimed with an exclusive create — it refuses an existing path and returns an inode this call owns — and the bytes are written into that handle; ownership is checked by inode after the write, so nothing that took the path meanwhile is ever overwritten. What this mode gives up is the empty-to-complete jump: a reader in the milliseconds of the write can see the file grow. A short write leaves the entry empty, never truncated content. Restoring a created file that was edited since puts it back the same way instead of leaving it aside under its `.aura-restore-*` name. A publish interrupted mid-write is reconciled by the stage sweep: the record is voided and marked `interrupted`, the file is never deleted by a restore. `create_file()` answers `published: link | write`.
+* `audit_agent_code`: `power_pack.create_publish` says how a create lands on this host (`link` or `write`).
+
+= 2.17.0 =
+* New read-only tool `audit_agent_code`: executable code an AI agent authored or can author on this site — Angie code snippets (recorded, agent-authored, and which are live in the environment the loader includes, correlated per snippet directory in both environments), the SiteAgent Power Pack's execute-php / file-write / wp-cli flags, and third-party exec stores (EMCP Pro sandbox, Atarim exec abilities). Counts and presence only; never file contents, never a verdict. Bounded (200 directory entries per environment, `coverage.truncated`), `null` for anything unreadable, `{ error }` per subtree.
+* Snapshots: `create_file()` creates a NEW file with the engine owning the whole create — staged beside the target under a non-PHP name, recorded, then published with `link()` (atomic, no-clobber) — so no target ever exists without its record and no partial content is ever visible. Restoring the record claims the path with an atomic rename, verifies the claimed file, and removes it only while its bytes still match; a file edited since is put back and refused (`file_changed_since`), never deleted. The Power Pack's `write_file` adopts it in 0.2.4.
+* Tool metadata lists an empty parameter map as `{}` rather than `[]` (SA#83).
+* Generic SiteAgent mutations (batch entry, generic single update, generic rollback) renew the self-update lease between phases and heartbeat it from inside the upgrader's own sub-phases, so a slow download, unpack or install is never seized as stale, and a lost lease stops the entry rather than racing its successor (SA#80).
+* Every Aura-driven mutation of SiteAgent's own files — self-update, generic single update, the batch entry, the guarded rollback — refuses on a multisite network with `aura_self_update_multisite_unsupported`: the update lock is per site while the plugin directory is shared (SA#79). Other plugins are unaffected.
+* A rule-blocked call now says to scope the rule out of the site with `sites`, or release it.
+
+= 2.16.2 =
+* `/status`'s door fragment carries `observation`, a per-site door-version witness bumped atomically by every door-state mutation (never by a mere poll) and clock-floored so a restored backup can never reissue a value it already served, so Aura can order overlapping polls by the site's own witness instead of request timestamps; `elementor.governor` reports the current value. The observation witness requires InnoDB for wp_options and 64-bit PHP; without them ordering falls back to Aura's own request order for that site (`elementor.governor` reports why via `observation_unsupported`: `engine` or `php32`).
+* `/status` also accepts `door_observation_seen` — Aura's own last accepted observation, echoed back — so the site can bump its witness forward, clock-floored, when a restore rewound its own copy behind Aura's. Accepted for ANY non-negative integer the site's own witness could ever report (no magnitude ceiling — the witness only counts up); honoured only within a fixed headroom below the class ceiling, silently ignored (200, no bump, no error) above it.
+* `elementor.governor` reports `counters_as_of` beside the four `_30d` rolling counters, which `observation` does not cover; the counters themselves are `int|null`.
+* `interrupted` / `running` / `held` are `null`, not `[]`, when their own queue could not be read, and `observation` is withheld entirely whenever any read behind the fragment was unreadable.
+* New `door_write_unsupported` reason `reconnect_guard_unavailable`: a governed write refuses outright on a `$wpdb` replacement that cannot disable reconnects, rather than risk a mutation replaying on a session this plugin no longer controls.
+* Door writes report a `committed` tri-state (`true` / `false` / unknown) and answer a retryable 503 with `may_have_run: true` whenever a commit cannot be proven — claims, holds, acks, and rotations alike; `replay()` now forwards `claim()`'s own error instead of a generic one.
+* Hold references and pending log-row reservations are derived from the request's own identity, so a retry after an ambiguous commit finds and reuses its own prior write instead of risking a duplicate.
+
+= 2.16.1 =
+* `/status` door fragment and `audit_mcp_exposure`'s `elementor.governor` carry `binding`, the site's current binding generation, so Aura can label a departed client's door-log entries without inferring the generation from the rows.
+
+= 2.16.0 =
+* Elementor MCP door governance: every write through Elementor >= 4.3's official MCP server is held for approval in Aura unless an operator `allow` rule covers it; `block` refuses; every write that runs is snapshotted first on the site and recorded in a per-site door log Aura drains. New tools `elementor_replay_ability`, `snapshot_get`; new routes `/aura/v1/door/reject`, `/aura/v1/door/ack`; `/status` carries `door`; `audit_mcp_exposure` carries `elementor.governor`. Rules gain the `allow` effect and the `design_system` / `page_create` targets.
+
+= 2.15.0 =
+* audit_mcp_exposure reports an `elementor` block: Elementor >= 4.3's official MCP module state, every `elementor_mcp_consent` row, every `Elementor MCP…` Application Password across all users (full detail), and the other Application Passwords of edit_posts users as counts. Every list is bounded (50 / 50 / 200) with a truncation flag beside it; no usermeta value over 256 KB is decoded; a scan that fails is reported as `{ error }` in its place, never as an empty list. Read-only.
+* aura_worker_app_password_list() accepts an optional byte bound, enforced in the same statement that returns the value.
+
 = 2.14.0 =
 * Feature: **a self-update can now undo itself.** Before installing, SiteAgent
   archives its current build — best-effort: a site without ZipArchive or with
