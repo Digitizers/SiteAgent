@@ -264,19 +264,32 @@ class Aura_Worker_Magic_Link {
 			10 * MINUTE_IN_SECONDS
 		);
 
+		// Aura#782: prove the binding this site holds NOW, at mint, not only in
+		// the /connect answer. A site that moved to a new domain looks brand
+		// new to Aura until the proof arrives, and Aura decides the client and
+		// the plan limit before it sends /connect: an organization at its site
+		// cap was refused before the proof could reach it. Same proof as the
+		// connect's (same hash, same magic id), kept per magic link, so the
+		// connect answer carries this exact value.
+		$mint = array(
+			'magic_id'       => $magic_id,
+			'site_url'       => $site_url,
+			'site_name'      => $site_name,
+			'connect_secret' => $connect_secret,
+		);
+		$current_hash = Aura_Worker_Rules::site_token_uncached();
+		if ( is_string( $current_hash ) && '' !== $current_hash ) {
+			$mint_proof = self::previous_binding_proof( $magic_id, $current_hash );
+			set_transient( 'aura_magic_proof_' . $magic_id, $mint_proof, 15 * MINUTE_IN_SECONDS );
+			$mint['previous_binding_proof'] = $mint_proof;
+		}
+
 		// Notify the Aura dashboard so it can pre-populate the onboarding flow.
 		$response = wp_remote_post(
 			$dashboard_url . '/api/onboarding/magic-link',
 			array(
 				'headers' => array( 'Content-Type' => 'application/json' ),
-				'body'    => wp_json_encode(
-					array(
-						'magic_id'       => $magic_id,
-						'site_url'       => $site_url,
-						'site_name'      => $site_name,
-						'connect_secret' => $connect_secret,
-					)
-				),
+				'body'    => wp_json_encode( $mint ),
 				'timeout' => 15,
 			)
 		);

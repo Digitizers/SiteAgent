@@ -4814,6 +4814,28 @@ if ( ! function_exists( 'wp_remote_get' ) ) {
 	}
 }
 
+if ( ! function_exists( 'wp_remote_post' ) ) {
+	/**
+	 * Recording HTTP stub, the POST twin of wp_remote_get: records the request
+	 * in $GLOBALS['_wp_http_calls'] and answers $GLOBALS['_http_response'], or a
+	 * WP_Error when $GLOBALS['_http_error'] is set.
+	 */
+	function wp_remote_post( string $url, array $args = array() ) {
+		$GLOBALS['_wp_http_calls'][] = array(
+			'url'    => $url,
+			'args'   => $args,
+			'method' => 'POST',
+		);
+		if ( ! empty( $GLOBALS['_http_error'] ) ) {
+			return new WP_Error( 'http_request_failed', 'stubbed failure' );
+		}
+		return $GLOBALS['_http_response'] ?? array(
+			'response' => array( 'code' => 200 ),
+			'body'     => '',
+		);
+	}
+}
+
 if ( ! function_exists( 'wp_remote_retrieve_response_code' ) ) {
 	function wp_remote_retrieve_response_code( $response ) {
 		if ( is_array( $response ) && isset( $response['response']['code'] ) ) {

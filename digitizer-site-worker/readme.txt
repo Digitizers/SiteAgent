@@ -4,7 +4,7 @@ Tags: ai, automation, maintenance, updates, wordpress management
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.25.0
+Stable tag: 2.26.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -253,6 +253,9 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 7. Connections: provider connections (Cloudways, Cloudflare, Bunny, Hostinger, Vultr, xCloud) with resource counts, status, and credential-rotation reminders.
 
 == Changelog ==
+
+= 2.26.0 =
+* New: that proof is now also sent when the connection link is created, so Aura recognizes a moved site before it checks the plan's site limit. An organization at its limit can reconnect a site that moved to a new domain.
 
 = 2.25.0 =
 * New: a site that reconnects to Aura after moving to a new domain now proves it held its previous connection, so Aura can keep the same site record (its history and settings) instead of creating a second one. The proof is a one-way signature; no token or token hash is sent.
