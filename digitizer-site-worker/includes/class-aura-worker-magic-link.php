@@ -553,6 +553,18 @@ class Aura_Worker_Magic_Link {
 			}
 		}
 		$token_hash = Aura_Worker_Security::hash_token( $token );
+		// Aura#780: proof that this site held the PREVIOUS binding's token,
+		// read before the write below replaces it. A site that moved to a new
+		// domain reconnects by magic link, and Aura, matching by address,
+		// made a second Resource; with this proof Aura can find the existing
+		// connection instead. The site keeps only sha256(token) and Aura
+		// keeps the same hash, so the proof is an HMAC keyed by that hash over
+		// this magic link's id. Neither the token nor its hash is sent. A
+		// first connect, or a retry installing the same token, carries none.
+		$previous_hash = Aura_Worker_Rules::site_token_uncached();
+		$previous_proof = ( is_string( $previous_hash ) && '' !== $previous_hash && ! hash_equals( $previous_hash, $token_hash ) )
+			? self::previous_binding_proof( $magic_id, $previous_hash )
+			: null;
 		// The token is the ONE write whose loss the dashboard cannot see: a
 		// handler resuming after its claim was released could otherwise
 		// overwrite the winner's token AFTER the winner answered 200, leaving
@@ -792,6 +804,9 @@ class Aura_Worker_Magic_Link {
 		// record not persisting — which revokes its own fresh password inside
 		// mint) leaves nothing dangerous and completes token-only.
 		$body = array( 'success' => true );
+		if ( null !== $previous_proof ) {
+			$body['previous_binding_proof'] = $previous_proof;
+		}
 		if ( ! self::holds_site_claim( $site_fence ) ) {
 			$release();
 			return new WP_REST_Response( array( 'error' => 'This connect lost the site to another install; retry.', 'code' => 'aura_connect_lost_claim' ), 409 );
@@ -2254,6 +2269,19 @@ class Aura_Worker_Magic_Link {
 		$intents = ( is_array( $left ) && isset( $left['intents'] ) && is_array( $left['intents'] ) ) ? $left['intents'] : array();
 		self::write_password_record( array() === $intents ? array() : array( 'intents' => $intents ), $fence );
 		return true;
+	}
+
+	/**
+	 * Proof of the previous binding's token for Aura#780: HMAC-SHA256 keyed
+	 * by that token's stored sha256, over a fixed label and the magic link's
+	 * id. Aura recomputes it from its own siteTokenHash.
+	 *
+	 * @param string $magic_id      This connect's magic link id.
+	 * @param string $previous_hash sha256 hex of the previous token.
+	 * @return string
+	 */
+	public static function previous_binding_proof( $magic_id, $previous_hash ) {
+		return hash_hmac( 'sha256', "aura-repoint-v1\n" . (string) $magic_id, (string) $previous_hash );
 	}
 
 	/**

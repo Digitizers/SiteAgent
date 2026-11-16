@@ -63,6 +63,41 @@ final class ConnectProvisionTest extends TestCase {
 		return $req;
 	}
 
+	/**
+	 * Aura#780: a site that moved to a new domain reconnects by magic link,
+	 * and Aura matches connections by address, so it made a second Resource.
+	 * The site now proves it holds the PREVIOUS binding's token. It stores
+	 * only sha256(token), and Aura stores the same hash, so the proof is an
+	 * HMAC keyed by that hash over this magic link's id. The token never
+	 * leaves either side.
+	 */
+	public function test_a_connect_over_a_previous_token_returns_proof_of_it(): void {
+		$previous = hash( 'sha256', 'old-raw-token' );
+		update_option( 'aura_worker_site_token', $previous );
+
+		$res = $this->ml->handle_connect( $this->request() );
+
+		$this->assertSame( 200, $res->get_status() );
+		$this->assertSame(
+			hash_hmac( 'sha256', "aura-repoint-v1\n" . $this->magic_id, $previous ),
+			$res->get_data()['previous_binding_proof'] ?? null
+		);
+		$this->assertStringNotContainsString( $previous, wp_json_encode( $res->get_data() ), 'the hash itself is never sent' );
+	}
+
+	public function test_a_first_connect_carries_no_proof(): void {
+		$res = $this->ml->handle_connect( $this->request() );
+		$this->assertSame( 200, $res->get_status() );
+		$this->assertArrayNotHasKey( 'previous_binding_proof', $res->get_data() );
+	}
+
+	public function test_a_retried_connect_with_the_same_token_carries_no_proof(): void {
+		update_option( 'aura_worker_site_token', hash( 'sha256', 'raw-token' ) ); // the token this connect installs
+		$res = $this->ml->handle_connect( $this->request() );
+		$this->assertSame( 200, $res->get_status() );
+		$this->assertArrayNotHasKey( 'previous_binding_proof', $res->get_data() );
+	}
+
 	public function test_provisions_pubkey_on_signed_connect(): void {
 		$res = $this->ml->handle_connect( $this->request() );
 		$this->assertSame( 200, $res->get_status() );
