@@ -85,6 +85,32 @@ final class ConnectProvisionTest extends TestCase {
 		$this->assertStringNotContainsString( $previous, wp_json_encode( $res->get_data() ), 'the hash itself is never sent' );
 	}
 
+	/**
+	 * Codex r1 on #165: a connect that fails AFTER the token write is
+	 * retried with the same signed callback; by then the stored hash is the
+	 * new token's. The proof is kept per magic link, so the retry still
+	 * carries it.
+	 */
+	public function test_the_proof_survives_a_retryable_failure_after_the_token_write(): void {
+		$previous = hash( 'sha256', 'old-raw-token' );
+		update_option( 'aura_worker_site_token', $previous );
+		$req = $this->request( array( 'grant_pubkey' => base64_encode( str_repeat( 'k', 32 ) ), 'client' => 'c1' ) );
+
+		$GLOBALS['_sa_option_write_fail'] = array( 'aura_worker_grant_pubkey' => true );
+		$first = $this->ml->handle_connect( $req );
+		$GLOBALS['_sa_option_write_fail'] = array();
+		$this->assertSame( 500, $first->get_status() );
+		$this->assertSame( hash( 'sha256', 'raw-token' ), get_option( 'aura_worker_site_token' ), 'the token write landed before the failure' );
+
+		$second = $this->ml->handle_connect( $req );
+		$this->assertSame( 200, $second->get_status() );
+		$this->assertSame(
+			Aura_Worker_Magic_Link::previous_binding_proof( $this->magic_id, $previous ),
+			$second->get_data()['previous_binding_proof'] ?? null
+		);
+		$this->assertFalse( get_transient( 'aura_magic_proof_' . $this->magic_id ), 'consumed with the link' );
+	}
+
 	public function test_a_first_connect_carries_no_proof(): void {
 		$res = $this->ml->handle_connect( $this->request() );
 		$this->assertSame( 200, $res->get_status() );
