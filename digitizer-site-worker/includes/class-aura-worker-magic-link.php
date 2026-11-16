@@ -283,6 +283,7 @@ class Aura_Worker_Magic_Link {
 
 		if ( is_wp_error( $response ) ) {
 			delete_transient( 'aura_magic_' . $magic_id );
+			delete_transient( 'aura_magic_proof_' . $magic_id );
 			wp_send_json_error(
 				array( 'message' => sprintf(
 					/* translators: %s: error message */
@@ -298,6 +299,7 @@ class Aura_Worker_Magic_Link {
 
 		if ( $code < 200 || $code >= 300 || empty( $body['magic_link'] ) ) {
 			delete_transient( 'aura_magic_' . $magic_id );
+			delete_transient( 'aura_magic_proof_' . $magic_id );
 			wp_send_json_error(
 				array( 'message' => __( 'Aura dashboard did not return a magic link. Please try again.', 'digitizer-site-worker' ) ),
 				502
@@ -553,6 +555,30 @@ class Aura_Worker_Magic_Link {
 			}
 		}
 		$token_hash = Aura_Worker_Security::hash_token( $token );
+		// Aura#780: proof that this site held the PREVIOUS binding's token,
+		// read before the write below replaces it. A site that moved to a new
+		// domain reconnects by magic link, and Aura, matching by address,
+		// made a second Resource; with this proof Aura can find the existing
+		// connection instead. The site keeps only sha256(token) and Aura
+		// keeps the same hash, so the proof is an HMAC keyed by that hash over
+		// this magic link's id. Neither the token nor its hash is sent. A
+		// first connect, or a retry installing the same token, carries none.
+		// Kept per magic link (Codex r1 on #165): a connect that fails AFTER
+		// the token write below is retried with the same signed callback, and
+		// by then the stored hash is this connect's own, so the proof is
+		// computed once and carried until the link is consumed.
+		$kept_proof = get_transient( 'aura_magic_proof_' . $magic_id );
+		if ( is_string( $kept_proof ) && 1 === preg_match( '/^[0-9a-f]{64}$/', $kept_proof ) ) {
+			$previous_proof = $kept_proof;
+		} else {
+			$previous_hash  = Aura_Worker_Rules::site_token_uncached();
+			$previous_proof = ( is_string( $previous_hash ) && '' !== $previous_hash && ! hash_equals( $previous_hash, $token_hash ) )
+				? self::previous_binding_proof( $magic_id, $previous_hash )
+				: null;
+			if ( null !== $previous_proof ) {
+				set_transient( 'aura_magic_proof_' . $magic_id, $previous_proof, 15 * MINUTE_IN_SECONDS );
+			}
+		}
 		// The token is the ONE write whose loss the dashboard cannot see: a
 		// handler resuming after its claim was released could otherwise
 		// overwrite the winner's token AFTER the winner answered 200, leaving
@@ -599,6 +625,7 @@ class Aura_Worker_Magic_Link {
 			// delete. Minting beside it would add a second live administrator
 			// credential, so the link is consumed and the operator is told.
 			delete_transient( 'aura_magic_' . $magic_id );
+			delete_transient( 'aura_magic_proof_' . $magic_id );
 			$release();
 			return new WP_REST_Response( array( 'error' => 'This site records half an Aura Application Password, so another cannot be minted beside it; revoke it by hand in Users → Profile → Application Passwords and delete the aura_worker_app_password option.', 'code' => 'app_password_tracking_incomplete' ), 500 );
 		}
@@ -610,6 +637,7 @@ class Aura_Worker_Magic_Link {
 			$anything = get_option( self::APP_PASSWORD_RECORD_OPTION, null );
 			if ( null === $anything || false === $anything || '' === $anything ) {
 				delete_transient( 'aura_magic_' . $magic_id );
+				delete_transient( 'aura_magic_proof_' . $magic_id );
 				// translators: internal log line, not shown to the user.
 				error_log( 'SiteAgent: a previous Aura Application Password could be neither revoked nor recorded; revoke it by hand in Users → Profile → Application Passwords.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 				return new WP_REST_Response( array( 'error' => 'A previous Application Password could be neither revoked nor recorded; revoke it by hand in Users → Profile → Application Passwords.', 'code' => 'app_password_orphan_untracked' ), 500 );
@@ -792,6 +820,9 @@ class Aura_Worker_Magic_Link {
 		// record not persisting — which revokes its own fresh password inside
 		// mint) leaves nothing dangerous and completes token-only.
 		$body = array( 'success' => true );
+		if ( null !== $previous_proof ) {
+			$body['previous_binding_proof'] = $previous_proof;
+		}
 		if ( ! self::holds_site_claim( $site_fence ) ) {
 			$release();
 			return new WP_REST_Response( array( 'error' => 'This connect lost the site to another install; retry.', 'code' => 'aura_connect_lost_claim' ), 409 );
@@ -804,6 +835,7 @@ class Aura_Worker_Magic_Link {
 			// link is consumed here precisely to stop that, and the operator is
 			// told what to revoke by hand.
 			delete_transient( 'aura_magic_' . $magic_id );
+			delete_transient( 'aura_magic_proof_' . $magic_id );
 			$release();
 			// translators: internal log line, not shown to the user.
 			error_log( 'SiteAgent: an Aura Application Password could be neither recorded nor revoked; revoke it by hand in Users → Profile → Application Passwords.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
@@ -832,6 +864,7 @@ class Aura_Worker_Magic_Link {
 				// revoke by hand rather than being told nothing.
 				if ( ! self::managed_password_gone( $creator, $minted['uuid'] ) ) {
 					delete_transient( 'aura_magic_' . $magic_id );
+					delete_transient( 'aura_magic_proof_' . $magic_id );
 					$release();
 					// translators: internal log line, not shown to the user.
 					error_log( 'SiteAgent: an Aura Application Password minted by a superseded connect could not be revoked; revoke it by hand in Users → Profile → Application Passwords.' ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
@@ -970,6 +1003,7 @@ class Aura_Worker_Magic_Link {
 		// the link alive for a retry that would simply reconnect an already
 		// bound, already unmarked site.
 		delete_transient( 'aura_magic_' . $magic_id );
+		delete_transient( 'aura_magic_proof_' . $magic_id );
 		// Released only NOW (round-3): the site-wide claim exists to make token
 		// and password one handler's; released before the mint, a paused
 		// handler could resume and rotate away the password the winner just
@@ -2254,6 +2288,19 @@ class Aura_Worker_Magic_Link {
 		$intents = ( is_array( $left ) && isset( $left['intents'] ) && is_array( $left['intents'] ) ) ? $left['intents'] : array();
 		self::write_password_record( array() === $intents ? array() : array( 'intents' => $intents ), $fence );
 		return true;
+	}
+
+	/**
+	 * Proof of the previous binding's token for Aura#780: HMAC-SHA256 keyed
+	 * by that token's stored sha256, over a fixed label and the magic link's
+	 * id. Aura recomputes it from its own siteTokenHash.
+	 *
+	 * @param string $magic_id      This connect's magic link id.
+	 * @param string $previous_hash sha256 hex of the previous token.
+	 * @return string
+	 */
+	public static function previous_binding_proof( $magic_id, $previous_hash ) {
+		return hash_hmac( 'sha256', "aura-repoint-v1\n" . (string) $magic_id, (string) $previous_hash );
 	}
 
 	/**

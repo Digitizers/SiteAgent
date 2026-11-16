@@ -4,7 +4,7 @@ Tags: ai, automation, maintenance, updates, wordpress management
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.24.4
+Stable tag: 2.25.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -253,6 +253,9 @@ Yes. SiteAgent is open source under the GPLv2 or later license. The source code 
 7. Connections: provider connections (Cloudways, Cloudflare, Bunny, Hostinger, Vultr, xCloud) with resource counts, status, and credential-rotation reminders.
 
 == Changelog ==
+
+= 2.25.0 =
+* New: a site that reconnects to Aura after moving to a new domain now proves it held its previous connection, so Aura can keep the same site record (its history and settings) instead of creating a second one. The proof is a one-way signature; no token or token hash is sent.
 
 = 2.24.4 =
 * Elementor 4.4.0: five of its new read tools (find-icons, get-license-status, get-system-info, list-experiments, and get-widget-schemas, the new name of get-widget-schema) are no longer refused by SiteAgent's Elementor governor. Each was checked to change nothing. Elementor 4.4.0's new write tools stay refused until they are reviewed, and so do its Pro-discovery tools, because Elementor Pro registers real tools under the same names.
