@@ -83,9 +83,18 @@ class Aura_Worker_Elementor_Door {
 	const PAGE_META_KEYS = array( '_elementor_data', '_elementor_page_settings', '_elementor_css' );
 
 	/**
-	 * The ONLY exemption from the wrapper. Sixteen names: nine read tools and
-	 * seven resources (R5). Annotations are not evidence — five current writes
-	 * declare destructive => false.
+	 * The ONLY exemption from the wrapper. Twenty-one names: nine read tools
+	 * and seven resources (R5), plus five Elementor 4.4.0 read tools (SA#163).
+	 * Annotations are not evidence — five current writes declare
+	 * destructive => false — so each 4.4.0 name was read in the wordpress.org
+	 * 4.4.0 build: no option, meta or post write in its execute(), and not in
+	 * Site_Flag's map.
+	 *
+	 * Deliberately NOT here: `manage-form-submissions`, `manage-site-parts`
+	 * and `manage-woocommerce-settings`. In free Elementor they are read-only
+	 * Pro-discovery stubs, but module.php registers them only when Pro is
+	 * absent — Pro registers its own tools under the same names, and an
+	 * exemption is by name. They stay governed (refused as unmapped).
 	 */
 	const READ_ALLOWLIST = array(
 		'elementor/get-default-styles',
@@ -104,6 +113,12 @@ class Aura_Worker_Elementor_Door {
 		'elementor/style-best-practices',
 		'elementor/wordpress-best-practices',
 		'elementor/list-dynamic-tags',
+		// Elementor 4.4.0 (SA#163).
+		'elementor/find-icons',
+		'elementor/get-license-status',
+		'elementor/get-system-info',
+		'elementor/get-widget-schemas',
+		'elementor/list-experiments',
 	);
 
 	/**

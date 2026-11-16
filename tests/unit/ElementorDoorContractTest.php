@@ -17,17 +17,45 @@ final class ElementorDoorContractTest extends TestCase {
 		require_once dirname( __DIR__, 2 ) . '/digitizer-site-worker/includes/class-elementor-door-governor.php';
 	}
 
-	public function test_the_27_ability_ids_are_partitioned_into_16_reads_and_11_writes(): void {
+	public function test_the_32_ability_ids_are_partitioned_into_21_reads_and_11_writes(): void {
 		$reads  = Aura_Worker_Elementor_Door::READ_ALLOWLIST;
 		$writes = array_keys( Aura_Worker_Elementor_Door::WRITE_TABLE );
-		$this->assertCount( 16, $reads );
+		$this->assertCount( 21, $reads );
 		$this->assertCount( 11, $writes );
 		$this->assertSame( array(), array_intersect( $reads, $writes ), 'a slug cannot be both' );
 		$all = array_merge( $reads, $writes );
 		sort( $all );
-		$this->assertSame( 27, count( array_unique( $all ) ) );
+		$this->assertSame( 32, count( array_unique( $all ) ) );
 		foreach ( $all as $slug ) {
 			$this->assertMatchesRegularExpression( '#^elementor/[a-z0-9-]+$#', $slug );
+		}
+	}
+
+	/**
+	 * SA#163: Elementor 4.4.0's read tools, each read from the wordpress.org
+	 * 4.4.0 build (references#80) before it was exempted: readonly in its
+	 * definition, no option/meta/post write in its execute(), and absent from
+	 * Site_Flag's map (so running it marks nothing). get-widget-schemas is
+	 * 4.4.0's name for get-widget-schema, which stays for older builds.
+	 * The `manage-*` Pro-discovery stubs are read-only only while Pro is
+	 * absent, so they are asserted to stay governed.
+	 */
+	public function test_elementor_4_4_read_tools_are_exempt(): void {
+		foreach ( array(
+			'elementor/find-icons',
+			'elementor/get-license-status',
+			'elementor/get-system-info',
+			'elementor/get-widget-schemas',
+			'elementor/get-widget-schema',
+			'elementor/list-experiments',
+		) as $slug ) {
+			$this->assertContains( $slug, Aura_Worker_Elementor_Door::READ_ALLOWLIST, $slug );
+		}
+		// 4.4.0's new writes stay governed (refused as unmapped until mapped),
+		// and so do the Pro-discovery stubs: Pro registers real tools under the
+		// same names, and the exemption is by name.
+		foreach ( array( 'elementor/manage-form-submissions', 'elementor/manage-site-parts', 'elementor/manage-woocommerce-settings', 'elementor/manage-revisions', 'elementor/manage-experiments', 'elementor/clear-cache', 'elementor/upload-media', 'elementor/request-media-upload', 'elementor/enable-agent-ready', 'elementor/agent-ready-scan', 'elementor/enable-elementor-abilities' ) as $slug ) {
+			$this->assertNotContains( $slug, Aura_Worker_Elementor_Door::READ_ALLOWLIST, $slug );
 		}
 	}
 
