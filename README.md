@@ -26,6 +26,8 @@
 
 SiteAgent is the official remote management agent for the [Aura Infrastructure Hub](https://my-aura.app). It connects your WordPress sites to your Aura dashboard for seamless remote management, monitoring, and updates from a single centralized interface.
 
+**→ Prefer to have it done for you?** [Digitizer](https://www.digitizer.studio/aura-siteagent-ops-layer/), the team behind these tools, sets it up and runs it for your sites.
+
 ---
 
 ## Features
